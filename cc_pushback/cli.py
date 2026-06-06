@@ -58,7 +58,10 @@ def tally(counts: dict[str, int]) -> str:
 @click.group()
 @click.version_option(package_name="cc-pushback")
 def main() -> None:
-    """Learn your pushback style from past Claude Code feedback and code reviews, and replicate it with a language model."""
+    """Learn your pushback style from past Claude Code feedback and code reviews.
+
+    Replicate it with a language model.
+    """
 
 
 @main.command()
