@@ -55,6 +55,8 @@ def pushback_user_events(events: Sequence[TranscriptEvent]) -> Iterator[tuple[in
         if isinstance(event, UserEvent)
         if not event.meta.is_sidechain
         if not event.meta.is_meta
+        if not event.meta.is_compact_summary
+        if not event.meta.is_visible_in_transcript_only
         if event.text.strip()
         if not MESSAGE_JUNK_RE.search(event.text)
     )

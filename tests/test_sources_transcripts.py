@@ -77,3 +77,17 @@ def test_review_comments_explode_superset_inline_message() -> None:
 
 def test_review_comments_skip_plain_messages() -> None:
     assert review_candidates([user_text("don't add a fallback, crash instead")]) == []
+
+
+def test_drops_compact_continuation_summaries() -> None:
+    entry = user_text(
+        "This session is being continued from a previous conversation that ran out of context.",
+        isCompactSummary=True,
+        isVisibleInTranscriptOnly=True,
+    )
+
+    assert candidates([entry]) == []
+
+
+def test_drops_teammate_messages() -> None:
+    assert candidates([user_text('<teammate-message teammate_id="be-events">done</teammate-message>')]) == []

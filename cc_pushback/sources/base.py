@@ -37,6 +37,7 @@ MESSAGE_JUNK_RE = re.compile(
     r"|local-command-(?:stdout|caveat)"
     r"|command-(?:name|message|args)"
     r"|task-notification"
+    r"|teammate-message"
     r"|scheduled-task"
     r"|persisted-output"
     r"|output-file)\b"
