@@ -120,7 +120,7 @@ PATTERNS: tuple[Pattern, ...] = (
             rx(
                 r"match the (?:surrounding|existing|rest)",
                 r"follow the (?:\w+ )?(?:convention|pattern|style)",
-                r"(?:like|same as) the (?:other|rest|existing)",
+                r"(?:like|same as) the (?:other|rest|existing) (?:code|file|function|module|method|class|test)s?",
                 r"be consistent with",
                 r"this isn'?t how (?:we|the)",
             )
@@ -158,7 +158,8 @@ PATTERNS: tuple[Pattern, ...] = (
         ),
         matcher=RegexMatcher(
             rx(
-                r"verbatim",
+                r"(?:quote|reproduce|copy|keep|paste|include)[^.]{0,25}verbatim",
+                r"verbatim,? (?:please|don|do not|not)",
                 r"don'?t paraphrase",
                 r"quote (?:me|it|exactly|my|the comment)",
                 r"my exact words",
