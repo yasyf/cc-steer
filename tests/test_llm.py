@@ -88,7 +88,7 @@ class Label(BaseModel):
                 "",
                 "--strict-mcp-config",
             ],
-            {"CLAUDE_CODE_SIMPLE": "1"},
+            {},
             id="claude-no-schema",
         ),
         pytest.param(
@@ -111,7 +111,7 @@ class Label(BaseModel):
                 "--output-format",
                 "json",
             ],
-            {"CLAUDE_CODE_SIMPLE": "1"},
+            {},
             id="claude-with-schema",
         ),
     ],
@@ -144,6 +144,20 @@ def test_claude_parse_response_json_object_falls_back_to_validate_json() -> None
     raw = json.dumps({"severity": "minor", "rule": "ask first"})
 
     assert ClaudeBackend().parse_response(raw, Label) == Label(severity="minor", rule="ask first")
+
+
+def test_claude_parse_response_result_object_with_structured_output() -> None:
+    raw = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "prose summary",
+            "structured_output": {"severity": "major", "rule": "crash instead"},
+        }
+    )
+
+    assert ClaudeBackend().parse_response(raw, Label) == Label(severity="major", rule="crash instead")
 
 
 def test_claude_parse_response_stream_without_structured_output_raises() -> None:

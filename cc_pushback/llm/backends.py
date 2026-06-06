@@ -110,11 +110,14 @@ class ClaudeBackend(LlmBackend):
     def parse_response(self, raw: str, response_model: type[BaseModel] | None) -> str | BaseModel:
         if not response_model:
             return raw
-        match json.loads(raw):
-            case [*events] if events:
+        data = cast(object, json.loads(raw))
+        match data:
+            case list() if data:
                 return self.extract_structured(
-                    cast(list[dict[str, object]], events), response_model
+                    cast(list[dict[str, object]], data), response_model
                 ) or response_model.model_validate_json(raw)
+            case {"structured_output": object() as payload}:
+                return response_model.model_validate(payload)
             case _:
                 return response_model.model_validate_json(raw)
 
@@ -130,4 +133,7 @@ class ClaudeBackend(LlmBackend):
         )
 
     def env(self) -> dict[str, str]:
-        return {"CLAUDE_CODE_SIMPLE": "1"}
+        # Deliberate divergence from captain-hook: CLAUDE_CODE_SIMPLE=1 selects
+        # API-key auth and reports "Not logged in" without ANTHROPIC_API_KEY,
+        # but classify runs interactively where OAuth session auth is the norm.
+        return {}
