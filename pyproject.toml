@@ -15,11 +15,16 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Typing :: Typed",
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
+    "cc-transcript>=0.1",
     "click>=8",
     "loguru>=0.7",
+    "pydantic>=2.7",
 ]
+
+[tool.uv.sources]
+cc-transcript = { path = "../cc-transcript", editable = true }
 
 [project.optional-dependencies]
 dev = [
@@ -55,7 +60,7 @@ markers = [
 ]
 
 [tool.pyright]
-pythonVersion = "3.12"
+pythonVersion = "3.13"
 typeCheckingMode = "strict"
 include = ["cc_pushback"]
 venvPath = "."
@@ -63,7 +68,7 @@ venv = ".venv"
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py313"
 src = [".", "tests"]
 
 [tool.ruff.lint]
