@@ -91,3 +91,7 @@ def test_drops_compact_continuation_summaries() -> None:
 
 def test_drops_teammate_messages() -> None:
     assert candidates([user_text('<teammate-message teammate_id="be-events">done</teammate-message>')]) == []
+
+
+def test_drops_third_party_agent_prompts() -> None:
+    assert candidates([user_text("# Augment Agent\n\nYou are Augment Agent, an AI coding assistant.")]) == []
