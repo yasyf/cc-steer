@@ -27,6 +27,12 @@ def test_drops_command_message_junk() -> None:
     assert candidates([user_text("<command-message>run tests</command-message>")]) == []
 
 
+def test_drops_scheduled_task_automated_run() -> None:
+    assert (
+        candidates([user_text('<scheduled-task name="x" file="/s">\nautomated run\n</scheduled-task>')]) == []
+    )
+
+
 def test_drops_empty_user_text() -> None:
     assert candidates([user_text("   ")]) == []
 

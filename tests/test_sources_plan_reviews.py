@@ -67,3 +67,30 @@ def test_plan_reentry_does_not_fire_without_edit_cycle() -> None:
     )
 
     assert cands == []
+
+
+def test_plan_reentry_emits_once_per_user_message() -> None:
+    cands = candidates(
+        [
+            assistant_tool_use("e1", "Edit", {"file_path": "/a.py"}),
+            mode_entry("plan"),
+            mode_entry("plan"),
+            mode_entry("plan"),
+            user_text("rethink the data model before editing"),
+        ]
+    )
+
+    assert len(cands) == 1
+    assert cands[0].text == "rethink the data model before editing"
+
+
+def test_plan_reentry_skips_synthetic_skill_injection() -> None:
+    cands = candidates(
+        [
+            assistant_tool_use("e1", "Edit", {"file_path": "/a.py"}),
+            mode_entry("plan"),
+            user_text("Base directory for this skill: /tmp/skill\n# Bootstrap"),
+        ]
+    )
+
+    assert cands == []

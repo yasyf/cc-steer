@@ -6,7 +6,13 @@ from cc_transcript.models import AssistantEvent, ModeEvent, ToolResultBlock, Too
 
 from cc_pushback.context import build_snapshot
 from cc_pushback.models import FeedbackCandidate
-from cc_pushback.sources.base import DENIAL_PREFIX, USER_SAID_MARKER, USER_SAID_TRAILER, dedup_key
+from cc_pushback.sources.base import (
+    DENIAL_PREFIX,
+    MESSAGE_JUNK_RE,
+    USER_SAID_MARKER,
+    USER_SAID_TRAILER,
+    dedup_key,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -118,14 +124,18 @@ class PlanReviews:
     def plan_reentries(
         self, path: Path, events: Sequence[TranscriptEvent]
     ) -> Iterator[FeedbackCandidate]:
+        seen: set[str] = set()
         for index, event in enumerate(events):
             if not (isinstance(event, ModeEvent) and event.value == "plan"):
                 continue
             if (user := next_user_message(events, index)) is None:
                 continue
             user_index, user_event = user
+            if user_event.meta.uuid in seen or MESSAGE_JUNK_RE.search(user_event.text):
+                continue
             if (edit := last_edit_index(events, user_index)) is None:
                 continue
+            seen.add(user_event.meta.uuid)
             yield FeedbackCandidate(
                 dedup_key=dedup_key(str(path), user_event.meta.uuid, "plan_reentry", SOURCE_KIND),
                 source_kind=SOURCE_KIND,
