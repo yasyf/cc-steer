@@ -7,6 +7,7 @@ from cc_transcript.models import UserEvent
 from cc_transcript.parser import parse_events
 
 from cc_pushback.context import build_snapshot
+from cc_pushback.formats import extract_all
 from cc_pushback.models import FeedbackCandidate
 from cc_pushback.sources.base import MESSAGE_JUNK_RE, dedup_key
 
@@ -18,9 +19,10 @@ if TYPE_CHECKING:
 
     from cc_pushback.repo import Repository
 
-__all__ = ["TranscriptMessages", "changed_files"]
+__all__ = ["ReviewComments", "TranscriptMessages", "changed_files", "pushback_user_events"]
 
 SOURCE_KIND = "transcript_message"
+REVIEW_KIND = "review_comment"
 
 
 def changed_files(
@@ -46,6 +48,18 @@ def changed_files(
     )
 
 
+def pushback_user_events(events: Sequence[TranscriptEvent]) -> Iterator[tuple[int, UserEvent]]:
+    return (
+        (index, event)
+        for index, event in enumerate(events)
+        if isinstance(event, UserEvent)
+        if not event.meta.is_sidechain
+        if not event.meta.is_meta
+        if event.text.strip()
+        if not MESSAGE_JUNK_RE.search(event.text)
+    )
+
+
 class TranscriptMessages:
     """Extracts the user's typed messages from a transcript as candidates.
 
@@ -67,10 +81,38 @@ class TranscriptMessages:
                 origin_uuid=event.meta.uuid,
                 cc_version=event.meta.cc_version,
             )
-            for index, event in enumerate(events)
-            if isinstance(event, UserEvent)
-            if not event.meta.is_sidechain
-            if not event.meta.is_meta
-            if event.text.strip()
-            if not MESSAGE_JUNK_RE.search(event.text)
+            for index, event in pushback_user_events(events)
+        )
+
+
+class ReviewComments:
+    """Explodes review-formatted user messages into one candidate per comment.
+
+    A message matching a declared :class:`~cc_pushback.formats.ReviewFormat`
+    (superset inline cites, conductor findings or workstreams) yields one
+    ``review_comment`` candidate per extracted comment, alongside the whole
+    message's ``transcript_message`` row.
+    """
+
+    def candidates_for_file(self, path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:
+        return (
+            FeedbackCandidate(
+                dedup_key=dedup_key(str(path), event.meta.uuid, REVIEW_KIND, str(position)),
+                source_kind=REVIEW_KIND,
+                occurred_at=event.meta.timestamp,
+                text=comment.comment,
+                context=build_snapshot(events, index),
+                session_id=event.meta.session_id,
+                origin_path=path,
+                origin_uuid=event.meta.uuid,
+                cc_version=event.meta.cc_version,
+                payload={
+                    "format": fmt.name,
+                    "file": comment.file,
+                    "line_start": comment.line_start,
+                    "line_end": comment.line_end,
+                },
+            )
+            for index, event in pushback_user_events(events)
+            for position, (fmt, comment) in enumerate(extract_all(event.text))
         )

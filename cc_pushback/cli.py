@@ -20,6 +20,7 @@ from cc_pushback.sources import (
     GitHubReviews,
     Interrupts,
     PlanReviews,
+    ReviewComments,
     SupersetIssues,
     TranscriptMessages,
     changed_files,
@@ -43,6 +44,7 @@ TRANSCRIPT_SOURCES: dict[SourceKind, TranscriptSource] = {
     "transcript_message": TranscriptMessages(),
     "plan_review": PlanReviews(),
     "interrupt_rejection": Interrupts(),
+    "review_comment": ReviewComments(),
 }
 BACKENDS: dict[str, type[LlmBackend]] = {"claude": ClaudeBackend, "codex": CodexBackend}
 MODELS: tuple[TModel, ...] = get_args(TModel)

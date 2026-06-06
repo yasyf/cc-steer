@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from cc_pushback.models import FeedbackCandidate
-from cc_pushback.sources.transcripts import TranscriptMessages
+from cc_pushback.sources.transcripts import ReviewComments, TranscriptMessages
 from tests.builders import assistant_text, parse, user_text
 
 
@@ -50,3 +50,30 @@ def test_interrupt_marker_text_not_junk_filtered_here() -> None:
 
     assert len(cands) == 1
     assert "[Request interrupted by user]" in cands[0].text
+
+
+def review_candidates(entries: list[dict[str, object]]) -> list[FeedbackCandidate]:
+    return list(ReviewComments().candidates_for_file(Path("/t.jsonl"), parse(entries)))
+
+
+def test_review_comments_explode_superset_inline_message() -> None:
+    message = (
+        "In src/captain_hook/tools.py:L55: which is it? dont just guess\n"
+        "In src/captain_hook/tasks.py:L13: classvar"
+    )
+
+    cands = review_candidates([user_text(message), assistant_text("ok")])
+
+    assert [c.text for c in cands] == ["which is it? dont just guess", "classvar"]
+    assert all(c.source_kind == "review_comment" for c in cands)
+    assert cands[0].payload == {
+        "format": "superset-inline",
+        "file": "src/captain_hook/tools.py",
+        "line_start": 55,
+        "line_end": None,
+    }
+    assert len({c.dedup_key for c in cands}) == 2
+
+
+def test_review_comments_skip_plain_messages() -> None:
+    assert review_candidates([user_text("don't add a fallback, crash instead")]) == []
