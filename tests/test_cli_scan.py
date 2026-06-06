@@ -72,6 +72,22 @@ def test_source_filter_restricts_to_one_kind(tmp_path: Path) -> None:
     assert "interrupt_rejection" not in stats.output
 
 
+def test_github_only_scan_does_not_poison_transcript_ledger(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    write_transcript(projects / "a.jsonl", PUSHBACK)
+    db = tmp_path / "feedback.db"
+    runner = CliRunner()
+
+    scan(runner, projects, db, "--source", "github_review")
+    later = scan(runner, projects, db)
+
+    assert "transcripts=2" in later
+
+    stats = runner.invoke(main, ["stats", "--db", str(db)])
+    assert "transcript_message: 1" in stats.output
+
+
 def test_stats_and_list_report_ingested_rows(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     projects.mkdir()

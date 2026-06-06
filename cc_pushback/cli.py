@@ -109,10 +109,11 @@ def scan(
     """
     counts: dict[str, int] = {}
     with Repository.open(db or Repository.default_path()) as repo:
-        for path, mtime, events in changed_files(repo, transcripts or DEFAULT_TRANSCRIPTS):
-            counts["transcripts"] = counts.get("transcripts", 0) + repo.record_file_scan(
-                str(path), mtime, list(transcript_candidates(path, events, sources))
-            )
+        if any(wanted(kind, sources) for kind in TRANSCRIPT_SOURCES):
+            for path, mtime, events in changed_files(repo, transcripts or DEFAULT_TRANSCRIPTS):
+                counts["transcripts"] = counts.get("transcripts", 0) + repo.record_file_scan(
+                    str(path), mtime, list(transcript_candidates(path, events, sources))
+                )
 
         if wanted("superset_issue", sources):
             for path, mtime in changed_issue_files(repo, issues):
