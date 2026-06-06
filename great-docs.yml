@@ -1,0 +1,57 @@
+# Great Docs configuration — https://posit-dev.github.io/great-docs/
+# Build: uv run great-docs build · Preview: uv run great-docs preview
+
+module: cc_pushback
+display_name: cc-pushback
+parser: google
+dynamic: true
+repo: https://github.com/yasyf/cc-pushback
+site_url: "https://yasyf.github.io/cc-pushback/"
+pypi: true
+github_style: widget
+jupyter: python3
+
+navbar_style: lilac
+content_style: lilac
+accent_color:
+  light: "#e53935"
+  dark: "#ef5350"
+dark_mode_toggle: true
+back_to_top: true
+keyboard_nav: true
+
+hero:
+  name: cc-pushback
+  tagline: "Learn your pushback style from past Claude Code feedback and code reviews, and replicate it with a language model."
+  starfield: true
+
+# Narrative doc sections are optional — dynamic mode generates the API reference
+# from docstrings without them. Uncomment and point at docs/ dirs as they appear.
+# sections:
+#   - title: Getting Started
+#     dir: docs/getting-started
+#     index: true
+#   - title: Guide
+#     dir: docs/guide
+#     navbar_after: Getting Started
+#     index: true
+
+cli:
+  enabled: true
+  module: cc_pushback.cli
+  name: main
+
+authors:
+  - name: Yasyf Mohamedali
+    role: Maintainer
+    github: yasyf
+    email: yasyfm@gmail.com
+
+# Curated symbol reference (public API only). Optional — without it, dynamic
+# mode documents everything in cc_pushback.__all__.
+# reference:
+#   - title: Core
+#     desc: The main entry points.
+#     contents:
+#       - SomePublicClass
+#       - some_public_function
