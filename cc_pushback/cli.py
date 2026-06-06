@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
 import click
 
+from cc_pushback.classify import (
+    PROMPT_VERSION,
+    cheap_pass,
+    llm_pass,
+    unclassified_events,
+)
+from cc_pushback.llm import ClaudeBackend, CodexBackend, LlmBackend, TModel
 from cc_pushback.models import SourceKind
+from cc_pushback.patterns import TAXONOMY_VERSION
 from cc_pushback.repo import Repository
 from cc_pushback.sources import (
     GitHubReviews,
@@ -23,6 +32,7 @@ if TYPE_CHECKING:
     from cc_transcript.models import TranscriptEvent
 
     from cc_pushback.models import FeedbackCandidate
+    from cc_pushback.repo import MatchRow
     from cc_pushback.sources import TranscriptSource
 
 __all__ = ["main"]
@@ -34,6 +44,8 @@ TRANSCRIPT_SOURCES: dict[SourceKind, TranscriptSource] = {
     "plan_review": PlanReviews(),
     "interrupt_rejection": Interrupts(),
 }
+BACKENDS: dict[str, type[LlmBackend]] = {"claude": ClaudeBackend, "codex": CodexBackend}
+MODELS: tuple[TModel, ...] = get_args(TModel)
 
 
 def wanted(source_kind: str, selected: Sequence[str]) -> bool:
@@ -127,6 +139,64 @@ def scan(
                 counts["github_review"] = repo.advance_github_cursor(source_key, cursor, candidates)
 
     click.echo(tally(counts))
+
+
+def novel_names(rows: Sequence[MatchRow]) -> list[str]:
+    return sorted({row.pattern_name for row in rows if row.novel})
+
+
+@main.command()
+@click.option(
+    "--backend",
+    type=click.Choice(list(BACKENDS)),
+    default="claude",
+    show_default=True,
+    help="Language-model CLI backend to classify with.",
+)
+@click.option(
+    "--model",
+    type=click.Choice(MODELS),
+    default="small",
+    show_default=True,
+    help="Abstract model size to map onto the backend.",
+)
+@click.option("--limit", type=int, default=None, help="Maximum events to classify. Defaults to all.")
+@click.option("--no-llm", is_flag=True, help="Run only the cheap matcher pass, skipping the language model.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+def classify(backend: str, model: TModel, limit: int | None, no_llm: bool, db: Path | None) -> None:
+    """Classify ingested feedback against the pattern taxonomy.
+
+    The cheap matcher pass labels events whose text or structure matches a seed
+    pattern, with no language model. Unless ``--no-llm`` is set, every loaded
+    event is then classified by the language model, which assigns severity, the
+    rule, and any novel pattern the taxonomy does not yet name. Both passes write
+    with ``INSERT OR IGNORE`` keyed by the taxonomy and prompt versions, so
+    re-running ``classify`` over already-classified events adds nothing.
+    """
+    with Repository.open(db or Repository.default_path()) as repo:
+        events = unclassified_events(
+            repo,
+            taxonomy_version=TAXONOMY_VERSION,
+            prompt_version=PROMPT_VERSION,
+            backend=backend,
+            limit=limit,
+        )
+        matcher_rows = cheap_pass(events)
+        model_rows = (
+            []
+            if no_llm
+            else asyncio.run(llm_pass(events, backend=BACKENDS[backend](), backend_name=backend, model=model))
+        )
+        written = repo.save_matches([*matcher_rows, *model_rows])
+
+    click.echo(f"events: {len(events)}  matcher rows: {len(matcher_rows)}  llm rows: {len(model_rows)}  new: {written}")
+    if names := novel_names(model_rows):
+        click.echo("novel proposals: " + ", ".join(names))
 
 
 @main.command()

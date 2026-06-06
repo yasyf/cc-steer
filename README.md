@@ -79,6 +79,48 @@ for `.context/cleanup/issues.jsonl`:
 uvx cc-pushback scan --issues ~/Code/my-project --issues ~/Code/other-project
 ```
 
+## Classifying feedback
+
+Once feedback is ingested, `classify` labels each event against a fixed taxonomy
+of pushback patterns — `no-defensive-coding`, `ask-before-assuming`,
+`minimal-scope`, `match-surrounding-code`, and so on:
+
+```bash
+uvx cc-pushback classify
+```
+
+```
+events: 63  matcher rows: 41  llm rows: 71  new: 112
+novel proposals: prefer-named-constants, reuse-test-builders
+```
+
+Classification runs in two passes:
+
+- **Cheap matcher pass** — every event is tested against the taxonomy's regex
+  and structural matchers (e.g. a denied `Edit`/`Write` is `denied-edit`). This
+  is free, runs offline, and needs no language model.
+- **Language-model pass** — every loaded event is then sent to a backend, which
+  assigns a severity (`nit`, `minor`, `major`, `blocking`), restates the rule in
+  your voice, names every taxonomy pattern that fits, and proposes a kebab-case
+  `novel` pattern when nothing in the taxonomy applies.
+
+Both passes write with `INSERT OR IGNORE` keyed by the taxonomy and prompt
+versions, so re-running `classify` only labels events that are new or whose
+taxonomy version has been bumped — the language model is never re-invoked on an
+event it has already classified.
+
+Pick a backend and model size, cap the batch, or skip the language model
+entirely:
+
+```bash
+uvx cc-pushback classify --backend codex --model medium   # default: claude / small
+uvx cc-pushback classify --limit 200                      # classify at most 200 events
+uvx cc-pushback classify --no-llm                         # cheap matcher pass only, fully offline
+```
+
+`--no-llm` is useful offline or in CI: it records every regex and structural
+match without spending a single model call.
+
 ### Mining transcripts from another machine
 
 Transcripts live under `~/.claude/projects`. To mine a remote machine's history,

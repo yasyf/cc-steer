@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     from cc_pushback.models import FeedbackCandidate, SourceKind
 
-__all__ = ["Repository", "Stats"]
+__all__ = ["MatchRow", "Repository", "Stats", "now"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_cursors (
@@ -68,6 +68,13 @@ INSERT INTO source_cursors (source_key, cursor, updated_at) VALUES (?, ?, ?)
 ON CONFLICT(source_key) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
 """
 
+INSERT_MATCH = """
+INSERT OR IGNORE INTO pattern_matches (
+  feedback_id, pattern_name, backend, taxonomy_version, prompt_version,
+  severity, what_claude_did, rule, novel, model, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
@@ -87,6 +94,57 @@ def event_row(candidate: FeedbackCandidate, ingested_at: str) -> tuple[object, .
         candidate.context.to_json(),
         candidate.cc_version,
         ingested_at,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MatchRow:
+    """One row of the ``pattern_matches`` table, ready to persist.
+
+    Cheap matcher rows carry ``backend='matcher'`` and leave the model-only
+    columns ``None``; language-model rows fill ``severity``, ``what_claude_did``,
+    ``rule``, and ``model``.
+
+    Attributes:
+        feedback_id: The classified event's ``feedback_events`` id.
+        pattern_name: The taxonomy or novel pattern name.
+        backend: The classifier that produced the row, e.g. ``matcher`` or ``claude``.
+        taxonomy_version: The taxonomy version this classification covers.
+        prompt_version: The prompt version this classification covers.
+        severity: The model-assessed severity, or ``None`` for matcher rows.
+        what_claude_did: The behavior that drew the pushback, or ``None``.
+        rule: The corrective rule, or ``None`` for matcher rows.
+        novel: ``1`` when ``pattern_name`` is a model-proposed novel pattern.
+        model: The provider model name, or ``None`` for matcher rows.
+        created_at: When the row was produced.
+    """
+
+    feedback_id: int
+    pattern_name: str
+    backend: str
+    taxonomy_version: str
+    prompt_version: str
+    severity: str | None
+    what_claude_did: str | None
+    rule: str | None
+    novel: int
+    model: str | None
+    created_at: str
+
+
+def match_insert_row(row: MatchRow) -> tuple[object, ...]:
+    return (
+        row.feedback_id,
+        row.pattern_name,
+        row.backend,
+        row.taxonomy_version,
+        row.prompt_version,
+        row.severity,
+        row.what_claude_did,
+        row.rule,
+        row.novel,
+        row.model,
+        row.created_at,
     )
 
 
@@ -181,9 +239,7 @@ class Repository:
             self.store.record_file(path, mtime)
             return self.total_changes(conn) - before - 1
 
-    def advance_github_cursor(
-        self, source_key: str, cursor: str, candidates: Sequence[FeedbackCandidate]
-    ) -> int:
+    def advance_github_cursor(self, source_key: str, cursor: str, candidates: Sequence[FeedbackCandidate]) -> int:
         """Advances a source cursor and inserts its candidates in one transaction.
 
         Args:
@@ -200,6 +256,23 @@ class Repository:
             conn.executemany(INSERT_EVENT, [event_row(candidate, ingested_at) for candidate in candidates])
             conn.execute(UPSERT_CURSOR, (source_key, cursor, ingested_at))
             return self.total_changes(conn) - before - 1
+
+    def save_matches(self, rows: Sequence[MatchRow]) -> int:
+        """Persists classification rows with ``INSERT OR IGNORE``.
+
+        The ``pattern_matches`` primary key makes re-running a classification a
+        no-op, so this is safe to call repeatedly.
+
+        Args:
+            rows: The classification rows to persist.
+
+        Returns:
+            The number of newly inserted rows.
+        """
+        with self.store.transaction() as conn:
+            before = self.total_changes(conn)
+            conn.executemany(INSERT_MATCH, [match_insert_row(row) for row in rows])
+            return self.total_changes(conn) - before
 
     def stats(self) -> Stats:
         """Returns ingestion counts by source kind, file count, and cursors."""
