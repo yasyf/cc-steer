@@ -7,10 +7,12 @@ from typing import TYPE_CHECKING, Protocol
 from cc_pushback.models import DedupKey
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
+    from pathlib import Path
+
+    from cc_transcript.models import TranscriptEvent
 
     from cc_pushback.models import FeedbackCandidate
-    from cc_pushback.repo import Repository
 
 __all__ = [
     "ASK_USER_ANSWERED_PREFIX",
@@ -19,7 +21,7 @@ __all__ = [
     "PLAN_APPROVED_PREFIX",
     "USER_SAID_MARKER",
     "USER_SAID_TRAILER",
-    "Source",
+    "TranscriptSource",
     "dedup_key",
 ]
 
@@ -31,10 +33,12 @@ ASK_USER_ANSWERED_PREFIX = "Your questions have been answered:"
 INTERRUPT_RE = re.compile(r"\[Request interrupted by user(?: for tool use)?\]")
 
 
-class Source(Protocol):
-    """A detector that turns scanned material into feedback candidates."""
+class TranscriptSource(Protocol):
+    """A detector that extracts feedback candidates from one transcript file."""
 
-    def candidates(self, repo: Repository) -> Iterator[FeedbackCandidate]: ...
+    def candidates_for_file(
+        self, path: Path, events: Sequence[TranscriptEvent]
+    ) -> Iterator[FeedbackCandidate]: ...
 
 
 def dedup_key(*parts: str) -> DedupKey:

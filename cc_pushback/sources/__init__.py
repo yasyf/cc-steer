@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cc_pushback.sources.base import Source, dedup_key
+from cc_pushback.sources.base import TranscriptSource, dedup_key
 from cc_pushback.sources.github import GitHubReviews
 from cc_pushback.sources.interrupts import Interrupts
 from cc_pushback.sources.issues import SupersetIssues, changed_issue_files
@@ -13,9 +13,9 @@ __all__ = [
     "GitHubReviews",
     "Interrupts",
     "PlanReviews",
-    "Source",
     "SupersetIssues",
     "TranscriptMessages",
+    "TranscriptSource",
     "changed_files",
     "changed_issue_files",
     "dedup_key",

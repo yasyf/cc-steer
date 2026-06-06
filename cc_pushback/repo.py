@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
@@ -8,13 +9,13 @@ from typing import TYPE_CHECKING, Self
 from cc_transcript.store import FileStateStore
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from sqlite3 import Connection
     from types import TracebackType
 
     from cc_pushback.models import FeedbackCandidate, SourceKind
 
-__all__ = ["Repository"]
+__all__ = ["Repository", "Stats"]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_cursors (
@@ -87,6 +88,23 @@ def event_row(candidate: FeedbackCandidate, ingested_at: str) -> tuple[object, .
         candidate.cc_version,
         ingested_at,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Stats:
+    """A snapshot of ingestion progress.
+
+    Attributes:
+        total: The total feedback events ingested.
+        files: The number of scanned files recorded.
+        by_source: Event counts keyed by source kind.
+        cursors: Stored cursor values keyed by source key.
+    """
+
+    total: int
+    files: int
+    by_source: Mapping[str, int]
+    cursors: Mapping[str, str]
 
 
 class Repository:
@@ -183,23 +201,23 @@ class Repository:
             conn.execute(UPSERT_CURSOR, (source_key, cursor, ingested_at))
             return self.total_changes(conn) - before - 1
 
-    def stats(self) -> dict[str, object]:
+    def stats(self) -> Stats:
         """Returns ingestion counts by source kind, file count, and cursors."""
         conn = self.store.conn
-        return {
-            "by_source": {
+        return Stats(
+            total=conn.execute("SELECT COUNT(*) AS n FROM feedback_events").fetchone()["n"],
+            files=conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"],
+            by_source={
                 row["source_kind"]: row["n"]
                 for row in conn.execute(
                     "SELECT source_kind, COUNT(*) AS n FROM feedback_events GROUP BY source_kind ORDER BY source_kind"
                 )
             },
-            "total": conn.execute("SELECT COUNT(*) AS n FROM feedback_events").fetchone()["n"],
-            "files": conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"],
-            "cursors": {
+            cursors={
                 row["source_key"]: row["cursor"]
                 for row in conn.execute("SELECT source_key, cursor FROM source_cursors ORDER BY source_key")
             },
-        }
+        )
 
     def recent(self, *, source_kind: SourceKind | None = None, limit: int = 20) -> list[dict[str, object]]:
         """Returns the most recent feedback events, newest first.
