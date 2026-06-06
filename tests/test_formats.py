@@ -72,8 +72,15 @@ def test_format_extracts_expected_comments(name: str, text: str, expected: tuple
 
 @pytest.mark.parametrize(
     "text",
-    ["plain prose with no review markers", "- file: missing line number", "In: no path here"],
-    ids=["prose", "no-line", "no-path"],
+    [
+        "plain prose with no review markers",
+        "- file: missing line number",
+        "In: no path here",
+        "In summary: we shipped it.",
+        "In conclusion: done.",
+        "In general: avoid this.",
+    ],
+    ids=["prose", "no-line", "no-path", "in-summary", "in-conclusion", "in-general"],
 )
 def test_formats_ignore_non_matching_text(text: str) -> None:
     assert list(extract_all(text)) == []
