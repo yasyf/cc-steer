@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import cast
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from cc_pushback.llm import (
     CONCURRENCY,
@@ -27,7 +28,7 @@ class Label(BaseModel):
 
 
 @pytest.mark.parametrize(
-    ("backend", "schema_path", "agent", "expected"),
+    ("backend", "schema_path", "agent", "expected", "expected_env"),
     [
         pytest.param(
             CodexBackend(),
@@ -46,6 +47,7 @@ class Label(BaseModel):
                 "-c",
                 "features.mcp_servers=false",
             ],
+            {},
             id="codex-no-schema",
         ),
         pytest.param(
@@ -67,6 +69,7 @@ class Label(BaseModel):
                 "--output-schema",
                 "/tmp/s.json",
             ],
+            {},
             id="codex-with-schema",
         ),
         pytest.param(
@@ -85,6 +88,7 @@ class Label(BaseModel):
                 "",
                 "--strict-mcp-config",
             ],
+            {"CLAUDE_CODE_SIMPLE": "1"},
             id="claude-no-schema",
         ),
         pytest.param(
@@ -107,14 +111,20 @@ class Label(BaseModel):
                 "--output-format",
                 "json",
             ],
+            {"CLAUDE_CODE_SIMPLE": "1"},
             id="claude-with-schema",
         ),
     ],
 )
 def test_build_command_golden_argv(
-    backend: CodexBackend | ClaudeBackend, schema_path: str | None, agent: bool, expected: list[str]
+    backend: CodexBackend | ClaudeBackend,
+    schema_path: str | None,
+    agent: bool,
+    expected: list[str],
+    expected_env: dict[str, str],
 ) -> None:
     assert backend.build_command(backend.models["small"], schema_path, agent) == expected
+    assert backend.env() == expected_env
 
 
 def test_call_llm_parses_claude_structured_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,6 +138,35 @@ def test_call_llm_parses_claude_structured_output(monkeypatch: pytest.MonkeyPatc
     result = call_llm(ClaudeBackend(), PromptMessage().system("hi"), Label)
 
     assert result == Label(severity="major", rule="crash instead")
+
+
+def test_claude_parse_response_json_object_falls_back_to_validate_json() -> None:
+    raw = json.dumps({"severity": "minor", "rule": "ask first"})
+
+    assert ClaudeBackend().parse_response(raw, Label) == Label(severity="minor", rule="ask first")
+
+
+def test_claude_parse_response_stream_without_structured_output_raises() -> None:
+    raw = json.dumps([{"type": "system"}, {"type": "assistant", "message": "thinking"}])
+
+    with pytest.raises(ValidationError):
+        ClaudeBackend().parse_response(raw, Label)
+
+
+def test_claude_parse_response_stream_picks_structured_output_result_event() -> None:
+    raw = json.dumps(
+        [
+            {"type": "assistant", "message": "considering"},
+            {"type": "result", "structured_output": {"severity": "blocking", "rule": "do not"}},
+        ]
+    )
+
+    assert ClaudeBackend().parse_response(raw, Label) == Label(severity="blocking", rule="do not")
+
+
+@pytest.mark.parametrize("backend", [CodexBackend(), ClaudeBackend()], ids=["codex", "claude"])
+def test_parse_response_without_model_returns_raw_str(backend: CodexBackend | ClaudeBackend) -> None:
+    assert backend.parse_response("plain text reply", None) == "plain text reply"
 
 
 def test_call_llm_parses_codex_raw_json_and_writes_schema_tempfile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,24 +208,27 @@ def test_call_cli_nonzero_exit_raises_with_diagnostic_notes(monkeypatch: pytest.
 
 def test_classify_batch_preserves_order_and_caps_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts = [PromptMessage().ask(f"q{i}") for i in range(12)]
+    lock = threading.Lock()
+    barrier = threading.Barrier(CONCURRENCY)
     live = 0
     peak = 0
 
     def stub(backend: object, prompt: PromptMessage, response_model: type[Label], *, model: str) -> Label:
         nonlocal live, peak
-        live += 1
-        peak = max(peak, live)
-        try:
-            return Label(severity="nit", rule=prompt.ask_text)
-        finally:
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        barrier.wait(timeout=5)
+        with lock:
             live -= 1
+        return Label(severity="nit", rule=prompt.ask_text)
 
     monkeypatch.setattr("cc_pushback.llm.runner.call_llm", stub)
 
     results = [cast(Label, r) for r in asyncio.run(classify_batch(CodexBackend(), prompts, Label))]
 
     assert [r.rule for r in results] == [f"q{i}" for i in range(12)]
-    assert peak <= CONCURRENCY
+    assert peak == CONCURRENCY
 
 
 def test_schema_path_for_claude_returns_schema_string() -> None:
