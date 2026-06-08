@@ -8,8 +8,6 @@ from cc_pushback.matchers import LlmMatcher, Matcher, PatternName, RegexMatcher,
 if TYPE_CHECKING:
     from cc_pushback.classify import FeedbackEvent
 
-__all__ = ["PATTERNS", "TAXONOMY_VERSION", "Pattern", "by_name", "render_taxonomy"]
-
 TAXONOMY_VERSION = "v1"
 DENIED_EDIT_TOOLS = frozenset({"Edit", "Write"})
 

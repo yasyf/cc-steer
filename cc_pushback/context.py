@@ -11,8 +11,6 @@ if TYPE_CHECKING:
 
     from cc_transcript.models import TranscriptEvent
 
-__all__ = ["build_snapshot"]
-
 ASSISTANT_TEXT_LIMIT = 2000
 
 

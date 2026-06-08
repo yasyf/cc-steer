@@ -4,8 +4,6 @@ import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["PromptMessage"]
-
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 

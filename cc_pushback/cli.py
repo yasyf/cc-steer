@@ -36,8 +36,6 @@ if TYPE_CHECKING:
     from cc_pushback.repo import MatchRow
     from cc_pushback.sources import TranscriptSource
 
-__all__ = ["main"]
-
 DEFAULT_TRANSCRIPTS = (Path.home() / ".claude" / "projects",)
 SOURCE_KINDS = get_args(SourceKind)
 TRANSCRIPT_SOURCES: dict[SourceKind, TranscriptSource] = {

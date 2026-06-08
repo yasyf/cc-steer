@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 import subprocess
 
-__all__ = ["call_cli"]
-
 
 def call_cli(
     args: list[str],

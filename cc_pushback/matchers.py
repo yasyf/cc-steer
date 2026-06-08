@@ -9,16 +9,6 @@ if TYPE_CHECKING:
 
     from cc_pushback.classify import FeedbackEvent
 
-__all__ = [
-    "LlmMatcher",
-    "Matcher",
-    "PatternName",
-    "RegexMatcher",
-    "StructuralMatcher",
-    "matches",
-    "rx",
-]
-
 PatternName = NewType("PatternName", str)
 
 

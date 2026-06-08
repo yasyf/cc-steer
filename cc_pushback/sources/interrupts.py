@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
     from cc_transcript.models import ToolUseBlock, ToolUseId, TranscriptEvent
 
-__all__ = ["Interrupts"]
-
 SOURCE_KIND = "interrupt_rejection"
 
 

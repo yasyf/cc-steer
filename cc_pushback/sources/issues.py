@@ -13,8 +13,6 @@ if TYPE_CHECKING:
 
     from cc_pushback.repo import Repository
 
-__all__ = ["ISSUES_GLOB", "SupersetIssues"]
-
 SOURCE_KIND = "superset_issue"
 ISSUES_GLOB = ".context/cleanup/issues.jsonl"
 EMPTY_CONTEXT = ContextSnapshot(before=(), trigger=None, after=())

@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-__all__ = ["FORMATS", "ReviewComment", "ReviewFormat", "extract_all"]
-
 SUPERSET_INLINE_RE = re.compile(
     r"^In ((?=\S*[./]|\S+?:L)\S+?)(?::L(\d+)(?:-(\d+))?)?: (.+)$", re.MULTILINE
 )

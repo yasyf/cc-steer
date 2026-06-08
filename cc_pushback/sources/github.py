@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
     from cc_pushback.repo import Repository
 
-__all__ = ["GitHubReviews"]
-
 SOURCE_KIND = "github_review"
 REMOTE_RE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$")
 CLAUDE_AUTHORSHIP_RE = re.compile(r"Co-Authored-By: Claude|Generated with \[Claude Code\]")

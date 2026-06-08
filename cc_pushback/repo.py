@@ -15,8 +15,6 @@ if TYPE_CHECKING:
 
     from cc_pushback.models import FeedbackCandidate, SourceKind
 
-__all__ = ["MatchRow", "Repository", "Stats", "now"]
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_cursors (
   source_key TEXT PRIMARY KEY,
