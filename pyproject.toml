@@ -17,7 +17,7 @@ classifiers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "cc-transcript>=0.3",
+    "cc-transcript>=0.4",
     "click>=8",
     "loguru>=0.7",
     "pydantic>=2.7",

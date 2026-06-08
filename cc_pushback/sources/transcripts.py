@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cc_transcript import PUSHBACK_SPEC, keep
+from cc_transcript import keep
 from cc_transcript.discovery import TranscriptDiscovery
 from cc_transcript.models import UserEvent
 from cc_transcript.parser import parse_events
@@ -11,6 +11,7 @@ from cc_pushback.context import build_snapshot
 from cc_pushback.formats import extract_all
 from cc_pushback.models import FeedbackCandidate
 from cc_pushback.sources.base import dedup_key
+from cc_pushback.sources.filterspec import PUSHBACK_SPEC
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from cc_transcript import (
     INTERRUPT_MARKER_RE,
-    PUSHBACK_SPEC,
     STOP_HOOK_RE,
     STRUCTURAL_NOISE_RE,
     keep,
 )
 
+from cc_pushback.sources.filterspec import PUSHBACK_SPEC
 from tests.builders import parse, user_text
 
 
