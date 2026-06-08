@@ -183,7 +183,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cc-transcript", editable = "../cc-transcript" },
+    { name = "cc-transcript", specifier = ">=0.3" },
     { name = "click", specifier = ">=8" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -198,25 +198,19 @@ docs = [{ name = "great-docs", specifier = ">=0.13,<0.14" }]
 
 [[package]]
 name = "cc-transcript"
-version = "0.1.0"
-source = { editable = "../cc-transcript" }
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "orjson" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "anyio", specifier = ">=4.4" },
-    { name = "orjson", specifier = ">=3.10" },
-    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
+sdist = { url = "https://files.pythonhosted.org/packages/cf/7c/36342b1ed31951135a3734a68bf813c7f9570ce750ae776310a79043e20a/cc_transcript-0.3.0.tar.gz", hash = "sha256:8bcabf9d35cf3a07ef66982d8849f07d5307dd77b3aea188a33315ad5e47a1ef", size = 36474, upload-time = "2026-06-08T09:54:07.347Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/dc/2ca9710eb461bef7fc62d4598474b00b2bab83c1cc1f5a60f9956b4c60c1/cc_transcript-0.3.0-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:6c32fef23b05d41175c04529a637bf1168d15dfb3d8a344551315da00179d709", size = 913842, upload-time = "2026-06-08T09:54:00.733Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/62/add32e4cc6f5aac66a96736dbac8362d3abfb52b7e9b0edd8e1e25ac80f2/cc_transcript-0.3.0-cp313-abi3-macosx_11_0_x86_64.whl", hash = "sha256:e4f75274d52518cac8fc9f014c3443646f81df99f140896ae2843ce198c53c82", size = 976467, upload-time = "2026-06-08T09:54:02.405Z" },
+    { url = "https://files.pythonhosted.org/packages/64/1a/c5170396e27f0fcfef52dc578a97b818d1d6899ad99a372976187c7b9eb8/cc_transcript-0.3.0-cp313-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:5ad0d2e49eda7f5ebc4d9b4d397a0e050e51e1dca799399d0f6b68ee365747b8", size = 981236, upload-time = "2026-06-08T09:54:04.052Z" },
+    { url = "https://files.pythonhosted.org/packages/92/b9/aaf1b70ddc9fed6e8ec5073b0cec77aadc3e24c948b8d503432fa8d10096/cc_transcript-0.3.0-cp313-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:e3af7c720868f1dae9b3b988861a78d317ece4c281ec81d46e066a82dbc58caa", size = 1040621, upload-time = "2026-06-08T09:54:05.771Z" },
 ]
-provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-docs = [{ name = "great-docs", specifier = ">=0.13,<0.14" }]
 
 [[package]]
 name = "certifi"

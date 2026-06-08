@@ -75,6 +75,19 @@ def test_interrupt_with_junk_following_message_falls_back_to_marker() -> None:
     assert cands[0].text == "[Request interrupted by user]"
 
 
+def test_interrupt_keeps_terse_correction() -> None:
+    cands = candidates(
+        [
+            assistant_tool_use("b1", "Bash", {"command": "x"}),
+            interrupt_result("b1"),
+            user_text("wrong file"),
+        ]
+    )
+
+    assert len(cands) == 1
+    assert cands[0].text == "wrong file"
+
+
 def test_exit_plan_denial_not_claimed_here() -> None:
     cands = candidates(
         [

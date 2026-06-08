@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from cc_transcript import STRUCTURAL_NOISE_RE
 from cc_transcript.models import ToolResultBlock, UserEvent
 
 from cc_pushback.context import build_snapshot
 from cc_pushback.models import FeedbackCandidate
-from cc_pushback.sources.base import DENIAL_PREFIX, INTERRUPT_RE, MESSAGE_JUNK_RE, dedup_key
+from cc_pushback.sources.base import DENIAL_PREFIX, INTERRUPT_RE, dedup_key
 from cc_pushback.sources.plan_reviews import embedded_user_text, next_user_message, tool_uses
 
 if TYPE_CHECKING:
@@ -88,7 +89,7 @@ class Interrupts:
         if (marker := marker_in(event)) is None:
             return
         following = next_user_message(events, index + 1)
-        correction = following[1].text if following and not MESSAGE_JUNK_RE.search(following[1].text) else None
+        correction = following[1].text if following and not STRUCTURAL_NOISE_RE.search(following[1].text) else None
         yield FeedbackCandidate(
             dedup_key=dedup_key(str(path), event.meta.uuid, "interrupt", SOURCE_KIND),
             source_kind=SOURCE_KIND,

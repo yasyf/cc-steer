@@ -84,6 +84,19 @@ def test_plan_reentry_emits_once_per_user_message() -> None:
     assert cands[0].text == "rethink the data model before editing"
 
 
+def test_plan_reentry_keeps_terse_message() -> None:
+    cands = candidates(
+        [
+            assistant_tool_use("e1", "Edit", {"file_path": "/a.py"}),
+            mode_entry("plan"),
+            user_text("redo it"),
+        ]
+    )
+
+    assert len(cands) == 1
+    assert cands[0].text == "redo it"
+
+
 def test_plan_reentry_skips_synthetic_skill_injection() -> None:
     cands = candidates(
         [

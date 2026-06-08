@@ -39,10 +39,14 @@ def test_drops_empty_user_text() -> None:
 
 def test_skips_sidechain_and_meta() -> None:
     cands = candidates(
-        [user_text("sidechain note", isSidechain=True), user_text("meta note", isMeta=True), user_text("real one")]
+        [
+            user_text("sidechain note", isSidechain=True),
+            user_text("meta note", isMeta=True),
+            user_text("the genuine user message worth keeping"),
+        ]
     )
 
-    assert [c.text for c in cands] == ["real one"]
+    assert [c.text for c in cands] == ["the genuine user message worth keeping"]
 
 
 def test_interrupt_marker_text_not_junk_filtered_here() -> None:
@@ -50,6 +54,30 @@ def test_interrupt_marker_text_not_junk_filtered_here() -> None:
 
     assert len(cands) == 1
     assert "[Request interrupted by user]" in cands[0].text
+
+
+def test_keeps_stop_hook_feedback() -> None:
+    cands = candidates([user_text("Stop hook feedback: the lint step failed, please fix it")])
+
+    assert len(cands) == 1
+    assert cands[0].text.startswith("Stop hook feedback:")
+
+
+def test_drops_trivial_acknowledgements() -> None:
+    assert candidates([user_text("ok")]) == []
+    assert candidates([user_text("sounds good")]) == []
+    assert candidates([user_text("lgtm")]) == []
+
+
+def test_drops_bare_resume_phrases() -> None:
+    assert candidates([user_text("go ahead")]) == []
+    assert candidates([user_text("continue")]) == []
+    assert candidates([user_text("please continue")]) == []
+
+
+def test_drops_very_short_control_messages() -> None:
+    assert candidates([user_text("do it")]) == []
+    assert candidates([user_text("yes please")]) == []
 
 
 def review_candidates(entries: list[dict[str, object]]) -> list[FeedbackCandidate]:

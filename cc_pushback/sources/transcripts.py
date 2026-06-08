@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cc_transcript import PUSHBACK_SPEC, keep
 from cc_transcript.discovery import TranscriptDiscovery
 from cc_transcript.models import UserEvent
 from cc_transcript.parser import parse_events
@@ -9,7 +10,7 @@ from cc_transcript.parser import parse_events
 from cc_pushback.context import build_snapshot
 from cc_pushback.formats import extract_all
 from cc_pushback.models import FeedbackCandidate
-from cc_pushback.sources.base import MESSAGE_JUNK_RE, dedup_key
+from cc_pushback.sources.base import dedup_key
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -53,21 +54,17 @@ def pushback_user_events(events: Sequence[TranscriptEvent]) -> Iterator[tuple[in
         (index, event)
         for index, event in enumerate(events)
         if isinstance(event, UserEvent)
-        if not event.meta.is_sidechain
-        if not event.meta.is_meta
-        if not event.meta.is_compact_summary
-        if not event.meta.is_visible_in_transcript_only
-        if event.text.strip()
-        if not MESSAGE_JUNK_RE.search(event.text)
+        if keep(event, PUSHBACK_SPEC)
     )
 
 
 class TranscriptMessages:
     """Extracts the user's typed messages from a transcript as candidates.
 
-    Keeps non-junk, non-sidechain, non-meta user turns with text. Unlike the
-    sentiment filter, interrupt and stop-hook markers are not treated as junk
-    here: those carry pushback worth keeping.
+    Applies cc-transcript's ``PUSHBACK_SPEC``: drops structural noise, trivial
+    acknowledgements ("ok", "go ahead") and very short control messages, plus
+    sidechain/meta/compacted/empty turns. Unlike the sentiment filter, interrupt
+    and stop-hook markers are kept here: those carry pushback worth learning.
     """
 
     def candidates_for_file(self, path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:

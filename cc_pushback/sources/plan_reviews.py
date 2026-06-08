@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cc_transcript import STRUCTURAL_NOISE_RE
 from cc_transcript.models import AssistantEvent, ModeEvent, ToolResultBlock, ToolUseBlock, UserEvent
 
 from cc_pushback.context import build_snapshot
 from cc_pushback.models import FeedbackCandidate
 from cc_pushback.sources.base import (
     DENIAL_PREFIX,
-    MESSAGE_JUNK_RE,
     USER_SAID_MARKER,
     USER_SAID_TRAILER,
     dedup_key,
@@ -131,7 +131,7 @@ class PlanReviews:
             if (user := next_user_message(events, index)) is None:
                 continue
             user_index, user_event = user
-            if user_event.meta.uuid in seen or MESSAGE_JUNK_RE.search(user_event.text):
+            if user_event.meta.uuid in seen or STRUCTURAL_NOISE_RE.search(user_event.text):
                 continue
             if (edit := last_edit_index(events, user_index)) is None:
                 continue
