@@ -1,7 +1,8 @@
-"""The ``cc-pushback`` command-line interface: scan, stats, and list."""
+"""The ``cc-pushback`` command-line interface: scan, stats, list, and export-html."""
 
 from __future__ import annotations
 
+import webbrowser
 from pathlib import Path
 from typing import get_args
 
@@ -9,6 +10,7 @@ import click
 from cc_transcript import CLAUDE_PROJECTS_DIR
 
 from cc_pushback.models import SourceKind
+from cc_pushback.report import Sample, build_summary, render_html
 from cc_pushback.scan import scan as run_scan
 from cc_pushback.store import FeedbackStore
 
@@ -89,3 +91,43 @@ def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
         rows = store.recent(source_kind=source, limit=limit)
     for row in rows:
         click.echo(f"[{row['source_kind']}] {row['occurred_at']}  {str(row['text'])[:200]}")
+
+
+@main.command(name="export-html")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("cc-pushback-samples.html"),
+    show_default=True,
+    help="Where to write the HTML page.",
+)
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@click.option(
+    "--llm/--no-llm",
+    default=True,
+    show_default=True,
+    help="Summarize with the claude CLI when it is on PATH, else use heuristics.",
+)
+@click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model for the claude CLI summary.")
+@click.option("--open", "open_", is_flag=True, help="Open the page in a browser once written.")
+def export_html(output: Path, db: Path | None, llm: bool, model: str, open_: bool) -> None:
+    """Render every collected sample into one self-contained, inspectable HTML page.
+
+    The page leads with a corpus summary and highlights, then lists every sample
+    with a kind filter, a free-text search, and an expandable context window. The
+    summary is written by the ``claude`` CLI when ``--llm`` is set and ``claude`` is
+    installed, falling back to deterministic heuristics otherwise.
+    """
+    with FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        samples = [Sample.from_row(row) for row in store.events()]
+    summary = build_summary(samples, use_llm=llm, model=model)
+    output.write_text(render_html(samples, summary), encoding="utf-8")
+    click.echo(f"wrote {len(samples)} samples to {output}")
+    if open_:
+        webbrowser.open(output.resolve().as_uri())

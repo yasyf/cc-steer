@@ -176,3 +176,28 @@ class FeedbackStore:
             params = (source_kind,)
         query += " ORDER BY occurred_at DESC, id DESC LIMIT ?"
         return [dict(row) for row in self.store.conn.execute(query, (*params, limit))]
+
+    def events(self, *, source_kind: SourceKind | None = None) -> list[dict[str, object]]:
+        """Returns every feedback event, newest first, with the columns needed to render it.
+
+        Unlike :meth:`recent`, this returns the full row — payload and context — and
+        applies no limit, so a caller can render the whole corpus in one pass.
+
+        Args:
+            source_kind: When set, restrict to this source kind.
+
+        Returns:
+            One dict per event with its ``id``, ``source_kind``, ``occurred_at``,
+            ``text``, ``payload_json``, ``context_json``, ``origin_path``, and
+            ``session_id``.
+        """
+        query = (
+            "SELECT id, source_kind, occurred_at, text, payload_json, context_json, origin_path, session_id "
+            "FROM feedback_events"
+        )
+        params: tuple[object, ...] = ()
+        if source_kind is not None:
+            query += " WHERE source_kind = ?"
+            params = (source_kind,)
+        query += " ORDER BY occurred_at DESC, id DESC"
+        return [dict(row) for row in self.store.conn.execute(query, params)]
