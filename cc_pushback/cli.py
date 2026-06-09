@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import get_args
 
+import anyio
 import click
 from cc_transcript import CLAUDE_PROJECTS_DIR
 
@@ -15,6 +18,16 @@ from cc_pushback.serve import serve
 from cc_pushback.store import FeedbackStore
 
 SOURCE_KINDS = get_args(SourceKind)
+
+
+def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:
+    """Adapts an async command body into the sync callback Click expects."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        return anyio.run(functools.partial(fn, *args, **kwargs))
+
+    return wrapper
 
 
 @click.group()
@@ -38,7 +51,8 @@ def main() -> None:
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
-def scan(transcripts: tuple[Path, ...], full: bool, db: Path | None) -> None:
+@coro
+async def scan(transcripts: tuple[Path, ...], full: bool, db: Path | None) -> None:
     """Scan transcripts for feedback, incrementally.
 
     Each transcript is parsed only when new or modified since the last scan, and
@@ -47,11 +61,9 @@ def scan(transcripts: tuple[Path, ...], full: bool, db: Path | None) -> None:
     file and inserting its candidates commit in one transaction.
     """
     roots = transcripts or (CLAUDE_PROJECTS_DIR,)
-    with FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        report = run_scan(store, roots, full=full)
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await run_scan(store, roots, full=full)
     click.echo(f"scanned {report.scanned} files, {report.inserted} new rows")
-    if report.skipped:
-        click.echo(f"skipped {len(report.skipped)} unparseable files")
 
 
 @main.command()
@@ -61,10 +73,11 @@ def scan(transcripts: tuple[Path, ...], full: bool, db: Path | None) -> None:
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
-def stats(db: Path | None) -> None:
+@coro
+async def stats(db: Path | None) -> None:
     """Print ingestion counts by source kind and the scanned-file count."""
-    with FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        report = store.stats()
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await store.stats()
     click.echo(f"total: {report.total}  files: {report.files}")
     for kind, count in report.by_source.items():
         click.echo(f"  {kind}: {count}")
@@ -85,10 +98,11 @@ def stats(db: Path | None) -> None:
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
-def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
+@coro
+async def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
     """List recent feedback events, newest first."""
-    with FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        rows = store.recent(source_kind=source, limit=limit)
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        rows = await store.recent(source_kind=source, limit=limit)
     for row in rows:
         click.echo(f"[{row['source_kind']}] {row['occurred_at']}  {str(row['text'])[:200]}")
 
@@ -109,7 +123,8 @@ def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
 @click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model for the claude CLI summary.")
 @click.option("--port", type=int, default=0, show_default=True, help="Port to serve on; 0 picks a free one.")
 @click.option("--open", "open_", is_flag=True, help="Open the page in a browser once serving.")
-def view_samples(db: Path | None, llm: bool, model: str, port: int, open_: bool) -> None:
+@coro
+async def view_samples(db: Path | None, llm: bool, model: str, port: int, open_: bool) -> None:
     """Render every collected sample into one HTML page and serve it locally.
 
     The page leads with a corpus summary and highlights, then lists every sample
@@ -118,7 +133,7 @@ def view_samples(db: Path | None, llm: bool, model: str, port: int, open_: bool)
     press Ctrl-C to stop. The summary is written by the ``claude`` CLI when ``--llm``
     is set and ``claude`` is installed, falling back to deterministic heuristics.
     """
-    with FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        samples = [Sample.from_row(row) for row in store.events()]
-    summary = build_summary(samples, use_llm=llm, model=model)
-    serve(render_html(samples, summary).encode("utf-8"), port=port, open_browser=open_)
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        samples = [Sample.from_row(row) for row in await store.events()]
+    summary = await build_summary(samples, use_llm=llm, model=model)
+    await serve(render_html(samples, summary).encode("utf-8"), port=port, open_browser=open_)

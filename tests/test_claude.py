@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
+import anyio
 import pytest
 
 from cc_pushback.claude import claude_available, run_claude
@@ -19,15 +20,16 @@ def test_claude_available_reflects_which(monkeypatch: pytest.MonkeyPatch) -> Non
     assert claude_available() is False
 
 
-def test_run_claude_builds_argv_and_returns_result(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.anyio
+async def test_run_claude_builds_argv_and_returns_result(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, list[str]] = {}
 
-    def fake_run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
-        captured["argv"] = argv
+    async def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        captured["argv"] = command
         return completed(b'{"is_error": false, "result": "hello"}')
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert run_claude("PROMPT", system="SYS", model="claude-x") == "hello"
+    monkeypatch.setattr(anyio, "run_process", fake_run)
+    assert await run_claude("PROMPT", system="SYS", model="claude-x") == "hello"
     argv = captured["argv"]
     assert argv[:3] == ["claude", "-p", "PROMPT"]
     assert argv[argv.index("--model") + 1] == "claude-x"
@@ -35,7 +37,11 @@ def test_run_claude_builds_argv_and_returns_result(monkeypatch: pytest.MonkeyPat
     assert argv[argv.index("--output-format") + 1] == "json"
 
 
-def test_run_claude_raises_on_is_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(subprocess, "run", lambda *_, **__: completed(b'{"is_error": true, "result": ""}'))
+@pytest.mark.anyio
+async def test_run_claude_raises_on_is_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run(*_: Any, **__: Any) -> subprocess.CompletedProcess[bytes]:
+        return completed(b'{"is_error": true, "result": ""}')
+
+    monkeypatch.setattr(anyio, "run_process", fake_run)
     with pytest.raises(subprocess.CalledProcessError):
-        run_claude("p", system="s", model="m")
+        await run_claude("p", system="s", model="m")

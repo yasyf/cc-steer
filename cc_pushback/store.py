@@ -87,8 +87,8 @@ class FeedbackStore:
     candidates or neither.
 
     Example:
-        >>> with FeedbackStore.open(FeedbackStore.default_path()) as store:
-        ...     store.record_file_scan(str(path), mtime, candidates)
+        >>> async with await FeedbackStore.open(FeedbackStore.default_path()) as store:
+        ...     await store.record_file_scan(str(path), mtime, candidates)
     """
 
     def __init__(self, store: FileStateStore) -> None:
@@ -100,30 +100,30 @@ class FeedbackStore:
         return Path.home() / ".cc-pushback" / "feedback.db"
 
     @classmethod
-    def open(cls, path: Path) -> Self:
+    async def open(cls, path: Path) -> Self:
         """Opens (creating if needed) the feedback database at ``path``."""
-        return cls(FileStateStore.open(path, extra_schema=FEEDBACK_DDL))
+        return cls(await FileStateStore.open(path, extra_schema=FEEDBACK_DDL))
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Closes the underlying store."""
-        self.store.close()
+        await self.store.close()
 
-    def __enter__(self) -> Self:
+    async def __aenter__(self) -> Self:
         return self
 
-    def __exit__(
+    async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.close()
+        await self.close()
 
-    def file_mtimes(self) -> dict[str, float]:
+    async def file_mtimes(self) -> dict[str, float]:
         """Returns the recorded ``path`` to ``mtime`` map for incremental scans."""
-        return self.store.file_mtimes()
+        return await self.store.file_mtimes()
 
-    def record_file_scan(self, path: str, mtime: float, candidates: Sequence[FeedbackCandidate]) -> int:
+    async def record_file_scan(self, path: str, mtime: float, candidates: Sequence[FeedbackCandidate]) -> int:
         """Records a scanned file and its candidates in one transaction.
 
         Inserts every candidate with ``INSERT OR IGNORE`` keyed by its dedup key
@@ -138,28 +138,28 @@ class FeedbackStore:
             The number of newly inserted feedback events.
         """
         ingested_at = now()
-        with self.store.transaction() as conn:
+        async with self.store.transaction() as conn:
             before = conn.total_changes
-            conn.executemany(INSERT_EVENT, [event_row(candidate, ingested_at) for candidate in candidates])
+            await conn.executemany(INSERT_EVENT, [event_row(candidate, ingested_at) for candidate in candidates])
             inserted = conn.total_changes - before
-            self.store.record_file(path, mtime)
+            await self.store.record_file(path, mtime)
             return inserted
 
-    def stats(self) -> Stats:
+    async def stats(self) -> Stats:
         """Returns ingestion counts by source kind and the scanned-file count."""
         conn = self.store.conn
+        total = (await (await conn.execute("SELECT COUNT(*) AS n FROM feedback_events")).fetchone())["n"]
+        files = (await (await conn.execute("SELECT COUNT(*) AS n FROM files")).fetchone())["n"]
+        by_source_cur = await conn.execute(
+            "SELECT source_kind, COUNT(*) AS n FROM feedback_events GROUP BY source_kind ORDER BY source_kind"
+        )
         return Stats(
-            total=conn.execute("SELECT COUNT(*) AS n FROM feedback_events").fetchone()["n"],
-            files=conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"],
-            by_source={
-                row["source_kind"]: row["n"]
-                for row in conn.execute(
-                    "SELECT source_kind, COUNT(*) AS n FROM feedback_events GROUP BY source_kind ORDER BY source_kind"
-                )
-            },
+            total=total,
+            files=files,
+            by_source={row["source_kind"]: row["n"] async for row in by_source_cur},
         )
 
-    def recent(self, *, source_kind: SourceKind | None = None, limit: int = 20) -> list[dict[str, object]]:
+    async def recent(self, *, source_kind: SourceKind | None = None, limit: int = 20) -> list[dict[str, object]]:
         """Returns the most recent feedback events, newest first.
 
         Args:
@@ -175,9 +175,10 @@ class FeedbackStore:
             query += " WHERE source_kind = ?"
             params = (source_kind,)
         query += " ORDER BY occurred_at DESC, id DESC LIMIT ?"
-        return [dict(row) for row in self.store.conn.execute(query, (*params, limit))]
+        cur = await self.store.conn.execute(query, (*params, limit))
+        return [dict(row) async for row in cur]
 
-    def events(self, *, source_kind: SourceKind | None = None) -> list[dict[str, object]]:
+    async def events(self, *, source_kind: SourceKind | None = None) -> list[dict[str, object]]:
         """Returns every feedback event, newest first, with the columns needed to render it.
 
         Unlike :meth:`recent`, this returns the full row — payload and context — and
@@ -200,4 +201,5 @@ class FeedbackStore:
             query += " WHERE source_kind = ?"
             params = (source_kind,)
         query += " ORDER BY occurred_at DESC, id DESC"
-        return [dict(row) for row in self.store.conn.execute(query, params)]
+        cur = await self.store.conn.execute(query, params)
+        return [dict(row) async for row in cur]

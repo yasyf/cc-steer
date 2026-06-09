@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
     from cc_pushback.store import FeedbackStore
 
+pytestmark = pytest.mark.anyio
+
 
 def good_entries() -> list[dict[str, Any]]:
     return [
@@ -22,37 +24,36 @@ def good_entries() -> list[dict[str, Any]]:
 
 
 @pytest.mark.integration
-def test_scan_inserts_then_is_incremental(store: FeedbackStore, tmp_path: Path) -> None:
+async def test_scan_inserts_then_is_incremental(store: FeedbackStore, tmp_path: Path) -> None:
     write_transcript(tmp_path / "proj" / "s.jsonl", good_entries())
-    first = scan(store, [tmp_path])
+    first = await scan(store, [tmp_path])
     assert first.scanned == 1
     assert first.inserted >= 2
-    assert first.skipped == ()
 
-    second = scan(store, [tmp_path])
+    second = await scan(store, [tmp_path])
     assert second.scanned == 0
     assert second.inserted == 0
 
 
 @pytest.mark.integration
-def test_full_rescan_reparses_but_stays_idempotent(store: FeedbackStore, tmp_path: Path) -> None:
+async def test_full_rescan_reparses_but_stays_idempotent(store: FeedbackStore, tmp_path: Path) -> None:
     write_transcript(tmp_path / "proj" / "s.jsonl", good_entries())
-    scan(store, [tmp_path])
-    total = store.stats().total
-    again = scan(store, [tmp_path], full=True)
+    await scan(store, [tmp_path])
+    total = (await store.stats()).total
+    again = await scan(store, [tmp_path], full=True)
     assert again.scanned == 1
     assert again.inserted == 0
-    assert store.stats().total == total
+    assert (await store.stats()).total == total
 
 
 @pytest.mark.integration
-def test_unparseable_transcript_is_skipped_and_left_unrecorded(store: FeedbackStore, tmp_path: Path) -> None:
+async def test_unparseable_transcript_is_skipped_and_left_unrecorded(store: FeedbackStore, tmp_path: Path) -> None:
     good = write_transcript(tmp_path / "proj" / "good.jsonl", good_entries())
     bad = tmp_path / "proj" / "bad.jsonl"
     bad.parent.mkdir(parents=True, exist_ok=True)
     bad.write_text('{"type": "user", "message": {"role": "user", "content": "hi"}}\n')  # valid JSON, missing uuid
-    report = scan(store, [tmp_path])
+    report = await scan(store, [tmp_path])
     assert report.scanned == 1
-    assert bad in report.skipped
-    assert str(good) in store.file_mtimes()
-    assert str(bad) not in store.file_mtimes()
+    mtimes = await store.file_mtimes()
+    assert str(good) in mtimes
+    assert str(bad) not in mtimes

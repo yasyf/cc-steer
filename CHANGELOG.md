@@ -15,8 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and workstreams) — each row capturing the surrounding conversational window.
   Multiple `--transcripts` roots (including rsync mirrors of remote corpora) and a
   `--full` re-mine are supported.
-- `stats` and `list` inspection commands.
-- Built on `cc-transcript` 0.4.0 for transcript discovery, parsing, the declarative
+- `stats` and `list` inspection commands, plus `view-samples`, which renders the
+  whole corpus into one HTML page (with an optional `claude`-CLI narrative) and
+  serves it over a transient local `aiohttp` server.
+- Built on `cc-transcript` 0.5 for transcript discovery, parsing, the declarative
   noise-filter spec, and the file-state store.
+- Async-native throughout: the store (`aiosqlite`), discovery, transcript parsing,
+  and the `claude` shell-out all run on `anyio`; Click commands bridge to the async
+  core via `anyio.run`.
 
 [Unreleased]: https://github.com/yasyf/cc-pushback/commits/main

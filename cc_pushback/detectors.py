@@ -101,7 +101,11 @@ def plan_reentries(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[Fe
         if (user := next_user_message(events, index)) is None:
             continue
         user_index, user_event = user
-        if user_event.meta.uuid in seen or not keep(user_event, PUSHBACK_SPEC) or is_bare_interrupt_marker(user_event.text):
+        if (
+            user_event.meta.uuid in seen
+            or not keep(user_event, PUSHBACK_SPEC)
+            or is_bare_interrupt_marker(user_event.text)
+        ):
             continue
         if (edit := last_edit_index(events, user_index)) is None:
             continue

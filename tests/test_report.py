@@ -113,34 +113,38 @@ def test_candidate_pool_excludes_noise_and_caps() -> None:
     assert 99 not in {s.id for s in pool["transcript_message"]}
 
 
-def test_build_summary_heuristic_has_no_narrative() -> None:
-    summary = build_summary(corpus(), use_llm=False, model="m")
+@pytest.mark.anyio
+async def test_build_summary_heuristic_has_no_narrative() -> None:
+    summary = await build_summary(corpus(), use_llm=False, model="m")
     assert summary.narrative is None
     assert summary.highlights
     assert {h.event_id for h in summary.highlights} <= {1, 3}
 
 
-def test_build_summary_uses_claude(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.anyio
+async def test_build_summary_uses_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cc_pushback.report.claude_available", lambda: True)
-    monkeypatch.setattr(
-        "cc_pushback.report.run_claude",
-        lambda *_, **__: '{"narrative": "Terse and direct.", "highlights": [{"id": 1, "why": "cites a file"}]}',
-    )
-    summary = build_summary(corpus(), use_llm=True, model="m")
+
+    async def fake_run(*_: object, **__: object) -> str:
+        return '{"narrative": "Terse and direct.", "highlights": [{"id": 1, "why": "cites a file"}]}'
+
+    monkeypatch.setattr("cc_pushback.report.run_claude", fake_run)
+    summary = await build_summary(corpus(), use_llm=True, model="m")
     assert summary.narrative == "Terse and direct."
     assert summary.highlights == (type(summary.highlights[0])(1, "cites a file"),)
 
 
-def test_build_summary_falls_back_when_claude_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.anyio
+async def test_build_summary_falls_back_when_claude_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
 
     monkeypatch.setattr("cc_pushback.report.claude_available", lambda: True)
 
-    def boom(*_: object, **__: object) -> str:
+    async def boom(*_: object, **__: object) -> str:
         raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
 
     monkeypatch.setattr("cc_pushback.report.run_claude", boom)
-    summary = build_summary(corpus(), use_llm=True, model="m")
+    summary = await build_summary(corpus(), use_llm=True, model="m")
     assert summary.narrative is None
     assert summary.highlights
 
@@ -158,7 +162,8 @@ def test_parse_summary_json(raw: str, ok: bool) -> None:
     assert (parse_summary_json(raw) is not None) is ok
 
 
-def test_render_html_escapes_and_includes_controls() -> None:
+@pytest.mark.anyio
+async def test_render_html_escapes_and_includes_controls() -> None:
     trigger = ContextTurn(role="assistant", text="I built the thing", tool_calls=("Edit",))
     samples = [
         make_sample(
@@ -171,7 +176,7 @@ def test_render_html_escapes_and_includes_controls() -> None:
             after=(ContextTurn(role="user", text="that was wrong"),),
         )
     ]
-    summary = build_summary(samples, use_llm=False, model="m")
+    summary = await build_summary(samples, use_llm=False, model="m")
     html = render_html(samples, summary)
 
     assert "&lt;script&gt;alert(&#x27;xss&#x27;)" in html

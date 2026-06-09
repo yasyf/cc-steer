@@ -12,6 +12,8 @@ import json
 import shutil
 import subprocess
 
+import anyio
+
 CLAUDE_TIMEOUT = 180
 
 
@@ -20,7 +22,7 @@ def claude_available() -> bool:
     return shutil.which("claude") is not None
 
 
-def run_claude(prompt: str, *, system: str, model: str) -> str:
+async def run_claude(prompt: str, *, system: str, model: str) -> str:
     """Runs one headless ``claude`` turn and returns its text result.
 
     Args:
@@ -44,7 +46,11 @@ def run_claude(prompt: str, *, system: str, model: str) -> str:
         "--tools", "",
         "--disable-slash-commands",
     ]
-    result = subprocess.run(argv, capture_output=True, timeout=CLAUDE_TIMEOUT, check=True)
+    try:
+        with anyio.fail_after(CLAUDE_TIMEOUT):
+            result = await anyio.run_process(argv, check=True)
+    except TimeoutError as exc:
+        raise subprocess.TimeoutExpired(argv, CLAUDE_TIMEOUT) from exc
     data = json.loads(result.stdout)
     if data["is_error"]:
         raise subprocess.CalledProcessError(0, argv, output=result.stdout, stderr=result.stderr)

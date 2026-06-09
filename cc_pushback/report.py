@@ -289,11 +289,11 @@ def parse_summary_json(raw: str) -> tuple[str, list[dict[str, Any]]] | None:
     return narrative, [p for p in picks if isinstance(p, dict) and isinstance(p.get("id"), int)]
 
 
-def llm_summary(
+async def llm_summary(
     pool: Mapping[str, Sequence[Sample]], stats: CorpusStats, model: str
 ) -> tuple[str, tuple[Highlight, ...]] | None:
     try:
-        raw = run_claude(summary_prompt(pool, stats), system=SUMMARY_SYSTEM, model=model)
+        raw = await run_claude(summary_prompt(pool, stats), system=SUMMARY_SYSTEM, model=model)
     except subprocess.SubprocessError:
         return None
     if (parsed := parse_summary_json(raw)) is None:
@@ -304,7 +304,7 @@ def llm_summary(
     return (narrative, highlights) if highlights else None
 
 
-def build_summary(samples: Sequence[Sample], *, use_llm: bool, model: str) -> Summary:
+async def build_summary(samples: Sequence[Sample], *, use_llm: bool, model: str) -> Summary:
     """Builds the corpus :class:`Summary`, using the ``claude`` CLI when allowed.
 
     When ``use_llm`` is set and ``claude`` is on the path, the narrative and
@@ -321,7 +321,7 @@ def build_summary(samples: Sequence[Sample], *, use_llm: bool, model: str) -> Su
         The assembled :class:`Summary`.
     """
     stats, pool = corpus_stats(samples), candidate_pool(samples)
-    if use_llm and claude_available() and (result := llm_summary(pool, stats, model)) is not None:
+    if use_llm and claude_available() and (result := await llm_summary(pool, stats, model)) is not None:
         return Summary(stats=stats, highlights=result[1], narrative=result[0])
     return Summary(stats=stats, highlights=tuple(map(Highlight, heuristic_highlight_ids(pool))), narrative=None)
 
