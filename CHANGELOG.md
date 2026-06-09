@@ -7,21 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `scan` command: idempotent, incremental ingestion of pushback into a local
-  SQLite feedback DB (`~/.cc-pushback/feedback.db`) from transcript user
-  messages, plan-mode reviews, interrupts and permission denials,
-  review-format comments (superset inline cites, conductor findings and
-  workstreams), the current repo's GitHub PR review comments, and superset
-  `issues.jsonl` findings. Multiple `--transcripts`/`--issues` roots supported,
-  including rsync mirrors of remote corpora.
-- `classify` command: declarative pattern taxonomy (regex + structural
-  matchers) plus LLM extraction via the `claude` and `codex` CLIs with
-  structured output, versioned by taxonomy and prompt for safe re-runs.
+- `scan` command: idempotent, incremental collection of developer pushback into a
+  local SQLite feedback DB (`~/.cc-pushback/feedback.db`) from existing Claude Code
+  transcripts. Four detectors — transcript messages, plan reviews (rejected
+  `ExitPlanMode` plans and post-edit plan re-entries), interrupts and permission
+  denials, and review-format comments (superset inline cites, conductor findings
+  and workstreams) — each row capturing the surrounding conversational window.
+  Multiple `--transcripts` roots (including rsync mirrors of remote corpora) and a
+  `--full` re-mine are supported.
 - `stats` and `list` inspection commands.
-- `cc_pushback.llm`: claude/codex CLI backends, prompt builder, and a
-  concurrency-bounded batch runner, ported from captain-hook.
-
-### Removed
-- The `extract` command and its flat JSONL export; `scan` subsumes it.
+- Built on `cc-transcript` 0.4.0 for transcript discovery, parsing, the declarative
+  noise-filter spec, and the file-state store.
 
 [Unreleased]: https://github.com/yasyf/cc-pushback/commits/main

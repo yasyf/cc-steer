@@ -1,17 +1,78 @@
+"""The conversational-window primitive captured around each piece of feedback."""
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from cc_transcript.models import AssistantEvent, ToolUseBlock, UserEvent
 
-from cc_pushback.models import ContextSnapshot, ContextTurn
-
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+    from typing import Any
 
     from cc_transcript.models import TranscriptEvent
 
 ASSISTANT_TEXT_LIMIT = 2000
+
+
+@dataclass(frozen=True, slots=True)
+class ContextTurn:
+    """One conversational turn surrounding a piece of feedback.
+
+    Attributes:
+        role: Whether the turn came from the user, the assistant, or a tool.
+        text: The turn's text content.
+        tool_calls: The names of the tools the turn invoked, in order.
+    """
+
+    role: Literal["user", "assistant", "tool"]
+    text: str
+    tool_calls: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSnapshot:
+    """The conversational window around a piece of feedback.
+
+    Attributes:
+        before: The turns leading up to the trigger.
+        trigger: The assistant action the feedback responds to, when known.
+        after: The turns following the trigger.
+    """
+
+    before: tuple[ContextTurn, ...]
+    trigger: ContextTurn | None
+    after: tuple[ContextTurn, ...]
+
+    def to_json(self) -> str:
+        """Serializes the snapshot to the JSON stored in ``context_json``."""
+        return json.dumps(
+            {
+                "before": [turn_to_dict(turn) for turn in self.before],
+                "trigger": turn_to_dict(self.trigger) if self.trigger else None,
+                "after": [turn_to_dict(turn) for turn in self.after],
+            }
+        )
+
+    @classmethod
+    def from_json(cls, raw: str) -> ContextSnapshot:
+        """Deserializes a snapshot from a ``context_json`` string."""
+        data = json.loads(raw)
+        return cls(
+            before=tuple(turn_from_dict(turn) for turn in data["before"]),
+            trigger=turn_from_dict(data["trigger"]) if data["trigger"] else None,
+            after=tuple(turn_from_dict(turn) for turn in data["after"]),
+        )
+
+
+def turn_to_dict(turn: ContextTurn) -> dict[str, Any]:
+    return {"role": turn.role, "text": turn.text, "tool_calls": list(turn.tool_calls)}
+
+
+def turn_from_dict(data: Mapping[str, Any]) -> ContextTurn:
+    return ContextTurn(role=data["role"], text=data["text"], tool_calls=tuple(data["tool_calls"]))
 
 
 def turn_for(event: UserEvent | AssistantEvent) -> ContextTurn:

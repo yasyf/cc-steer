@@ -5,7 +5,7 @@
 [![Docs](https://img.shields.io/github/actions/workflow/status/yasyf/cc-pushback/docs.yml?branch=main&label=docs)](https://yasyf.github.io/cc-pushback/)
 [![License: PolyForm-Noncommercial-1.0.0](https://img.shields.io/badge/License-PolyForm--Noncommercial--1.0.0-blue.svg)](https://github.com/yasyf/cc-pushback/blob/main/LICENSE)
 
-cc-pushback mines your Claude Code transcripts for the moments you pushed back — corrections, code review comments, "no, do it this way" — and trains a classifier on them so a language model can replicate your pushbacks. Instead of hand-writing rules into CLAUDE.md, your accumulated feedback history becomes the spec.
+cc-pushback mines your Claude Code transcripts for the moments you pushed back — corrections, interrupts, rejected plans, code-review comments, "no, do it this way" — and collects them, with the surrounding conversational context, into a local database. That corpus is the raw material for learning your pushback style; this first release builds it.
 
 ## Install
 
@@ -24,102 +24,59 @@ uv add cc-pushback
 
 ## Quickstart
 
-Scan your transcripts, code reviews, and issue files for the moments you pushed
-back, and accumulate them into a local feedback database:
+Scan your transcripts for the moments you pushed back and accumulate them into a
+local feedback database:
 
 ```bash
 uvx cc-pushback scan
 ```
 
 ```
-transcripts=412, github_review=37
+scanned 412 files, 1473 new rows
 ```
 
 `scan` is incremental and idempotent. Each transcript is parsed only when it is
 new or has changed since the last scan, and every candidate is keyed by a content
 digest, so re-running over unchanged inputs adds nothing. Recording a file and
 inserting its candidates commit in one transaction — interrupt a scan and the
-database is never left half-written.
+database is never left half-written. A transcript that fails to parse (one Claude
+Code is still writing, say) is skipped and retried next time, never aborting the run.
 
 The database lives at `~/.cc-pushback/feedback.db` by default (override with
-`--db`). Inspect what has been ingested:
+`--db`). Inspect what has been collected:
 
 ```bash
-uvx cc-pushback stats          # counts by source kind, file count, cursors
+uvx cc-pushback stats          # counts by source kind, and the scanned-file count
 uvx cc-pushback list           # recent feedback, newest first
 uvx cc-pushback list --source plan_review --limit 50
 ```
 
-### What gets mined
+### What gets collected
 
-`scan` runs several sources over your history:
+`scan` runs four detectors over each transcript:
 
-- **Transcript messages** — the pushback you typed mid-session.
-- **Plan reviews** — rejected `ExitPlanMode` plans and plan-mode re-entries
-  after an edit cycle, i.e. "let's rethink this."
-- **Interrupts and rejections** — permission denials and `[Request interrupted
-  by user]` corrections, with the denied tool and your follow-up captured.
-- **GitHub reviews** — your own review comments on pull requests authored by
-  Claude Code, paginated incrementally per repository.
-- **Superset issues** — `.context/cleanup/issues.jsonl` cleanup findings.
+- **Transcript messages** (`transcript_message`) — the pushback you typed
+  mid-session, after trivial acknowledgements and structural noise are filtered out.
+- **Plan reviews** (`plan_review`) — rejected `ExitPlanMode` plans (with the
+  feedback you gave) and plan-mode re-entries right after an edit cycle, i.e.
+  "let's rethink this."
+- **Interrupts and rejections** (`interrupt_rejection`) — permission denials and
+  `[Request interrupted by user]` corrections, with the denied tool and your
+  follow-up captured.
+- **Review comments** (`review_comment`) — structured code-review messages
+  exploded into one row per inline comment.
 
-Restrict to specific sources with `--source` (repeatable), and skip the GitHub
-source with `--no-github`:
+Each row carries the conversational window around the feedback — the assistant
+action it responded to, plus a few turns either side — captured at collection
+time, because transcripts are ephemeral.
 
-```bash
-uvx cc-pushback scan --source transcript_message --source plan_review --no-github
-```
-
-### Scanning issue files
-
-Point `--issues` (repeatable) at one or more roots; each is searched recursively
-for `.context/cleanup/issues.jsonl`:
+Restrict to specific kinds with `--source` (repeatable), or force a full re-mine
+of every transcript (after a detector change, say) with `--full`:
 
 ```bash
-uvx cc-pushback scan --issues ~/Code/my-project --issues ~/Code/other-project
+uvx cc-pushback list --source transcript_message --source plan_review
+uvx cc-pushback scan --full
 ```
-
-## Classifying feedback
-
-Once feedback is ingested, `classify` labels each event against a fixed taxonomy
-of pushback patterns — `no-defensive-coding`, `ask-before-assuming`,
-`minimal-scope`, `match-surrounding-code`, and so on:
-
-```bash
-uvx cc-pushback classify
-```
-
-```
-events: 63  matcher rows: 41  llm rows: 71  new: 112
-novel proposals: prefer-named-constants, reuse-test-builders
-```
-
-Classification runs in two passes:
-
-- **Cheap matcher pass** — every event is tested against the taxonomy's regex
-  and structural matchers (e.g. a denied `Edit`/`Write` is `denied-edit`). This
-  is free, runs offline, and needs no language model.
-- **Language-model pass** — every loaded event is then sent to a backend, which
-  assigns a severity (`nit`, `minor`, `major`, `blocking`), restates the rule in
-  your voice, names every taxonomy pattern that fits, and proposes a kebab-case
-  `novel` pattern when nothing in the taxonomy applies.
-
-Both passes write with `INSERT OR IGNORE` keyed by the taxonomy and prompt
-versions, so re-running `classify` only labels events that are new or whose
-taxonomy version has been bumped — the language model is never re-invoked on an
-event it has already classified.
-
-Pick a backend and model size, cap the batch, or skip the language model
-entirely:
-
-```bash
-uvx cc-pushback classify --backend codex --model medium   # default: claude / small
-uvx cc-pushback classify --limit 200                      # classify at most 200 events
-uvx cc-pushback classify --no-llm                         # cheap matcher pass only, fully offline
-```
-
-`--no-llm` is useful offline or in CI: it records every regex and structural
-match without spending a single model call.
 
 ### Mining transcripts from another machine
 
@@ -137,9 +94,9 @@ ingests what changed.
 
 ## What problems does this solve?
 
-- **Your corrections evaporate.** Every "don't do it that way" you've typed into Claude Code is sitting unused in transcript files. cc-pushback turns that history into a training dataset.
-- **CLAUDE.md only captures what you remember to write down.** Most of your taste is tacit — you only notice a rule when it's violated. Mining real pushbacks recovers the rules you never articulated.
-- **You repeat the same code review feedback.** A classifier trained on your past pushbacks can flag the same issues before you have to — your review style, applied preemptively.
+- **Your corrections evaporate.** Every "don't do it that way" you've typed into Claude Code is sitting unused in transcript files. cc-pushback turns that history into a structured dataset.
+- **CLAUDE.md only captures what you remember to write down.** Most of your taste is tacit — you only notice a rule when it's violated. Collecting real pushbacks recovers the rules you never articulated.
+- **The signal is buried in noise.** Trivial acknowledgements, structural reminders, and tool chatter drown out the moments that matter; cc-pushback keeps the pushback and discards the rest.
 
 ## Docs
 

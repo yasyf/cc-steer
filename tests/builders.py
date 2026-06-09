@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from cc_transcript.parser import parse_events_from_bytes
 
-from cc_pushback.sources.base import DENIAL_PREFIX, USER_SAID_MARKER
+from cc_pushback.markers import DENIAL_PREFIX, USER_SAID_MARKER
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -16,11 +16,11 @@ if TYPE_CHECKING:
 BASE_TS = "2026-06-01T12:00:00+00:00"
 SESSION = "sess-1"
 
-uuids = itertools.count()
+counter = itertools.count()
 
 
 def next_uuid() -> str:
-    return f"uuid-{next(uuids)}"
+    return f"uuid-{next(counter)}"
 
 
 def envelope(entry_type: str, **overrides: Any) -> dict[str, Any]:
@@ -75,19 +75,19 @@ def tool_result(tool_id: str, content: str, *, is_error: bool = False, **overrid
     )
 
 
-def denial_result(tool_id: str, said: str | None, **overrides: Any) -> dict[str, Any]:
+def denial_result(tool_id: str, said: str | None = None, **overrides: Any) -> dict[str, Any]:
     body = DENIAL_PREFIX + "."
     if said is not None:
         body += f"\n\n{USER_SAID_MARKER}{said}"
     return tool_result(tool_id, body, is_error=True, **overrides)
 
 
-def mode_entry(value: str, **overrides: Any) -> dict[str, Any]:
-    return {"type": "mode", "mode": value, "sessionId": overrides.pop("sessionId", SESSION)}
-
-
 def interrupt_result(tool_id: str, **overrides: Any) -> dict[str, Any]:
     return tool_result(tool_id, "[Request interrupted by user]", is_error=True, **overrides)
+
+
+def mode_entry(value: str, **overrides: Any) -> dict[str, Any]:
+    return {"type": "mode", "mode": value, "sessionId": overrides.pop("sessionId", SESSION)}
 
 
 def parse(entries: list[dict[str, Any]]) -> list[TranscriptEvent]:
@@ -95,5 +95,6 @@ def parse(entries: list[dict[str, Any]]) -> list[TranscriptEvent]:
 
 
 def write_transcript(path: Path, entries: list[dict[str, Any]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
     return path

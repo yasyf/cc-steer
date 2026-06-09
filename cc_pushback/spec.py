@@ -32,5 +32,5 @@ PUSHBACK_SPEC: FilterSpec = build_spec(
     drop_empty(only_from=USERS),
     drop_junk("structural", "agent_injection"),
     drop_phrases(TRIVIAL_ACK_SET | RESUME_PHRASE_SET),
-    drop_short(2),  # literal 2, intentionally not SHORT_MESSAGE_MAX_WORDS
+    drop_short(2),
 )

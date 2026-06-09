@@ -1,6 +1,6 @@
 # cc-pushback Style Guide
 
-The concrete style rules for `cc_pushback/`. Target Python 3.12+.
+The concrete style rules for `cc_pushback/`. Target Python 3.13+.
 
 ## Core Principles
 

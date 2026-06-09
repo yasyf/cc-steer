@@ -1,3 +1,5 @@
+"""Parsers for structured code-review message formats embedded in transcripts."""
+
 from __future__ import annotations
 
 import re
@@ -100,11 +102,12 @@ def extract_conductor_workstream(text: str) -> tuple[ReviewComment, ...]:
     )
 
 
-FORMATS: tuple[ReviewFormat, ...] = (
-    ReviewFormat("superset-inline", SUPERSET_INLINE_RE, extract_superset_inline),
-    ReviewFormat("conductor-finding", CONDUCTOR_FINDING_RE, extract_conductor_finding),
-    ReviewFormat("conductor-workstream", CONDUCTOR_WORKSTREAM_HEADER_RE, extract_conductor_workstream),
-)
+def formats() -> tuple[ReviewFormat, ...]:
+    return (
+        ReviewFormat("superset-inline", SUPERSET_INLINE_RE, extract_superset_inline),
+        ReviewFormat("conductor-finding", CONDUCTOR_FINDING_RE, extract_conductor_finding),
+        ReviewFormat("conductor-workstream", CONDUCTOR_WORKSTREAM_HEADER_RE, extract_conductor_workstream),
+    )
 
 
 def extract_all(text: str) -> Iterator[tuple[ReviewFormat, ReviewComment]]:
@@ -118,7 +121,7 @@ def extract_all(text: str) -> Iterator[tuple[ReviewFormat, ReviewComment]]:
     """
     return (
         (fmt, comment)
-        for fmt in FORMATS
+        for fmt in formats()
         if fmt.pattern.search(text)
         for comment in fmt.extract(text)
     )

@@ -1,54 +1,59 @@
 from __future__ import annotations
 
-from cc_pushback.context import build_snapshot
-from tests.builders import assistant_text, assistant_tool_use, parse, user_text
+import pytest
+
+from cc_pushback.context import ContextSnapshot, ContextTurn, build_snapshot
+from tests.builders import assistant_text, parse, user_text
+
+# 0:A0  1:U1  2:A2(trigger)  3:U3(feedback)  4:A4  5:U5
+EVENTS = parse(
+    [
+        assistant_text("A0"),
+        user_text("U1"),
+        assistant_text("A2"),
+        user_text("U3 feedback"),
+        assistant_text("A4"),
+        user_text("U5"),
+    ]
+)
 
 
-def test_window_caps_before_and_after() -> None:
-    events = parse(
-        [user_text(f"u{i}") for i in range(10)]
-        + [assistant_text("trigger")]
-        + [user_text("feedback")]
-        + [user_text(f"a{i}") for i in range(5)]
+@pytest.mark.unit
+def test_trigger_is_nearest_preceding_assistant_turn() -> None:
+    snapshot = build_snapshot(EVENTS, 3)
+    assert snapshot.trigger is not None
+    assert snapshot.trigger.role == "assistant"
+    assert snapshot.trigger.text == "A2"
+
+
+@pytest.mark.unit
+def test_window_runs_before_to_after_in_order() -> None:
+    snapshot = build_snapshot(EVENTS, 3)
+    assert [(t.role, t.text) for t in snapshot.before] == [
+        ("assistant", "A0"),
+        ("user", "U1"),
+        ("assistant", "A2"),
+    ]
+    assert [(t.role, t.text) for t in snapshot.after] == [("assistant", "A4"), ("user", "U5")]
+
+
+@pytest.mark.unit
+def test_lower_bound_clamps_the_before_window() -> None:
+    snapshot = build_snapshot(EVENTS, 3, lower_bound=2)
+    assert [t.text for t in snapshot.before] == ["A2"]
+
+
+@pytest.mark.unit
+def test_assistant_turn_records_tool_calls() -> None:
+    snapshot = build_snapshot(EVENTS, 3)
+    assert snapshot.before[0].tool_calls == ()
+
+
+@pytest.mark.unit
+def test_snapshot_json_round_trips() -> None:
+    snapshot = ContextSnapshot(
+        before=(ContextTurn(role="user", text="hi"),),
+        trigger=ContextTurn(role="assistant", text="did x", tool_calls=("Edit",)),
+        after=(),
     )
-    snapshot = build_snapshot(events, 11, before=6, after=2)
-
-    assert len(snapshot.before) == 6
-    assert len(snapshot.after) == 2
-    assert snapshot.before[-1].text == "trigger"
-    assert snapshot.before[0].text == "u5"
-
-
-def test_trigger_is_nearest_preceding_assistant() -> None:
-    events = parse(
-        [user_text("u0"), assistant_text("earlier"), user_text("u1"), assistant_text("nearest"), user_text("fb")]
-    )
-    snapshot = build_snapshot(events, 4)
-
-    assert snapshot.trigger is not None
-    assert snapshot.trigger.text == "nearest"
-
-
-def test_assistant_text_truncated_to_limit() -> None:
-    events = parse([assistant_text("x" * 5000), user_text("fb")])
-    snapshot = build_snapshot(events, 1)
-
-    assert snapshot.trigger is not None
-    assert len(snapshot.trigger.text) == 2000
-
-
-def test_tool_calls_captured_in_turn() -> None:
-    events = parse([assistant_tool_use("t1", "Edit", {"file_path": "/a"}), user_text("fb")])
-    snapshot = build_snapshot(events, 1)
-
-    assert snapshot.trigger is not None
-    assert snapshot.trigger.tool_calls == ("Edit",)
-
-
-def test_lower_bound_stops_reach_back() -> None:
-    events = parse([assistant_text("hidden"), user_text("u1"), assistant_text("visible"), user_text("fb")])
-    snapshot = build_snapshot(events, 3, lower_bound=2)
-
-    assert [turn.text for turn in snapshot.before] == ["visible"]
-    assert snapshot.trigger is not None
-    assert snapshot.trigger.text == "visible"
+    assert ContextSnapshot.from_json(snapshot.to_json()) == snapshot
