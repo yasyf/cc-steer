@@ -1,9 +1,10 @@
 """cc-pushback's event-filter policy, composed from cc-transcript primitives.
 
 Keeps user turns that carry pushback worth learning from: drops structural noise,
-agent-injected banners, trivial acknowledgements, very short control messages, and
-sidechain/meta/compacted/empty turns. Unlike the sentiment filter, interrupt and
-stop-hook markers are deliberately kept.
+agent-injected banners, approve-and-advance directives, automated stop-hook output,
+trivial acknowledgements, very short control messages, and sidechain/meta/compacted/
+empty turns. Interrupt markers are deliberately kept, so a turn that pairs a marker
+with a real correction survives; a bare marker is dropped by the detectors.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ PUSHBACK_SPEC: FilterSpec = build_spec(
     drop_meta_flag("is_meta"),
     drop_compacted(),
     drop_empty(only_from=USERS),
-    drop_junk("structural", "agent_injection"),
+    drop_junk("structural", "agent_injection", "stop_hook", "continuation"),
     drop_phrases(TRIVIAL_ACK_SET | RESUME_PHRASE_SET),
     drop_short(2),
 )

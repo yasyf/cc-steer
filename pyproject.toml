@@ -46,6 +46,9 @@ build-backend = "uv_build"
 module-name = "cc_pushback"
 module-root = ""
 
+[tool.uv.sources]
+cc-transcript = { git = "https://github.com/yasyf/cc-transcript", branch = "main" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--tb=short", "-q"]

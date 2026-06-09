@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING
 from cc_transcript import STRUCTURAL_NOISE_RE, keep
 from cc_transcript.models import ModeEvent, UserEvent
 
-from cc_pushback.context import build_snapshot
+from cc_pushback.context import build_snapshot, trigger_for
 from cc_pushback.formats import extract_all
 from cc_pushback.models import FeedbackCandidate, dedup_key
 from cc_pushback.nav import (
     denial_results,
     denied_tool_payload,
     embedded_user_text,
+    is_bare_interrupt_marker,
     last_edit_index,
     marker_in,
     next_user_message,
@@ -39,6 +40,15 @@ def pushback_user_events(events: Sequence[TranscriptEvent]) -> Iterator[tuple[in
     )
 
 
+def correction_text(events: Sequence[TranscriptEvent], index: int) -> str | None:
+    while (found := next_user_message(events, index + 1)) is not None:
+        i, event = found
+        if not is_bare_interrupt_marker(event.text) and not STRUCTURAL_NOISE_RE.search(event.text):
+            return event.text
+        index = i
+    return None
+
+
 def transcript_messages(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:
     return (
         FeedbackCandidate(
@@ -53,6 +63,8 @@ def transcript_messages(path: Path, events: Sequence[TranscriptEvent]) -> Iterat
             cc_version=event.meta.cc_version,
         )
         for index, event in pushback_user_events(events)
+        if not is_bare_interrupt_marker(event.text)
+        if trigger_for(events, index, 0) is not None
     )
 
 
@@ -89,7 +101,7 @@ def plan_reentries(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[Fe
         if (user := next_user_message(events, index)) is None:
             continue
         user_index, user_event = user
-        if user_event.meta.uuid in seen or STRUCTURAL_NOISE_RE.search(user_event.text):
+        if user_event.meta.uuid in seen or not keep(user_event, PUSHBACK_SPEC) or is_bare_interrupt_marker(user_event.text):
             continue
         if (edit := last_edit_index(events, user_index)) is None:
             continue
@@ -126,7 +138,7 @@ def denials(
             dedup_key=dedup_key(event.meta.session_id, event.meta.uuid, block.tool_use_id, "interrupt_rejection"),
             source_kind="interrupt_rejection",
             occurred_at=event.meta.timestamp,
-            text=embedded_user_text(block.content) or block.content,
+            text=text,
             context=build_snapshot(events, index),
             session_id=event.meta.session_id,
             origin_path=path,
@@ -135,22 +147,21 @@ def denials(
             payload=denied_tool_payload(paired) if paired else None,
         )
         for block in denial_results(event)
-        if (paired := uses.get(block.tool_use_id)) is None or paired.name != "ExitPlanMode"
+        if (paired := uses.get(block.tool_use_id)) is None or paired.name not in {"ExitPlanMode", "AskUserQuestion"}
+        if (text := embedded_user_text(block.content) or correction_text(events, index))
     )
 
 
 def interrupt_markers(
     path: Path, events: Sequence[TranscriptEvent], index: int, event: UserEvent
 ) -> Iterator[FeedbackCandidate]:
-    if (marker := marker_in(event)) is None:
+    if marker_in(event) is None or (correction := correction_text(events, index)) is None:
         return
-    following = next_user_message(events, index + 1)
-    correction = following[1].text if following and not STRUCTURAL_NOISE_RE.search(following[1].text) else None
     yield FeedbackCandidate(
         dedup_key=dedup_key(event.meta.session_id, event.meta.uuid, "interrupt", "interrupt_rejection"),
         source_kind="interrupt_rejection",
         occurred_at=event.meta.timestamp,
-        text=correction or marker,
+        text=correction,
         context=build_snapshot(events, index),
         session_id=event.meta.session_id,
         origin_path=path,

@@ -84,6 +84,10 @@ def interrupt_marker(content: str) -> str | None:
     return stripped[: end + 1] if end != -1 else match.group(0)
 
 
+def is_bare_interrupt_marker(text: str) -> bool:
+    return (marker := interrupt_marker(text)) is not None and not text.strip()[len(marker.strip()) :].strip()
+
+
 def marker_in(event: UserEvent) -> str | None:
     return next(
         (

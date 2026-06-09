@@ -79,15 +79,45 @@ def test_interrupt_marker_pairs_the_following_correction() -> None:
 
 
 @pytest.mark.unit
-def test_interrupt_marker_without_correction_uses_full_marker() -> None:
+def test_interrupt_marker_without_correction_drops_the_row() -> None:
     events = parse(
         [
             assistant_tool_use("t2", "Bash", {"command": "ls"}),
             interrupt_result("t2"),
         ]
     )
+    assert list(interrupt_rejections(FILE, events)) == []
+
+
+@pytest.mark.unit
+def test_permission_denial_pairs_the_following_correction() -> None:
+    events = parse(
+        [
+            assistant_tool_use("t5", "Bash", {"command": "rm -rf build"}),
+            denial_result("t5"),
+            user_text("no, just clean the cache, don't delete build"),
+        ]
+    )
     [candidate] = list(interrupt_rejections(FILE, events))
-    assert candidate.text == "[Request interrupted by user]"
+    assert candidate.text == "no, just clean the cache, don't delete build"
+    assert candidate.payload == {"tool": "Bash", "file_path": None}
+
+
+@pytest.mark.unit
+def test_reasonless_denial_without_correction_drops_the_row() -> None:
+    events = parse([assistant_tool_use("t6", "Agent", {}), denial_result("t6")])
+    assert list(interrupt_rejections(FILE, events)) == []
+
+
+@pytest.mark.unit
+def test_ask_user_question_denial_is_not_pushback() -> None:
+    events = parse(
+        [
+            assistant_tool_use("t7", "AskUserQuestion", {"questions": []}),
+            denial_result("t7", said="The user wants to clarify these questions."),
+        ]
+    )
+    assert list(interrupt_rejections(FILE, events)) == []
 
 
 @pytest.mark.unit
@@ -127,8 +157,40 @@ def test_exit_plan_denial_is_not_an_interrupt_rejection() -> None:
 
 @pytest.mark.unit
 def test_transcript_message_keeps_substance_drops_ack() -> None:
-    events = parse([user_text("please refactor this to be functional"), user_text("ok")])
+    events = parse(
+        [
+            assistant_text("here is the diff"),
+            user_text("please refactor this to be functional"),
+            user_text("ok"),
+        ]
+    )
     assert [c.text for c in transcript_messages(FILE, events)] == ["please refactor this to be functional"]
+
+
+@pytest.mark.unit
+def test_transcript_message_drops_bare_interrupt_marker_keeps_marker_with_correction() -> None:
+    events = parse(
+        [
+            assistant_text("running the build"),
+            user_text("[Request interrupted by user for tool use]"),
+            user_text("[Request interrupted by user] run the tests instead, not the build"),
+        ]
+    )
+    assert [c.text for c in transcript_messages(FILE, events)] == [
+        "[Request interrupted by user] run the tests instead, not the build"
+    ]
+
+
+@pytest.mark.unit
+def test_transcript_message_requires_a_preceding_assistant_turn() -> None:
+    events = parse(
+        [
+            user_text("set up a new project with passkey auth"),
+            assistant_text("done — scaffolded it"),
+            user_text("no, use JWT, sessions are wrong here"),
+        ]
+    )
+    assert [c.text for c in transcript_messages(FILE, events)] == ["no, use JWT, sessions are wrong here"]
 
 
 @pytest.mark.unit
