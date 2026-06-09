@@ -19,6 +19,9 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cc_transcript.domains.mining import NOISE_FLOOR, effective_confidence
+from cc_transcript.domains.mining.confidence import from_payload
+
 from cc_pushback.claude import claude_available, run_claude
 from cc_pushback.context import ContextSnapshot
 
@@ -26,13 +29,14 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from typing import Any
 
+    from cc_transcript.domains.mining import CandidateSignal
+
     from cc_pushback.context import ContextTurn
 
 CONTEXT_TURN_LIMIT = 700
 SAMPLE_TEXT_LIMIT = 400
 HIGHLIGHT_POOL_PER_KIND = 8
 HEURISTIC_HIGHLIGHTS = 12
-NOISE_PREFIXES = ("[Request interrupted", "Stop hook feedback:")
 
 SUMMARY_SYSTEM = """\
 You analyze a developer's "pushback" — the corrective feedback they give an AI coding assistant.
@@ -137,6 +141,7 @@ class Sample:
         context: The conversational window around the feedback.
         origin_path: The transcript file the event came from.
         session_id: The session the event came from.
+        signal: The de-noising confidence signal, decoded from the payload.
     """
 
     id: int
@@ -147,19 +152,22 @@ class Sample:
     context: ContextSnapshot
     origin_path: str | None
     session_id: str | None
+    signal: CandidateSignal | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> Sample:
         """Decodes a :meth:`FeedbackStore.events` row into a :class:`Sample`."""
+        payload = json.loads(str(row["payload_json"])) if row["payload_json"] else {}
         return cls(
             id=int(str(row["id"])),
             source_kind=str(row["source_kind"]),
             occurred_at=str(row["occurred_at"]),
             text=str(row["text"]),
-            payload=json.loads(str(row["payload_json"])) if row["payload_json"] else {},
+            payload=payload,
             context=ContextSnapshot.from_json(str(row["context_json"])),
             origin_path=str(row["origin_path"]) if row["origin_path"] else None,
             session_id=str(row["session_id"]) if row["session_id"] else None,
+            signal=from_payload(payload.get("signal")),
         )
 
 
@@ -218,8 +226,8 @@ class Summary:
     narrative: str | None
 
 
-def is_noise(text: str) -> bool:
-    return len(stripped := text.strip()) < 10 or stripped.startswith(NOISE_PREFIXES)
+def is_noise(sample: Sample) -> bool:
+    return effective_confidence(sample.signal) < NOISE_FLOOR
 
 
 def project_label(origin_path: str) -> str:
@@ -235,7 +243,7 @@ def corpus_stats(samples: Sequence[Sample]) -> CorpusStats:
     return CorpusStats(
         total=len(samples),
         by_kind=dict(Counter(s.source_kind for s in samples).most_common()),
-        noise=sum(is_noise(s.text) for s in samples),
+        noise=sum(is_noise(s) for s in samples),
         sessions=len({s.session_id for s in samples if s.session_id}),
         projects=len({Path(s.origin_path).parent.name for s in samples if s.origin_path}),
         first=times[0][:10] if times else "",
@@ -247,7 +255,7 @@ def corpus_stats(samples: Sequence[Sample]) -> CorpusStats:
 def candidate_pool(samples: Sequence[Sample]) -> dict[str, list[Sample]]:
     pool: dict[str, list[Sample]] = defaultdict(list)
     for sample in samples:
-        if not is_noise(sample.text):
+        if not is_noise(sample):
             pool[sample.source_kind].append(sample)
     return {
         kind: sorted(items, key=lambda s: len(s.text), reverse=True)[:HIGHLIGHT_POOL_PER_KIND]
@@ -364,7 +372,7 @@ def render_card(sample: Sample) -> str:
     return "".join(
         [
             f'<article class="card" data-kind="{escape(sample.source_kind)}" '
-            f'data-noise="{"1" if is_noise(sample.text) else "0"}">',
+            f'data-noise="{"1" if is_noise(sample) else "0"}">',
             f'<header><span class="badge badge-{escape(sample.source_kind)}">{escape(sample.source_kind)}</span>',
             f"<time>{escape(sample.occurred_at[:19])}</time>{meta_chips(sample)}</header>",
             f'<div class="text"><pre>{escape(sample.text)}</pre></div>',

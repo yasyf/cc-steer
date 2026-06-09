@@ -297,7 +297,7 @@ docs = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.10" },
     { name = "anyio", specifier = ">=4.4" },
-    { name = "cc-transcript", git = "https://github.com/yasyf/cc-transcript?branch=main" },
+    { name = "cc-transcript", editable = "../cc-transcript-reorg" },
     { name = "click", specifier = ">=8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
@@ -311,12 +311,32 @@ docs = [{ name = "great-docs", specifier = ">=0.13,<0.14" }]
 
 [[package]]
 name = "cc-transcript"
-version = "0.5.0"
-source = { git = "https://github.com/yasyf/cc-transcript?branch=main#95ced6277530f5f36e939456e2673c75ed179cca" }
+version = "0.6.0"
+source = { editable = "../cc-transcript-reorg" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "anyio" },
     { name = "orjson" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "afinn", marker = "extra == 'sentiment'", specifier = ">=0.1" },
+    { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "anyio", specifier = ">=4.4" },
+    { name = "cc-transcript", extras = ["sentiment"], marker = "extra == 'lexicon'" },
+    { name = "orjson", specifier = ">=3.10" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
+    { name = "spacy", marker = "extra == 'sentiment'", specifier = ">=3.8" },
+    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.44" },
+]
+provides-extras = ["dev", "sentiment", "lexicon"]
+
+[package.metadata.requires-dev]
+docs = [
+    { name = "great-docs", git = "https://github.com/posit-dev/great-docs?rev=main" },
+    { name = "griffelib", specifier = ">=2.0" },
 ]
 
 [[package]]

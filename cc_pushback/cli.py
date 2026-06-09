@@ -5,19 +5,18 @@ from __future__ import annotations
 import functools
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import get_args
 
 import anyio
 import click
 from cc_transcript import CLAUDE_PROJECTS_DIR
 
-from cc_pushback.models import SourceKind
+from cc_pushback.models import PUSHBACK_SOURCE_KINDS, SourceKind
 from cc_pushback.report import Sample, build_summary, render_html
 from cc_pushback.scan import scan as run_scan
 from cc_pushback.serve import serve
 from cc_pushback.store import FeedbackStore
 
-SOURCE_KINDS = get_args(SourceKind)
+SOURCE_KINDS = [*PUSHBACK_SOURCE_KINDS]
 
 
 def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from cc_transcript.domains.mining import firm, noise, weak
 
 from cc_pushback.context import ContextSnapshot, ContextTurn
 from cc_pushback.report import (
@@ -18,6 +19,8 @@ from cc_pushback.report import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from cc_transcript.domains.mining import CandidateSignal
 
 PROJ = "/h/.claude/projects/-Users-y-Code-proj/sess.jsonl"
 OTHER = "/h/.claude/projects/-Users-y-projects-other/sess.jsonl"
@@ -35,6 +38,7 @@ def make_sample(
     before: Sequence[ContextTurn] = (),
     trigger: ContextTurn | None = None,
     after: Sequence[ContextTurn] = (),
+    signal: CandidateSignal | None = None,
 ) -> Sample:
     return Sample(
         id=event_id,
@@ -45,21 +49,21 @@ def make_sample(
         context=ContextSnapshot(before=tuple(before), trigger=trigger, after=tuple(after)),
         origin_path=origin,
         session_id=session,
+        signal=signal,
     )
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    ("signal", "expected"),
     [
-        pytest.param("[Request interrupted by user for tool use]", True, id="interrupt-marker"),
-        pytest.param("Stop hook feedback:\nError: ...", True, id="hook-error"),
-        pytest.param("   ", True, id="whitespace"),
-        pytest.param("too short", True, id="under-ten-chars"),
-        pytest.param("a lot of these can be helpers inside the framework", False, id="real-pushback"),
+        pytest.param(noise("empty"), True, id="none-confidence-is-noise"),
+        pytest.param(weak("bare_marker"), False, id="low-confidence-survives"),
+        pytest.param(firm("transcript_message"), False, id="medium-confidence-survives"),
+        pytest.param(None, False, id="missing-signal-defaults-medium"),
     ],
 )
-def test_is_noise(text: str, expected: bool) -> None:
-    assert is_noise(text) is expected
+def test_is_noise(signal: CandidateSignal | None, expected: bool) -> None:
+    assert is_noise(make_sample(1, "transcript_message", "any text", signal=signal)) is expected
 
 
 def test_project_label_decodes_marker() -> None:
@@ -82,6 +86,7 @@ def corpus() -> list[Sample]:
             "[Request interrupted by user]",
             occurred_at="2026-05-02T09:00:00+00:00",
             session="B",
+            signal=noise("bare_marker"),
         ),
         make_sample(
             3,
@@ -107,7 +112,7 @@ def test_corpus_stats_counts() -> None:
 
 def test_candidate_pool_excludes_noise_and_caps() -> None:
     samples = [make_sample(i, "transcript_message", f"a substantive piece of pushback number {i}") for i in range(12)]
-    samples.append(make_sample(99, "transcript_message", "[Request interrupted by user]"))
+    samples.append(make_sample(99, "transcript_message", "[Request interrupted by user]", signal=noise("bare_marker")))
     pool = candidate_pool(samples)
     assert len(pool["transcript_message"]) == 8
     assert 99 not in {s.id for s in pool["transcript_message"]}

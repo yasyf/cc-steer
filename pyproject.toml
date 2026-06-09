@@ -19,7 +19,7 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.10",
     "anyio>=4.4",
-    "cc-transcript>=0.6",
+    "cc-transcript>=0.7,<0.8",
     "click>=8",
     "spawnllm>=0.1",
 ]
@@ -50,7 +50,7 @@ module-name = "cc_pushback"
 module-root = ""
 
 [tool.uv.sources]
-cc-transcript = { git = "https://github.com/yasyf/cc-transcript", branch = "main" }
+cc-transcript = { path = "../cc-transcript-reorg", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

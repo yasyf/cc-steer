@@ -1,11 +1,25 @@
-"""Claude Code transcript marker constants the pushback detectors recognize."""
+"""Re-exports the transcript marker constants from the mining domain.
+
+Deprecated: import these names from :mod:`cc_transcript.domains.mining`. This shim
+keeps cc-pushback's historical import paths working for at least one release.
+"""
 
 from __future__ import annotations
 
-from cc_transcript import INTERRUPT_MARKER_RE as INTERRUPT_MARKER_RE
+from cc_transcript.domains.mining import (
+    DENIAL_PREFIX,
+    EDIT_TOOLS,
+    INTERRUPT_MARKER_RE,
+    REENTRY_LOOKBACK,
+    USER_SAID_MARKER,
+    USER_SAID_TRAILER,
+)
 
-DENIAL_PREFIX = "The user doesn't want to proceed with this tool use. The tool use was rejected"
-USER_SAID_MARKER = "To tell you how to proceed, the user said:\n"
-USER_SAID_TRAILER = "Note: The user's next message"
-EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-REENTRY_LOOKBACK = 40
+__all__ = [
+    "DENIAL_PREFIX",
+    "EDIT_TOOLS",
+    "INTERRUPT_MARKER_RE",
+    "REENTRY_LOOKBACK",
+    "USER_SAID_MARKER",
+    "USER_SAID_TRAILER",
+]

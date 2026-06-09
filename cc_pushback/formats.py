@@ -1,13 +1,21 @@
-"""Parsers for structured code-review message formats embedded in transcripts."""
+"""cc-pushback's concrete code-review formats over the mining domain's parser infra.
+
+The generic :class:`ReviewComment`/:class:`ReviewFormat` types and the
+format-dispatch live in :mod:`cc_transcript.domains.mining`; this module supplies
+cc-pushback's policy — the three review formats it recognizes — and injects them
+into the domain's :func:`extract_all`.
+"""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cc_transcript.domains.mining import ReviewComment, ReviewFormat
+from cc_transcript.domains.mining import extract_all as domain_extract_all
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Iterator
 
 SUPERSET_INLINE_RE = re.compile(
     r"^In ((?=\S*[./]|\S+?:L)\S+?)(?::L(\d+)(?:-(\d+))?)?: (.+)$", re.MULTILINE
@@ -24,38 +32,6 @@ CONDUCTOR_WORKSTREAM_HEADER_RE = re.compile(
     re.MULTILINE,
 )
 WORKSTREAM_BODY_RE = re.compile(r"^(?:FIX|Tests): .+$", re.MULTILINE)
-
-
-@dataclass(frozen=True, slots=True)
-class ReviewComment:
-    """A single inline review comment parsed from a code-review message.
-
-    Attributes:
-        file: The file the comment targets, when cited.
-        line_start: The first line the comment targets, when cited.
-        line_end: The last line the comment targets, when a range is cited.
-        comment: The comment's text.
-    """
-
-    file: str | None
-    line_start: int | None
-    line_end: int | None
-    comment: str
-
-
-@dataclass(frozen=True, slots=True)
-class ReviewFormat:
-    """A named code-review text format with a detector and extractor.
-
-    Attributes:
-        name: The format's identifier.
-        pattern: A pattern that matches when the format is present in a text.
-        extract: Parses a matching text into its review comments.
-    """
-
-    name: str
-    pattern: re.Pattern[str]
-    extract: Callable[[str], tuple[ReviewComment, ...]]
 
 
 def extract_superset_inline(text: str) -> tuple[ReviewComment, ...]:
@@ -111,7 +87,7 @@ def formats() -> tuple[ReviewFormat, ...]:
 
 
 def extract_all(text: str) -> Iterator[tuple[ReviewFormat, ReviewComment]]:
-    """Yields every ``(format, comment)`` extracted by any matching format.
+    """Yields every ``(format, comment)`` extracted by any of cc-pushback's formats.
 
     Args:
         text: The raw review message text.
@@ -119,9 +95,4 @@ def extract_all(text: str) -> Iterator[tuple[ReviewFormat, ReviewComment]]:
     Yields:
         One pair per extracted comment, across all formats whose pattern matches.
     """
-    return (
-        (fmt, comment)
-        for fmt in formats()
-        if fmt.pattern.search(text)
-        for comment in fmt.extract(text)
-    )
+    return domain_extract_all(text, formats())
