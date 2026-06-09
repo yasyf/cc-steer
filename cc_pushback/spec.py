@@ -31,7 +31,7 @@ PUSHBACK_SPEC: FilterSpec = build_spec(
     drop_meta_flag("is_meta"),
     drop_compacted(),
     drop_empty(only_from=USERS),
-    drop_junk("structural", "agent_injection", "stop_hook", "continuation"),
+    drop_junk("structural", "agent_injection", "stop_hook", "continuation", "command_echo"),
     drop_phrases(TRIVIAL_ACK_SET | RESUME_PHRASE_SET),
     drop_short(2),
 )
