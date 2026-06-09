@@ -1,4 +1,4 @@
-"""The ``cc-pushback`` command-line interface: scan, stats, list, and export-html."""
+"""The ``cc-pushback`` command-line interface: scan, stats, list, and view-samples."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
         click.echo(f"[{row['source_kind']}] {row['occurred_at']}  {str(row['text'])[:200]}")
 
 
-@main.command(name="export-html")
+@main.command(name="view-samples")
 @click.option(
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
@@ -109,7 +109,7 @@ def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
 @click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model for the claude CLI summary.")
 @click.option("--port", type=int, default=0, show_default=True, help="Port to serve on; 0 picks a free one.")
 @click.option("--open", "open_", is_flag=True, help="Open the page in a browser once serving.")
-def export_html(db: Path | None, llm: bool, model: str, port: int, open_: bool) -> None:
+def view_samples(db: Path | None, llm: bool, model: str, port: int, open_: bool) -> None:
     """Render every collected sample into one HTML page and serve it locally.
 
     The page leads with a corpus summary and highlights, then lists every sample
