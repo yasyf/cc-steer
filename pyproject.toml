@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "pyright>=1.1",
+    "ty>=0.0.44",
     "ruff>=0.8",
 ]
 
@@ -54,12 +54,31 @@ markers = [
     "integration: Integration tests",
 ]
 
+# ty (Astral) is the default type checker — run `uv run ty check cc_pushback`.
+# It is fast, understands modern syntax, and avoids the strict-pyright false
+# positives on pydantic/attrs-style dynamic defaults and PK-type overrides.
+[tool.ty.rules]
+# Keep cross-checker `# type: ignore` / `# pyright: ignore` comments from tripping ty.
+unused-type-ignore-comment = "ignore"
+
+# pyright is kept as a secondary checker (editors / `uvx pyright`). Basic mode plus
+# a few disables covers the noise; ty is the gate that runs in CI.
 [tool.pyright]
 pythonVersion = "3.13"
-typeCheckingMode = "strict"
+typeCheckingMode = "basic"
 include = ["cc_pushback"]
 venvPath = "."
 venv = ".venv"
+reportImplicitOverride = "none"
+reportIncompatibleVariableOverride = "none"
+reportUnknownVariableType = "none"
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownParameterType = "none"
+reportUnknownLambdaType = "none"
+reportMissingTypeArgument = "none"
+reportPrivateImportUsage = "none"
+reportUnusedCallResult = "none"
 
 [tool.ruff]
 line-length = 120
@@ -70,7 +89,7 @@ src = [".", "tests"]
 select = ["E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/__init__.py" = ["F401"]
+"__init__.py" = ["F401"]
 
 [dependency-groups]
 docs = [
