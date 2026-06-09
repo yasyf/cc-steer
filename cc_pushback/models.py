@@ -55,8 +55,10 @@ class FeedbackCandidate:
 def dedup_key(*parts: str) -> DedupKey:
     """Returns the stable dedup key for ``parts``.
 
-    Keyed on transcript identity (session, uuid, discriminator) rather than the
-    absolute file path, so the database is portable and idempotent across moves.
+    Detectors key on session, kind, and the feedback content (plus its code
+    location for review comments) rather than the transcript entry's uuid or the
+    absolute file path, so the same pushback recorded under two transcript entries
+    collapses to one row, and the database stays portable and idempotent across moves.
 
     Args:
         parts: The content fragments that uniquely identify a candidate.

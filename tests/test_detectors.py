@@ -203,6 +203,32 @@ def test_review_comment_explodes_one_row_per_inline_cite() -> None:
 
 
 @pytest.mark.unit
+def test_duplicate_review_entries_share_a_dedup_key() -> None:
+    body = "In src/foo.py:L10: use a dataclass here"
+    events = parse([user_text(body, uuid="uuid-A"), user_text(body, uuid="uuid-B")])
+    cands = [c for c in detect(FILE, events) if c.source_kind == "review_comment"]
+    assert len(cands) == 2
+    assert cands[0].dedup_key == cands[1].dedup_key  # same comment, two entries -> one row on insert
+
+
+@pytest.mark.unit
+def test_repeated_interrupt_markers_collapse_on_the_shared_correction() -> None:
+    events = parse(
+        [
+            assistant_tool_use("t1", "Bash", {"command": "a"}),
+            interrupt_result("t1"),
+            assistant_tool_use("t2", "Bash", {"command": "b"}),
+            interrupt_result("t2"),
+            user_text("stop, do it the other way"),
+        ]
+    )
+    cands = list(interrupt_rejections(FILE, events))
+    assert len(cands) == 2
+    assert len({c.dedup_key for c in cands}) == 1  # both markers pair the same correction
+    assert all(c.text == "stop, do it the other way" for c in cands)
+
+
+@pytest.mark.unit
 def test_pushback_spec_keeps_interrupt_marker() -> None:
     [event] = parse([user_text("[Request interrupted by user] run the tests instead, not the build")])
     assert keep(event, PUSHBACK_SPEC) is True

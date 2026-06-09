@@ -52,7 +52,7 @@ def correction_text(events: Sequence[TranscriptEvent], index: int) -> str | None
 def transcript_messages(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:
     return (
         FeedbackCandidate(
-            dedup_key=dedup_key(event.meta.session_id, event.meta.uuid, "transcript_message"),
+            dedup_key=dedup_key(event.meta.session_id, "transcript_message", event.text),
             source_kind="transcript_message",
             occurred_at=event.meta.timestamp,
             text=event.text,
@@ -73,7 +73,7 @@ def exit_plan_rejections(
 ) -> Iterator[FeedbackCandidate]:
     return (
         FeedbackCandidate(
-            dedup_key=dedup_key(event.meta.session_id, event.meta.uuid, result.tool_use_id, "plan_review"),
+            dedup_key=dedup_key(event.meta.session_id, "plan_review", "exit_plan", text),
             source_kind="plan_review",
             occurred_at=event.meta.timestamp,
             text=text,
@@ -111,7 +111,7 @@ def plan_reentries(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[Fe
             continue
         seen.add(user_event.meta.uuid)
         yield FeedbackCandidate(
-            dedup_key=dedup_key(user_event.meta.session_id, user_event.meta.uuid, "plan_reentry", "plan_review"),
+            dedup_key=dedup_key(user_event.meta.session_id, "plan_review", "plan_reentry", user_event.text),
             source_kind="plan_review",
             occurred_at=user_event.meta.timestamp,
             text=user_event.text,
@@ -139,7 +139,7 @@ def denials(
 ) -> Iterator[FeedbackCandidate]:
     return (
         FeedbackCandidate(
-            dedup_key=dedup_key(event.meta.session_id, event.meta.uuid, block.tool_use_id, "interrupt_rejection"),
+            dedup_key=dedup_key(event.meta.session_id, "interrupt_rejection", text),
             source_kind="interrupt_rejection",
             occurred_at=event.meta.timestamp,
             text=text,
@@ -162,7 +162,7 @@ def interrupt_markers(
     if marker_in(event) is None or (correction := correction_text(events, index)) is None:
         return
     yield FeedbackCandidate(
-        dedup_key=dedup_key(event.meta.session_id, event.meta.uuid, "interrupt", "interrupt_rejection"),
+        dedup_key=dedup_key(event.meta.session_id, "interrupt_rejection", correction),
         source_kind="interrupt_rejection",
         occurred_at=event.meta.timestamp,
         text=correction,
@@ -187,7 +187,14 @@ def interrupt_rejections(path: Path, events: Sequence[TranscriptEvent]) -> Itera
 def review_comments(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:
     return (
         FeedbackCandidate(
-            dedup_key=dedup_key(event.meta.session_id, event.meta.uuid, "review_comment", str(position)),
+            dedup_key=dedup_key(
+                event.meta.session_id,
+                "review_comment",
+                comment.file or "",
+                str(comment.line_start or ""),
+                str(comment.line_end or ""),
+                comment.comment,
+            ),
             source_kind="review_comment",
             occurred_at=event.meta.timestamp,
             text=comment.comment,
@@ -204,7 +211,7 @@ def review_comments(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[F
             },
         )
         for index, event in pushback_user_events(events)
-        for position, (fmt, comment) in enumerate(extract_all(event.text))
+        for fmt, comment in extract_all(event.text)
     )
 
 
