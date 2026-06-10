@@ -4,7 +4,8 @@ import ast
 from collections.abc import Iterator
 
 from captain_hook import Allow, Input, Warn, gate
-from captain_hook.style import StyleDiffRule, StyleRule, Violation, matchers as M, styleguide
+from captain_hook.style import StyleDiffRule, StyleRule, Violation, styleguide
+from captain_hook.style import matchers as M
 
 
 def any_label(node: ast.AST) -> str:
