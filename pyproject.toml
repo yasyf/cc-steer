@@ -49,9 +49,6 @@ build-backend = "uv_build"
 module-name = "cc_pushback"
 module-root = ""
 
-[tool.uv.sources]
-cc-transcript = { path = "../cc-transcript-reorg", editable = true }
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--tb=short", "-q"]
