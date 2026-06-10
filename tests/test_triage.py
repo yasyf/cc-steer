@@ -130,6 +130,8 @@ async def test_triage_leaves_feedback_events_untouched(store: FeedbackStore, mon
 async def test_prompt_version_bump_rejudges_and_keeps_old_verdicts(
     store: FeedbackStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from cc_pushback.triage import PROMPT_VERSION
+
     total = await seed(store)
 
     async def fake(prompt: str, **_: Any) -> Verdict:
@@ -137,11 +139,11 @@ async def test_prompt_version_bump_rejudges_and_keeps_old_verdicts(
 
     monkeypatch.setattr("cc_pushback.triage.run_claude_structured", fake)
     await triage(store)
-    monkeypatch.setattr("cc_pushback.triage.PROMPT_VERSION", 2)
+    monkeypatch.setattr("cc_pushback.triage.PROMPT_VERSION", PROMPT_VERSION + 1)
     report = await triage(store)
     assert report.judged == total
-    assert len(await store.judged(role=JUDGE, prompt_version=1)) == total
-    assert len(await store.judged(role=JUDGE, prompt_version=2)) == total
+    assert len(await store.judged(role=JUDGE, prompt_version=PROMPT_VERSION)) == total
+    assert len(await store.judged(role=JUDGE, prompt_version=PROMPT_VERSION + 1)) == total
 
 
 @pytest.mark.integration
