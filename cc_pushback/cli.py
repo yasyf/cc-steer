@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 SOURCE_KINDS = [*PUSHBACK_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
-PENDING_CAP = 750
+PENDING_CAP = 1200
 
 
 def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:

@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
     from cc_pushback.store import FeedbackStore
 
-PROMPT_VERSION = 1
-AUDIT_VERSION = 1
+PROMPT_VERSION = 2
+AUDIT_VERSION = 2
 JUDGE = "judge"
 AUDITOR = "auditor"
 TURN_TEXT_LIMIT = 700
@@ -69,15 +69,32 @@ Pick exactly one category:
 - style_violation: the work violates the user's conventions or stated preferences.
 - premature: the assistant stopped early, skipped work, or claimed completion when work remains.
 - operational_directive: a forward instruction ("commit and push", "set a higher timeout")
-  that does not criticize prior work.
+  that does not criticize prior work. Approving then adding scope ("yes — also do Y",
+  "upgrade our alias as well") is operational; forward words like "fix" or "review"
+  aimed at future work do not by themselves fault what was already done.
 - status_update: the user reporting state ("done, its running", "I killed it already").
-- new_task: a fresh request or spec, not a reaction to the preceding action.
-- question: asking for information, not correcting.
+- new_task: a fresh request or spec, not a reaction to the preceding action. A report
+  that an external tool or pre-existing system is broken is new_task or status_update,
+  not incorrect_change, unless the assistant built it.
+- question: a genuine request for information. A skeptical or rhetorical question that
+  presses on a choice the assistant made ("why are we hardcoding this?", "should this
+  ever be optional?", "there's really no better way?") is pushback, not a question —
+  categorize it by what it challenges.
 - other: none of the above.
 
 The first five categories are pushback; the rest are noise.
 A mixed message that contains ANY genuine corrective content is pushback — pick the
-category of the corrective part.
+category of the corrective part. Corrective content is often implicit in a directive:
+"figure out the right proper fix" faults the current fix, "look more closely" faults a
+shallow look, "not just X — give me Y" faults an insufficient answer, and exasperation
+("stop wasting time") faults the behavior, even when phrased as the next step.
+The assistant action being corrected may predate the trigger shown: when the message
+critiques files or output the assistant produced earlier in the session, it is pushback
+on that work even if the immediately preceding action is unrelated.
+When the source is review_comment, the message is an inline code-review comment on code
+the assistant wrote: terse imperatives there ("inline", "remove this one", "maybe make
+this _safe?") are corrections — usually style_violation, incorrect_change, or
+wrong_approach — not operational directives.
 
 what_claude_did: ONE neutral sentence naming the assistant action the message responds
 to (e.g. "Force-pushed to the shared branch with git push --force"). Write it even when
@@ -108,7 +125,16 @@ stopping point — even partially, even alongside unrelated content.
 
 It does not belong when the message only moves work forward or reports facts: telling
 the assistant what to do next, giving a new assignment, asking or answering a question,
-relaying status, or approving.
+relaying status, or approving. A message that raises a doubt but ends by accepting the
+assistant's choice ("nevermind, if there's a reason for it, then do it") moves work
+forward and does not belong.
+
+Two sharp edges. An inline code-review comment (source review_comment) annotates a
+specific line of code the assistant authored: short imperatives and suggestions there
+("inline", "it is required", "use dataclasses always") fault that line and belong in
+the dataset. And a question can go either way: one that presses on a choice ("couldn't
+this inherit from userlist?") faults the work, while one that merely seeks information
+does not.
 
 Choose the single best-fitting label:
 - wrong_approach / incorrect_change / unwanted_action / style_violation / premature (corrections)
