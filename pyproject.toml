@@ -21,6 +21,7 @@ dependencies = [
     "anyio>=4.4",
     "cc-transcript>=0.5",
     "click>=8",
+    "spawnllm>=0.1",
 ]
 
 [project.optional-dependencies]
