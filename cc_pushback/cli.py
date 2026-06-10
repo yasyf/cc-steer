@@ -1,22 +1,35 @@
-"""The ``cc-pushback`` command-line interface: scan, stats, list, and view-samples."""
+"""The ``cc-pushback`` command-line interface: scan, triage, audit, eval, and friends."""
 
 from __future__ import annotations
 
+import dataclasses
 import functools
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 import click
 from cc_transcript import CLAUDE_PROJECTS_DIR
 
+from cc_pushback.claude import claude_available
+from cc_pushback.evaluate import evaluate, flip_report
 from cc_pushback.models import PUSHBACK_SOURCE_KINDS, SourceKind
-from cc_pushback.report import Sample, build_summary, render_html
+from cc_pushback.report import Sample, build_summary, project_label, render_html
 from cc_pushback.scan import scan as run_scan
 from cc_pushback.serve import serve
 from cc_pushback.store import FeedbackStore
+from cc_pushback.triage import PROMPT_VERSION
+from cc_pushback.triage import audit as run_audit
+from cc_pushback.triage import triage as run_triage
+
+if TYPE_CHECKING:
+    from spawnllm import TModel
 
 SOURCE_KINDS = [*PUSHBACK_SOURCE_KINDS]
+TIERS = ["small", "medium", "large"]
+PENDING_CAP = 750
 
 
 def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:
@@ -74,12 +87,17 @@ async def scan(transcripts: tuple[Path, ...], full: bool, db: Path | None) -> No
 )
 @coro
 async def stats(db: Path | None) -> None:
-    """Print ingestion counts by source kind and the scanned-file count."""
+    """Print ingestion counts by source kind and triage coverage."""
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         report = await store.stats()
+        triaged = await store.triage_stats(prompt_version=PROMPT_VERSION)
     click.echo(f"total: {report.total}  files: {report.files}")
     for kind, count in report.by_source.items():
         click.echo(f"  {kind}: {count}")
+    share = f" ({triaged.accepted / triaged.judged:.0%})" if triaged.judged else ""
+    click.echo(f"triaged: {triaged.judged}/{triaged.total} (v{PROMPT_VERSION})  accepted: {triaged.accepted}{share}")
+    for category, count in triaged.by_category.items():
+        click.echo(f"  {category}: {count}")
 
 
 @main.command(name="list")
@@ -104,6 +122,162 @@ async def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
         rows = await store.recent(source_kind=source, limit=limit)
     for row in rows:
         click.echo(f"[{row['source_kind']}] {row['occurred_at']}  {str(row['text'])[:200]}")
+
+
+@main.command()
+@click.option(
+    "--model", "tier", type=click.Choice(TIERS), default="medium", show_default=True, help="Judge model tier."
+)
+@click.option("--limit", type=int, default=None, help="Judge at most this many rows this pass.")
+@click.option("--concurrency", type=int, default=8, show_default=True, help="Maximum concurrent claude subshells.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def triage(tier: TModel, limit: int | None, concurrency: int, db: Path | None) -> None:
+    """Judge every stored candidate lacking a verdict at the current prompt version.
+
+    Incremental and idempotent: verdicts persist per row as soon as each call
+    completes, failed rows stay pending and are retried on the next run, and
+    re-running over a fully judged corpus is a no-op.
+    """
+    from cc_pushback.claude import resolved_model
+    from cc_pushback.triage import JUDGE
+
+    if not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        pending = len(await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model=resolved_model(tier)))
+        if pending > PENDING_CAP:
+            raise click.ClickException(f"{pending} pending rows exceeds the {PENDING_CAP} safety cap — wrong DB?")
+        click.echo(f"pending: {pending} rows at prompt v{PROMPT_VERSION} ({resolved_model(tier)})")
+        report = await run_triage(store, tier=tier, limit=limit, concurrency=concurrency)
+    click.echo(f"judged {report.judged} rows ({report.failed} failed), {report.pending} pending")
+
+
+@main.command()
+@click.option("--accepts", type=int, default=60, show_default=True, help="Audit budget for judge-accepted rows.")
+@click.option("--rejects", type=int, default=60, show_default=True, help="Audit budget for judge-rejected rows.")
+@click.option("--seed", type=int, default=1, show_default=True, help="Deterministic sampling seed (iteration number).")
+@click.option(
+    "--model", "tier", type=click.Choice(TIERS), default="large", show_default=True, help="Auditor model tier."
+)
+@click.option("--concurrency", type=int, default=8, show_default=True, help="Maximum concurrent claude subshells.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def audit(tier: TModel, accepts: int, rejects: int, seed: int, concurrency: int, db: Path | None) -> None:
+    """Audit a seeded stratified sample of the current prompt version's verdicts.
+
+    The auditor is a stronger model, blind to the judge's verdicts; its labels are
+    keyed independently of the judge's prompt version, so they accumulate across
+    iterations and re-auditing a sampled row costs nothing.
+    """
+    if not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await run_audit(store, accepts=accepts, rejects=rejects, seed=seed, tier=tier, concurrency=concurrency)
+    click.echo(f"audited {report.judged} fresh rows ({report.failed} failed)")
+
+
+@main.command(name="eval")
+@click.option("--seed", type=int, default=1, show_default=True, help="The seed the audit ran with.")
+@click.option("--accepts", type=int, default=60, show_default=True, help="The audit's accept budget.")
+@click.option("--rejects", type=int, default=60, show_default=True, help="The audit's reject budget.")
+@click.option("--compare-to", type=int, default=None, help="Earlier prompt version for flip analysis.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the full metrics as JSON.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, as_json: bool, db: Path | None) -> None:
+    """Compute the mechanical metrics for the current prompt version. No LLM calls.
+
+    Recomputes everything from raw verdicts: the golden-set gate, audited precision
+    and reject contamination over the reproduced uniform core, the cumulative-pool
+    secondary estimates, per-kind tables, and (with ``--compare-to``) verdict flips
+    against an earlier prompt version.
+    """
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        metrics = await evaluate(store, seed=seed, accepts=accepts, rejects=rejects)
+        flips = await flip_report(store, from_version=compare_to, to_version=PROMPT_VERSION) if compare_to else None
+    if as_json:
+        payload = dataclasses.asdict(metrics) | {
+            "precision": metrics.precision,
+            "contamination": metrics.contamination,
+            "contamination_upper": metrics.contamination_upper,
+            "recall_hat": metrics.recall_hat,
+            "flips": dataclasses.asdict(flips) if flips else None,
+        }
+        click.echo(json.dumps(payload, indent=2))
+        return
+    share = f" ({metrics.accepted / metrics.judged:.0%})" if metrics.judged else ""
+    click.echo(
+        f"prompt v{metrics.prompt_version}: judged {metrics.judged}/{metrics.total}, accepted {metrics.accepted}{share}"
+    )
+    click.echo(f"golden: {metrics.golden.passed}/{metrics.golden.total} (sha256 {metrics.golden.sha256[:12]})")
+    for failure in metrics.golden.failures:
+        click.echo(f"  FAIL expected {failure.expected}, got {failure.category}: {failure.text[:120]}")
+    core_a, core_r = metrics.core_accepts, metrics.core_rejects
+    click.echo(
+        f"precision (core): {core_a.hits}/{core_a.audited}"
+        + (f" = {p:.3f}" if (p := metrics.precision) is not None else "")
+    )
+    upper = f" (95% upper {u:.3f})" if (u := metrics.contamination_upper) is not None else ""
+    click.echo(
+        f"contamination (core): {core_r.hits}/{core_r.audited}"
+        + (f" = {c:.3f}{upper}" if (c := metrics.contamination) is not None else "")
+    )
+    if (recall := metrics.recall_hat) is not None:
+        click.echo(f"recall_hat: {recall:.3f}")
+    pool_a, pool_r = metrics.pool_accepts, metrics.pool_rejects
+    click.echo(f"pool: accepts {pool_a.hits}/{pool_a.audited}, rejects {pool_r.hits}/{pool_r.audited}")
+    for kind, (judged, accepted) in sorted(metrics.by_kind.items()):
+        click.echo(f"  {kind}: {accepted}/{judged} accepted")
+    click.echo(f"disagreements: {len(metrics.disagreements)}")
+    for item in metrics.disagreements:
+        click.echo(
+            f"  [{item.source_kind}] judge={item.judge_category} auditor={item.auditor_category}: {item.text[:120]}"
+        )
+    if flips is not None:
+        rate = f" ({r:.0%})" if (r := flips.rate) is not None else ""
+        click.echo(f"flips vs v{compare_to}: {len(flips.flips)}/{flips.common}{rate}")
+        for flip in flips.flips:
+            click.echo(f"  {flip.from_category} -> {flip.to_category}: {flip.text[:120]}")
+
+
+@main.command()
+@click.option("--jsonl", is_flag=True, help="Emit full pairs as JSON lines for fine-tuning export.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def pairs(jsonl: bool, db: Path | None) -> None:
+    """Print the training pairs — the pipeline's deliverable.
+
+    Each pair is one accepted candidate: what Claude did (the faithful trigger
+    context plus the judge's one-line normalization) and the user's pushback.
+    """
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        rows = await store.pairs()
+    for row in rows:
+        if jsonl:
+            click.echo(json.dumps(row | {"project": project_label(str(row["origin_path"] or ""))}))
+        else:
+            click.echo(f"[{row['category']}] {str(row['claude_action_summary'])[:80]} -> {str(row['pushback'])[:100]}")
 
 
 @main.command(name="view-samples")

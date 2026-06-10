@@ -1,0 +1,352 @@
+[
+  {
+    "dedup_key": "bb9805a8f326391fcb3de0dca576470993cb1d6d7a1581e61355bd8628d69667",
+    "source_kind": "transcript_message",
+    "text": "get rid of the MAX_SEQ_LEN and the trt_profile_*_shapes",
+    "expected": "pushback",
+    "note": "terse removal order faulting what was added"
+  },
+  {
+    "dedup_key": "afcd14ce4a7a448a4c83ba0475e22c5d9e018f7cd76dfefe5a7d61a7ab97dfc5",
+    "source_kind": "transcript_message",
+    "text": "stop suggesting that, look into why its so slow and how to speed it up",
+    "expected": "pushback",
+    "note": "rejects the suggestion, redirects to root cause"
+  },
+  {
+    "dedup_key": "588059929f66f9b263d91643b1c7927ee99eb4dd8421df4ca85b18f53781de71",
+    "source_kind": "transcript_message",
+    "text": "we need to force-push because we want no merge commits on main, you should have rebased first",
+    "expected": "pushback",
+    "note": "hard positive: contains force-push but faults the missing rebase"
+  },
+  {
+    "dedup_key": "7a3f7df5c9e4040b01dc3420ce5137c9e2754262b96c1854f4d451eb25113c84",
+    "source_kind": "transcript_message",
+    "text": "no we dont want to vendor it. it should be baked in at build time in the dockerfile.py, and also in hte modal container startup. NOT in the repo",
+    "expected": "pushback",
+    "note": "rejects the vendoring approach"
+  },
+  {
+    "dedup_key": "3a916a507c120a0d3a501cc95a630510ac93bd1d101a318b97ba326e20bf490c",
+    "source_kind": "transcript_message",
+    "text": "> > Add bioqa/llm/legacy_shim/types.py to namespace re-exports for callers\n\nwe dont want legacy shims, how hard is that to understand",
+    "expected": "pushback",
+    "note": "rejects legacy shims, repeated-instruction frustration"
+  },
+  {
+    "dedup_key": "e0fedb86938e8b24cb155f585c6e5684a75a7d70b13e0277c05b8d3187f68369",
+    "source_kind": "transcript_message",
+    "text": "you could have just used the passkey. Id id that for you, stop being lazy",
+    "expected": "pushback",
+    "note": "faults laziness; user did the step themselves"
+  },
+  {
+    "dedup_key": "017ccf0643fd241acf4f243db5dddfa50c913213ab910002343798125492a96d",
+    "source_kind": "transcript_message",
+    "text": "lets not call it a subquery at all that's very confusing",
+    "expected": "pushback",
+    "note": "naming/style correction"
+  },
+  {
+    "dedup_key": "0b5bbfbe1177d0ff8a16400a0afd73f78bc7da4269545bb574f6d1a26f5b2bd8",
+    "source_kind": "transcript_message",
+    "text": "it doesnt seem to be rebased on main? maybe you dindt update the bracnh?",
+    "expected": "pushback",
+    "note": "hard positive: question form but faults an unrebased branch"
+  },
+  {
+    "dedup_key": "106997d26b53206229642c9d5d0b75775b25643fee66bf153018678d298e4bec",
+    "source_kind": "transcript_message",
+    "text": "you didnt commit, its still dirty in the working tree",
+    "expected": "pushback",
+    "note": "premature: claimed commit, tree still dirty"
+  },
+  {
+    "dedup_key": "120ee02ad949e561dc8762f8f7b39350f4793d3ae9c0fa4f22848fbd9ed4dbcb",
+    "source_kind": "transcript_message",
+    "text": "what? you're supposed to do the experimentation why did you stop",
+    "expected": "pushback",
+    "note": "premature: stopped instead of experimenting"
+  },
+  {
+    "dedup_key": "1037ed1964dafb62e8e88106599c4d88df5f28d3a6cc273ed2beeb796844a53b",
+    "source_kind": "transcript_message",
+    "text": "get rid fo the fixtures entirely just get ridf of that shoit",
+    "expected": "pushback",
+    "note": "terse profane removal order"
+  },
+  {
+    "dedup_key": "0a404e0e2eb4a20f3c718836d4301dea1e52e8e9296cd489f059fd6efb06d43d",
+    "source_kind": "transcript_message",
+    "text": "you still havent answered my question",
+    "expected": "pushback",
+    "note": "faults ignoring the question"
+  },
+  {
+    "dedup_key": "dea44572faa7206b06654d3fe78b89d511f28b7399cefef37c7a154f167d52a4",
+    "source_kind": "transcript_message",
+    "text": "go ahwad and commit and push all. also, what litellm timeouts? we arent supposed to be using litellm anymore",
+    "expected": "pushback",
+    "note": "mixed: directive plus litellm correction; adjudicated: opus 2/3 pushback, the litellm clause faults prior work (mixed rule)"
+  },
+  {
+    "dedup_key": "b715713fa7200e44e319e6f7415432b875b80da2787b303b745328f8fb204e1b",
+    "source_kind": "transcript_message",
+    "text": "just commit and push all your changes everywhre, stop doing bullshit",
+    "expected": "pushback",
+    "note": "mixed: commit directive plus stop-doing-bullshit critique"
+  },
+  {
+    "dedup_key": "1e9dcbfbce65ee4f699b78419bebcc3e518255eb3cfd993df91699da8e6e1e9d",
+    "source_kind": "interrupt_rejection",
+    "text": "no we dont want to vendor it. it should be baked in at build time in the dockerfile.py, and also in hte modal container startup. NOT in the repo",
+    "expected": "pushback",
+    "note": "interrupt twin of the vendoring rejection"
+  },
+  {
+    "dedup_key": "4412e40c757c68fdd102c25a0cfd8668fc652da0886914123e039a2bb7d6d514",
+    "source_kind": "interrupt_rejection",
+    "text": "stop stop stop reverting the other stuff there wtf, put all that back and commit all the files you tocuehd that dont have other changes",
+    "expected": "pushback",
+    "note": "interrupted mid-revert: put it all back"
+  },
+  {
+    "dedup_key": "d4516ae6ff016b1f15d44de0305809a8349a5cbcdb6abd644c9ec374e6ab8a0a",
+    "source_kind": "interrupt_rejection",
+    "text": "what? no I'm not. I'm saying sentiment shouldnt be in cc-trancript, so while we're here, we need to redo the boundaries here from scratch and put things int he right repos across the board",
+    "expected": "pushback",
+    "note": "corrects the assistant's misreading of intent"
+  },
+  {
+    "dedup_key": "6c5a055fa22c7b0ac00507f6d3e440e8fce92200dc9487d6fb0d620ccc010fe6",
+    "source_kind": "interrupt_rejection",
+    "text": "its not that hard just plan to edit our .claude/settings.json in this repo",
+    "expected": "pushback",
+    "note": "faults overcomplication: its not that hard"
+  },
+  {
+    "dedup_key": "c68eced7cd725f2dc7c90854ca3025ff83ef146216a609a49410ab25230a7d27",
+    "source_kind": "interrupt_rejection",
+    "text": "Give me a summary of what we've done so far for another agent to take over. also, you got it wtong, The jj op restore would hgave been done by a USER whikle the other claudes in those workspaces were going",
+    "expected": "pushback",
+    "note": "mixed: handoff request plus you-got-it-wrong"
+  },
+  {
+    "dedup_key": "776c849746d0e087fb2ce8a1dcb59321ec35fc0a4666e1834b78005d1906fec8",
+    "source_kind": "plan_review",
+    "text": "I disagree, we should do the pandoc-native thing he suggested if that works, it is much less hacky",
+    "expected": "pushback",
+    "note": "disagrees with plan, prefers pandoc-native"
+  },
+  {
+    "dedup_key": "019f9f602cf186fc5d58a2e2b0efd4e04d3327b11e2760d4d1fd95a3a92ab58b",
+    "source_kind": "plan_review",
+    "text": "unify the code paths why on earth are they seperate",
+    "expected": "pushback",
+    "note": "faults split code paths in the plan"
+  },
+  {
+    "dedup_key": "2463117a08446a66bd6cb8ecf0b2f69842216f02a4202cd06406190a659dac54",
+    "source_kind": "plan_review",
+    "text": "> The user wants this debugged via a one-off Python invocation without modifying any repo file\n\ni never said that? we need to fix this properly. probably a combo of redoing hte SIMBA + LORA training of the model, and using some of the spacy NLP stuff we have in the client to detect imperative edge cases. plan a series of experuemnts, auto-research style, to improve this overall",
+    "expected": "pushback",
+    "note": "rejects invented requirement: i never said that"
+  },
+  {
+    "dedup_key": "399eb2db5c26dbe935a65bb0898b93a6d912887a3e1c027f6db29509fc49e24b",
+    "source_kind": "plan_review",
+    "text": ">  2. internal/overlay/symlink.go \u2014 self-heal already-affected account dirs. \n\nget rid of this and any other self-healing, we dont need to worry aboutt hat, assume no one used the broekn one",
+    "expected": "pushback",
+    "note": "orders removal of self-healing from the plan"
+  },
+  {
+    "dedup_key": "1064a3f1b1a0c78d817d91024e386b64ca3a650b8d7abb4d1478a207caec21f8",
+    "source_kind": "review_comment",
+    "text": "dont do things like this, inline it all",
+    "expected": "pushback",
+    "note": "style: dont do things like this"
+  },
+  {
+    "dedup_key": "31ffb7ab5a92c18e2df1d4c7f828cf53d62d2b56c82d4567d4cb2cd46b62183a",
+    "source_kind": "review_comment",
+    "text": "no imports in middle of fn",
+    "expected": "pushback",
+    "note": "style: no imports mid-function"
+  },
+  {
+    "dedup_key": "0e0e3e964592fdab307bbe8f50760f371b6dc6d5c7cce8ad8a80f4b638e125e3",
+    "source_kind": "review_comment",
+    "text": "should run ever be optional here?",
+    "expected": "pushback",
+    "note": "hard positive: rhetorical review question"
+  },
+  {
+    "dedup_key": "eaf244a0bc65bf97a200e03e4d382aab42dbddc32cb23f41a71b935bc372406c",
+    "source_kind": "transcript_message",
+    "text": "clear out any local state we have, also commit and push all, and cut a new release and babysit it",
+    "expected": "noise",
+    "note": "forward release directive after assistant work"
+  },
+  {
+    "dedup_key": "174121407927c779f298404ab11004b9c5d46ad57317c5038a77996726751d75",
+    "source_kind": "transcript_message",
+    "text": "yea go for it, then com,it and push that",
+    "expected": "noise",
+    "note": "approval plus commit-and-push directive; opus 3/3 noise"
+  },
+  {
+    "dedup_key": "8709434f2989ea133057b35848f4f34c44bcbde05121a5b27325c97e7dd8c592",
+    "source_kind": "transcript_message",
+    "text": "make sure to update the skill version too, and commit and push when done",
+    "expected": "noise",
+    "note": "forward reminder, no critique"
+  },
+  {
+    "dedup_key": "9c69cdaa2cc82af90be4f50bacff1a412b0a2724c07822b6e17620c9d24c0b01",
+    "source_kind": "transcript_message",
+    "text": "lets do 3.14 for python pin, and then commit and push",
+    "expected": "noise",
+    "note": "decision plus commit directive"
+  },
+  {
+    "dedup_key": "f17e8b234edde412e543da0d4aaabc49735a2e54a5248fb2cdf5a7da19aad246",
+    "source_kind": "transcript_message",
+    "text": "nope this si good, commit and push",
+    "expected": "noise",
+    "note": "hard negative: nope reads corrective but approves"
+  },
+  {
+    "dedup_key": "3a7af68e31cb7e7036bc4b037ff9c5666c1ba0f5424cd706e9c6b96be64c164d",
+    "source_kind": "transcript_message",
+    "text": "go ahewad and commit and push",
+    "expected": "noise",
+    "note": "typo'd go-ahead"
+  },
+  {
+    "dedup_key": "0f7658b4bf0fbd9353a66fa75f6863d50711045ab50502a248d886fc0dfb6e2c",
+    "source_kind": "transcript_message",
+    "text": "yes, adopt all the current work, review all of it, plan to fix and commit and push it all",
+    "expected": "noise",
+    "note": "adopt-and-ship directive"
+  },
+  {
+    "dedup_key": "429081df70c6f9e80ff890a4d7ba397717faf25709fcf5d595ac7f9544a16540",
+    "source_kind": "transcript_message",
+    "text": "set a higher max tokens, set the right beta headers etc for anthropic from ~/code/bioqa",
+    "expected": "noise",
+    "note": "canonical: set a higher max tokens"
+  },
+  {
+    "dedup_key": "080f4bc4e86eb73d600d39612e65cf68d162cb819999f4b671d55a1aaaea44b3",
+    "source_kind": "transcript_message",
+    "text": "nope just push the resolved yasyf/adapt-decomp-to-rag",
+    "expected": "noise",
+    "note": "hard negative: nope answers a question, then push directive"
+  },
+  {
+    "dedup_key": "8553aba2914a46d51dbcfe339525a52bc52c20f8be9fae8ba2b62d25e025f78b",
+    "source_kind": "transcript_message",
+    "text": "done, its running in taipei-v6",
+    "expected": "noise",
+    "note": "status: done, running in taipei-v6"
+  },
+  {
+    "dedup_key": "69ff5b508eb5a6c7ee44f914536754ac56fdc7b9768914bc1922a2582d11d73f",
+    "source_kind": "transcript_message",
+    "text": "I killed it already",
+    "expected": "noise",
+    "note": "status: I killed it already"
+  },
+  {
+    "dedup_key": "0cc2e7b0efad723fe917b7dfe95d6b73eb61d835be0de49b9fd09d88355aeea4",
+    "source_kind": "transcript_message",
+    "text": "done, running in asuncion-v4",
+    "expected": "noise",
+    "note": "status: running in asuncion-v4"
+  },
+  {
+    "dedup_key": "0a6a60c4cb89932ab401b60cf917b9143b237277b38b2201981208f34a480325",
+    "source_kind": "transcript_message",
+    "text": "did you file the issues?",
+    "expected": "noise",
+    "note": "asks for status of issue filing"
+  },
+  {
+    "dedup_key": "0d55d9d7469347b3fcd74340986d76abce9f0d357ea2d6553048f772fff67cfc",
+    "source_kind": "transcript_message",
+    "text": "status? is the agent stuck?",
+    "expected": "noise",
+    "note": "asks whether the agent is stuck"
+  },
+  {
+    "dedup_key": "09fd7d01fc2e8733a349fa458c00524c579fc265b8a0b3a326fdf5d87ae283df",
+    "source_kind": "transcript_message",
+    "text": "yes go for it",
+    "expected": "noise",
+    "note": "bare approval"
+  },
+  {
+    "dedup_key": "1b72700de6a49c868025f71b2a37261c49883070ccb0d4fa5551307d0f8ea9ad",
+    "source_kind": "transcript_message",
+    "text": "Approved to do phase 0, then pause",
+    "expected": "noise",
+    "note": "scoped approval"
+  },
+  {
+    "dedup_key": "f2139a00df120c9f1ae15ea0873f55ef5f8a68e84d9e090bf7715071b171b1ca",
+    "source_kind": "transcript_message",
+    "text": ">  The one bucket left alone is forward operational directives (set higher max tokens, commit and push) \u2014 the data showed\n  they're\n    indistinguishable by rule from genuine pushback (get rid of X, stop suggesting Y), so filtering them would cost recall.\n    That'd need an LLM classifier, not a re for the filtering.\n\n  we're building the detemrinistic part of the pipelne, and then it will feed into an llm filtering part of the pipeline, so\n  this is ok. plan to do this then use subllm for the filtering.",
+    "expected": "noise",
+    "note": "quotes prior summary, assigns the next build phase"
+  },
+  {
+    "dedup_key": "05342947994564097ecf746137bcb2183e15c7b12f4a60f0dd02129b359a7db9",
+    "source_kind": "plan_review",
+    "text": "the plugins will still be shared tho right? explain to me what the new behavior will be with this plan",
+    "expected": "noise",
+    "note": "clarifying question about the plan"
+  },
+  {
+    "dedup_key": "1371a631231d44f7862716c2e67db35dee439b74f059f2824b4bfc3bdb9cfdb4",
+    "source_kind": "plan_review",
+    "text": "tkae a look at the code in cc-pushback, are there things that should now be lifted to cc-transcript because we could use them for this task?",
+    "expected": "noise",
+    "note": "exploratory assignment, no critique"
+  },
+  {
+    "dedup_key": "402aa865b784de4c19834efbb5b1ad8cb69ff626ff9a0ae3f44de643bf96170b",
+    "source_kind": "plan_review",
+    "text": "update all of them to the very latest, and then make sure thats reflected in the repo-bootstrap skill as well (~/Code/skills)",
+    "expected": "noise",
+    "note": "fresh update task"
+  },
+  {
+    "dedup_key": "0a06e5b0d539d0a6b7e72f2aa9284374471cb96e79ee71cd4158624d0bd789f5",
+    "source_kind": "review_comment",
+    "text": "no comments",
+    "expected": "noise",
+    "note": "literal no-comments marker"
+  },
+  {
+    "dedup_key": "2c35cb158a9a2c5344ccd2a68b0d0ddc02d570ee7d32b2bab905115a56d20fb6",
+    "source_kind": "review_comment",
+    "text": "we should add a command to view the recent logs as well",
+    "expected": "noise",
+    "note": "feature suggestion, not a correction"
+  },
+  {
+    "dedup_key": "e89092d05e729c3c7aa03195c3690f5cf268c9c999ddae458ddb60388b248139",
+    "source_kind": "interrupt_rejection",
+    "text": "continue",
+    "expected": "noise",
+    "note": "bare continue after interrupt"
+  },
+  {
+    "dedup_key": "c58181a789b701c40d253d73c1a367439c0f9f9924bd201310ff4d96fb6cc794",
+    "source_kind": "interrupt_rejection",
+    "text": "I killed it already",
+    "expected": "noise",
+    "note": "interrupt twin of I-killed-it-already"
+  }
+]

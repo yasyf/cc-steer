@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from cc_transcript.domains.mining import DedupKey
 
 from cc_pushback.detectors import detect
+from cc_pushback.triage import JUDGE, Verdict
 from tests.builders import assistant_tool_use, denial_result, interrupt_result, parse, user_text
 
 if TYPE_CHECKING:
@@ -15,6 +17,18 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.anyio
 
 FILE = "/repo/projects/session.jsonl"
+
+
+async def seeded_keys(store: FeedbackStore) -> list[DedupKey]:
+    await store.record_file_scan(FILE, 1.0, sample_candidates())
+    rows = await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet")
+    return [DedupKey(str(row["dedup_key"])) for row in rows]
+
+
+def verdict(category: str, *, confidence: float = 0.9) -> Verdict:
+    return Verdict.model_validate(
+        {"category": category, "what_claude_did": "ran a tool", "confidence": confidence, "rationale": "r"}
+    )
 
 
 def sample_candidates() -> list[FeedbackCandidate]:
@@ -87,3 +101,64 @@ async def test_events_returns_full_rows_newest_first(store: FeedbackStore) -> No
     assert [str(row["occurred_at"]) for row in rows] == sorted(
         (str(row["occurred_at"]) for row in rows), reverse=True
     )
+
+
+@pytest.mark.integration
+async def test_record_verdict_is_idempotent(store: FeedbackStore) -> None:
+    key = (await seeded_keys(store))[0]
+    await store.record_verdict(key, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_verdict(key, verdict("new_task"), role=JUDGE, prompt_version=1, model="sonnet")
+    rows = await store.judged(role=JUDGE, prompt_version=1)
+    assert [str(row["category"]) for row in rows if row["dedup_key"] == key] == ["wrong_approach"]
+
+
+@pytest.mark.integration
+async def test_unjudged_honors_version_model_and_limit(store: FeedbackStore) -> None:
+    keys = await seeded_keys(store)
+    await store.record_verdict(keys[0], verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
+    remaining = await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet")
+    assert keys[0] not in {str(row["dedup_key"]) for row in remaining}
+    assert len(remaining) == len(keys) - 1
+    assert len(await store.unjudged(role=JUDGE, prompt_version=2, model="sonnet")) == len(keys)
+    assert len(await store.unjudged(role=JUDGE, prompt_version=1, model="haiku")) == len(keys)
+    assert len(await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet", limit=1)) == 1
+
+
+@pytest.mark.integration
+async def test_training_pairs_filters_noise_and_latest_version_wins(store: FeedbackStore) -> None:
+    keys = await seeded_keys(store)
+    await store.record_verdict(keys[0], verdict("unwanted_action"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_verdict(keys[1], verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet")
+    pairs = await store.pairs()
+    assert [str(row["dedup_key"]) for row in pairs] == [keys[0]]
+    assert pairs[0]["claude_action_summary"] == "ran a tool"
+    assert pairs[0]["pushback"]
+    assert pairs[0]["claude_action_tools"] is not None
+    await store.record_verdict(keys[0], verdict("operational_directive"), role=JUDGE, prompt_version=2, model="sonnet")
+    await store.record_verdict(keys[1], verdict("incorrect_change"), role=JUDGE, prompt_version=2, model="sonnet")
+    flipped = await store.pairs()
+    assert [str(row["dedup_key"]) for row in flipped] == [keys[1]]
+    assert flipped[0]["prompt_version"] == 2
+
+
+@pytest.mark.integration
+async def test_auditor_verdicts_never_enter_training_pairs(store: FeedbackStore) -> None:
+    key = (await seeded_keys(store))[0]
+    await store.record_verdict(key, verdict("wrong_approach"), role="auditor", prompt_version=1, model="opus")
+    assert await store.pairs() == []
+
+
+@pytest.mark.integration
+async def test_triage_stats_counts_by_category(store: FeedbackStore) -> None:
+    keys = await seeded_keys(store)
+    await store.record_verdict(keys[0], verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_verdict(keys[1], verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet")
+    stats = await store.triage_stats(prompt_version=1)
+    assert (stats.total, stats.judged, stats.accepted) == (len(keys), 2, 1)
+    assert stats.by_category == {"wrong_approach": 1, "status_update": 1}
+
+
+@pytest.mark.integration
+async def test_dedup_keys_returns_every_event_key(store: FeedbackStore) -> None:
+    keys = await seeded_keys(store)
+    assert await store.dedup_keys() == set(keys)
