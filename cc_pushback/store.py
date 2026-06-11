@@ -131,6 +131,69 @@ EVENT_COLUMNS = (
     "e.payload_json, e.context_json, e.session_id, e.origin_path"
 )
 
+CANDIDATES_QUERY = f"""
+WITH latest_judge AS (
+  SELECT t.*, ROW_NUMBER() OVER (
+    PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
+  ) AS rn
+  FROM triage t
+  WHERE t.role = 'judge'
+),
+latest_auditor AS (
+  SELECT t.dedup_key, t.is_pushback, ROW_NUMBER() OVER (
+    PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
+  ) AS rn
+  FROM triage t
+  WHERE t.role = 'auditor'
+),
+judge_flip AS (
+  SELECT dedup_key, COUNT(DISTINCT is_pushback) > 1 AS flipped
+  FROM triage WHERE role = 'judge' GROUP BY dedup_key
+),
+refine_summary AS (
+  SELECT r.dedup_key, COUNT(*) AS pair_count, g.prompt_version AS refine_version, g.model AS refine_model
+  FROM refinement r
+  JOIN (
+    SELECT dedup_key, prompt_version, model, refined_at, ROW_NUMBER() OVER (
+      PARTITION BY dedup_key ORDER BY prompt_version DESC, refined_at DESC
+    ) AS gen
+    FROM (SELECT DISTINCT dedup_key, prompt_version, model, refined_at FROM refinement)
+  ) g ON g.dedup_key = r.dedup_key AND g.prompt_version = r.prompt_version
+     AND g.model = r.model AND g.refined_at = r.refined_at AND g.gen = 1
+  GROUP BY r.dedup_key
+)
+SELECT {EVENT_COLUMNS},
+  j.category, j.is_pushback, j.confidence, j.prompt_version AS judge_version,
+  j.model AS judge_model, j.what_claude_did,
+  a.is_pushback AS auditor_is_pushback,
+  COALESCE(f.flipped, 0) AS flipped,
+  rs.pair_count, rs.refine_version, rs.refine_model
+FROM feedback_events e
+LEFT JOIN latest_judge j ON j.dedup_key = e.dedup_key AND j.rn = 1
+LEFT JOIN latest_auditor a ON a.dedup_key = e.dedup_key AND a.rn = 1
+LEFT JOIN judge_flip f ON f.dedup_key = e.dedup_key
+LEFT JOIN refine_summary rs ON rs.dedup_key = e.dedup_key
+ORDER BY e.id
+"""
+
+LINEAGE_VERDICTS_QUERY = (
+    "SELECT role, prompt_version, model, category, is_pushback, what_claude_did, "
+    "confidence, rationale, judged_at FROM triage WHERE dedup_key = ? ORDER BY role, prompt_version, id"
+)
+
+LINEAGE_PAIRS_QUERY = """
+SELECT r.pair_index, r.action, r.complaint_verbatim, r.complaint, r.prompt_version, r.model
+FROM refinement r
+JOIN (
+  SELECT prompt_version, model, refined_at, ROW_NUMBER() OVER (
+    ORDER BY prompt_version DESC, refined_at DESC
+  ) AS gen
+  FROM (SELECT DISTINCT prompt_version, model, refined_at FROM refinement WHERE dedup_key = ?)
+) g ON g.prompt_version = r.prompt_version AND g.model = r.model AND g.refined_at = r.refined_at AND g.gen = 1
+WHERE r.dedup_key = ?
+ORDER BY r.pair_index
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class TriageStats:
@@ -318,6 +381,51 @@ class FeedbackStore(BaseFeedbackStore):
         """Returns every row of the ``refined_pairs`` view, the pipeline's deliverable."""
         cur = await self.store.conn.execute("SELECT * FROM refined_pairs ORDER BY event_id, pair_index")
         return [dict(row) async for row in cur]
+
+    async def candidates(self) -> list[dict[str, object]]:
+        """Returns one row per event with its latest judge verdict and refine summary.
+
+        Powers the dashboard's candidate view across every pipeline status — refined,
+        accepted-but-unrefined, judge-rejected noise, and unjudged. The verdict and
+        refine columns are ``NULL`` for events that have not reached that stage.
+
+        Returns:
+            One dict per event: the event columns plus the latest judge verdict
+            (``category``, ``is_pushback``, ``confidence``, ``judge_version``,
+            ``judge_model``, ``what_claude_did``), the latest auditor side
+            (``auditor_is_pushback``), the judge ``flipped`` flag, and the refine
+            summary (``pair_count``, ``refine_version``, ``refine_model``).
+        """
+        cur = await self.store.conn.execute(CANDIDATES_QUERY)
+        return [dict(row) async for row in cur]
+
+    async def lineage(self, dedup_key: str) -> dict[str, object]:
+        """Returns one event with all its triage verdicts and latest refined pairs.
+
+        Reads ``feedback_events``, ``triage``, and ``refinement`` directly — the
+        views drop the auditor, the older judge versions, and the payload the
+        lineage needs.
+
+        Args:
+            dedup_key: The event's content-derived key.
+
+        Returns:
+            The event columns plus ``verdicts`` (every judge and auditor row, oldest
+            first) and ``pairs`` (the latest refinement generation, by ``pair_index``),
+            or ``{}`` when no event carries the key.
+        """
+        conn = self.store.conn
+        event_cur = await conn.execute(
+            f"SELECT {EVENT_COLUMNS} FROM feedback_events e WHERE e.dedup_key = ?", (dedup_key,)
+        )
+        events = [dict(row) async for row in event_cur]
+        if not events:
+            return {}
+        verdict_cur = await conn.execute(LINEAGE_VERDICTS_QUERY, (dedup_key,))
+        verdicts = [dict(row) async for row in verdict_cur]
+        pair_cur = await conn.execute(LINEAGE_PAIRS_QUERY, (dedup_key, dedup_key))
+        pairs = [dict(row) async for row in pair_cur]
+        return {**events[0], "verdicts": verdicts, "pairs": pairs}
 
     async def triage_stats(self, *, prompt_version: int) -> TriageStats:
         """Returns triage coverage and acceptance at ``prompt_version``."""

@@ -14,9 +14,10 @@ import click
 from cc_transcript import CLAUDE_PROJECTS_DIR
 
 from cc_pushback.claude import claude_available
+from cc_pushback.dashboard import build_app
 from cc_pushback.evaluate import evaluate, flip_report
 from cc_pushback.models import PUSHBACK_SOURCE_KINDS, SourceKind
-from cc_pushback.report import Sample, build_summary, project_label, render_html
+from cc_pushback.report import Sample, build_summary, project_label
 from cc_pushback.scan import scan as run_scan
 from cc_pushback.serve import serve
 from cc_pushback.store import FeedbackStore
@@ -334,18 +335,20 @@ async def pairs(jsonl: bool, db: Path | None) -> None:
 )
 @click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model for the claude CLI summary.")
 @click.option("--port", type=int, default=0, show_default=True, help="Port to serve on; 0 picks a free one.")
-@click.option("--open", "open_", is_flag=True, help="Open the page in a browser once serving.")
+@click.option("--open", "open_", is_flag=True, help="Open the dashboard in a browser once serving.")
 @coro
 async def view_samples(db: Path | None, llm: bool, model: str, port: int, open_: bool) -> None:
-    """Render every collected sample into one HTML page and serve it locally.
+    """Serve the training-pairs dashboard: refined pairs and their full lineage.
 
-    The page leads with a corpus summary and highlights, then lists every sample
-    with a kind filter, a free-text search, and an expandable context window. It is
-    built in memory and served over a transient HTTP server whose URL is printed;
-    press Ctrl-C to stop. The summary is written by the ``claude`` CLI when ``--llm``
-    is set and ``claude`` is installed, falling back to deterministic heuristics.
+    Opens an interactive dashboard listing the refined pairs (the pipeline's
+    deliverable) and every candidate behind them, with a detail pane that walks one
+    candidate's lineage — detector hit, judge verdicts across versions, the auditor's
+    agreement, the refiner's atomic split, and the golden gate. It is served over a
+    transient HTTP server whose URL is printed; press Ctrl-C to stop. The corpus
+    narrative is written by the ``claude`` CLI when ``--llm`` is set and ``claude`` is
+    installed, falling back to deterministic heuristics.
     """
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        samples = [Sample.from_row(row) for row in await store.events()]
-    summary = await build_summary(samples, use_llm=llm, model=model)
-    await serve(render_html(samples, summary).encode("utf-8"), port=port, open_browser=open_)
+        samples = [Sample.from_row(row) for row in await store.candidates()]
+        summary = await build_summary(samples, use_llm=llm, model=model)
+        await serve(build_app(store, summary=summary), port=port, open_browser=open_)

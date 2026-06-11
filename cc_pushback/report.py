@@ -1,9 +1,10 @@
-"""Render the collected feedback corpus into a single self-contained HTML page.
+"""Decode the feedback corpus and render it for the dashboard.
 
-The page leads with a corpus summary and a handful of highlights, then lists every
-sample with a kind filter, a free-text search, and an expandable context window. The
-summary and highlights are written by the ``claude`` CLI when it is available and
-fall back to deterministic heuristics otherwise.
+Holds the data model the dashboard serves — :class:`Sample`, :class:`VerdictRow`,
+:class:`RefinedPairRow`, and the :class:`Lineage` that stitches a candidate's whole
+pipeline trail together — plus the corpus :class:`Summary` (written by the ``claude``
+CLI when available, falling back to heuristics) and the HTML renderers for a
+candidate's five-stage lineage. The FastAPI surface lives in :mod:`cc_pushback.dashboard`.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from html import escape
 from itertools import zip_longest
 from pathlib import Path
@@ -27,11 +27,12 @@ from cc_pushback.context import ContextSnapshot
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from typing import Any
+    from typing import Any, Literal
 
     from cc_transcript.domains.mining import CandidateSignal
 
     from cc_pushback.context import ContextTurn
+    from cc_pushback.evaluate import GoldenRow
 
 CONTEXT_TURN_LIMIT = 700
 SAMPLE_TEXT_LIMIT = 400
@@ -96,35 +97,29 @@ details.ctx summary{color:var(--accent);cursor:pointer}
 .turn-trigger .role::after{content:" \\2190 pushed back on";color:var(--accent)}
 .why{color:var(--accent);font-style:italic;margin:0 0 6px}
 .highlight{margin:12px 0}
-"""
-
-JS = """
-const cards=[...document.querySelectorAll('#samples .card')];
-const search=document.getElementById('search');
-const count=document.getElementById('count');
-const hideNoise=document.getElementById('hide-noise');
-let kind='all';
-function apply(){
-  const q=search.value.trim().toLowerCase();
-  let shown=0;
-  for(const c of cards){
-    const okKind=kind==='all'||c.dataset.kind===kind;
-    const okNoise=!hideNoise.checked||c.dataset.noise!=='1';
-    const okText=!q||c.textContent.toLowerCase().includes(q);
-    const vis=okKind&&okNoise&&okText;
-    c.style.display=vis?'':'none';
-    if(vis)shown++;
-  }
-  count.textContent=shown+' / '+cards.length;
-}
-document.querySelectorAll('.kind-btn').forEach(b=>b.addEventListener('click',()=>{
-  kind=b.dataset.kind;
-  document.querySelectorAll('.kind-btn').forEach(x=>x.classList.toggle('active',x===b));
-  apply();
-}));
-search.addEventListener('input',apply);
-hideNoise.addEventListener('change',apply);
-apply();
+.lineage{display:flex;flex-direction:column;gap:14px}
+.stage{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px}
+.stage h3{margin:0 0 10px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.stage-detector{border-left:3px solid var(--muted)}
+.stage-judge{border-left:3px solid var(--accent)}
+.stage-auditor{border-left:3px solid #d2a8ff}
+.stage-refiner{border-left:3px solid #7ee787}
+.stage-golden{border-left:3px solid #ffa657}
+.verdict,.pair{border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin:8px 0}
+.vhead{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.vsum,.vrat,.paction,.pcomplaint{white-space:pre-wrap;word-break:break-word;margin:2px 0;font:inherit}
+.vrat,.pcomplaint{color:var(--muted)}
+.pverbatim{border-left:2px solid #7ee787;margin:6px 0;padding:2px 0 2px 10px;color:var(--fg)}
+.orig pre{white-space:pre-wrap;word-break:break-word;margin:0 0 8px;color:var(--muted)}
+mark{background:#7ee78733;color:var(--fg);border-radius:3px}
+.flip{font-size:11px;color:#ffa657}
+.agree{font-size:11px;color:#7ee787}
+.disagree{font-size:11px;color:#ff7b72}
+.muted{color:var(--muted)}
+.badge.pass{color:#7ee787}.badge.fail{color:#ff7b72}
+.cat-wrong_approach{color:#ff7b72}.cat-incorrect_change{color:#ffa657}.cat-unwanted_action{color:#f0883e}
+.cat-style_violation{color:#d2a8ff}.cat-premature{color:#79c0ff}
+.cat-operational_directive,.cat-status_update,.cat-new_task,.cat-question,.cat-other{color:#8b949e}
 """
 
 
@@ -172,6 +167,144 @@ class Sample:
 
 
 @dataclass(frozen=True, slots=True)
+class VerdictRow:
+    """One triage verdict — a judge or auditor call on a candidate.
+
+    Attributes:
+        role: Who produced it, ``judge`` or ``auditor``.
+        prompt_version: The prompt version that produced it.
+        model: The resolved model name that produced it.
+        category: The chosen category.
+        is_pushback: Whether the category counts as pushback.
+        what_claude_did: The one-line normalization of the action under review.
+        confidence: The verdict's confidence, ``0``–``1``.
+        rationale: The short justification for the call.
+        judged_at: The ISO timestamp the verdict was recorded.
+    """
+
+    role: str
+    prompt_version: int
+    model: str
+    category: str
+    is_pushback: bool
+    what_claude_did: str
+    confidence: float
+    rationale: str
+    judged_at: str
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, object]) -> VerdictRow:
+        """Decodes a :meth:`FeedbackStore.lineage` verdict row into a :class:`VerdictRow`."""
+        return cls(
+            role=str(row["role"]),
+            prompt_version=int(str(row["prompt_version"])),
+            model=str(row["model"]),
+            category=str(row["category"]),
+            is_pushback=bool(row["is_pushback"]),
+            what_claude_did=str(row["what_claude_did"]),
+            confidence=float(str(row["confidence"])),
+            rationale=str(row["rationale"]),
+            judged_at=str(row["judged_at"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RefinedPairRow:
+    """One atomic training pair distilled by the refiner from a single complaint.
+
+    Attributes:
+        pair_index: The pair's position within the message's split.
+        action: The faithful re-synthesis of what the assistant did.
+        complaint_verbatim: The exact span of the user's message voicing the complaint.
+        complaint: The one-sentence distillation of the objection.
+        prompt_version: The refine prompt version that produced it.
+        model: The resolved model name that produced it.
+    """
+
+    pair_index: int
+    action: str
+    complaint_verbatim: str
+    complaint: str
+    prompt_version: int
+    model: str
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, object]) -> RefinedPairRow:
+        """Decodes a :meth:`FeedbackStore.lineage` pair row into a :class:`RefinedPairRow`."""
+        return cls(
+            pair_index=int(str(row["pair_index"])),
+            action=str(row["action"]),
+            complaint_verbatim=str(row["complaint_verbatim"]),
+            complaint=str(row["complaint"]),
+            prompt_version=int(str(row["prompt_version"])),
+            model=str(row["model"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Lineage:
+    """The full pipeline trail for one candidate, from detector hit to refined pairs.
+
+    Attributes:
+        sample: The raw mined event — detector evidence and conversational context.
+        dedup_key: The content-derived key joining every stage.
+        verdicts: Every judge and auditor verdict recorded against the key.
+        pairs: The latest refinement generation's atomic pairs, by ``pair_index``.
+    """
+
+    sample: Sample
+    dedup_key: str
+    verdicts: tuple[VerdictRow, ...]
+    pairs: tuple[RefinedPairRow, ...]
+
+    @classmethod
+    def from_lineage(cls, data: Mapping[str, Any]) -> Lineage:
+        """Builds a :class:`Lineage` from a :meth:`FeedbackStore.lineage` result."""
+        return cls(
+            sample=Sample.from_row(data),
+            dedup_key=str(data["dedup_key"]),
+            verdicts=tuple(VerdictRow.from_row(row) for row in data["verdicts"]),
+            pairs=tuple(RefinedPairRow.from_row(row) for row in data["pairs"]),
+        )
+
+    @property
+    def judge_verdicts(self) -> tuple[VerdictRow, ...]:
+        return tuple(sorted((v for v in self.verdicts if v.role == "judge"), key=lambda v: v.prompt_version))
+
+    @property
+    def auditor_verdict(self) -> VerdictRow | None:
+        return max((v for v in self.verdicts if v.role == "auditor"), key=lambda v: v.prompt_version, default=None)
+
+    @property
+    def final(self) -> VerdictRow | None:
+        return self.judge_verdicts[-1] if self.judge_verdicts else None
+
+    @property
+    def flipped(self) -> bool:
+        return len({v.is_pushback for v in self.judge_verdicts}) > 1
+
+    @property
+    def agreement(self) -> Literal["agree", "disagree"] | None:
+        match (self.final, self.auditor_verdict):
+            case (None, _) | (_, None):
+                return None
+            case (judge, auditor):
+                return "agree" if judge.is_pushback == auditor.is_pushback else "disagree"
+
+    @property
+    def status(self) -> Literal["refined", "accepted", "noise", "unjudged"]:
+        if self.pairs:
+            return "refined"
+        match self.final:
+            case None:
+                return "unjudged"
+            case verdict if verdict.is_pushback:
+                return "accepted"
+            case _:
+                return "noise"
+
+
+@dataclass(frozen=True, slots=True)
 class CorpusStats:
     """Aggregate counts describing the whole corpus.
 
@@ -195,6 +328,43 @@ class CorpusStats:
     first: str
     last: str
     by_month: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineStats:
+    """Stage-by-stage counts describing how the corpus flows through the pipeline.
+
+    Attributes:
+        accepted: Judge-accepted events (the refiner's input pool).
+        refined: Accepted events split into atomic pairs.
+        pending: Accepted events not yet refined.
+        noise_judged: Events the judge labeled non-pushback.
+        unjudged: Events without a judge verdict.
+        total_pairs: Atomic ``{action, complaint}`` pairs across the corpus.
+        pairs_per_event: Mean pairs per refined event.
+        by_category: Accepted-event counts keyed by judge category.
+        audited: Accepted-or-rejected events carrying an auditor verdict.
+        agree: Audited events where the auditor matched the judge's side.
+        disagree: Audited events where the auditor differed.
+        flips: Events whose judge side changed across prompt versions.
+        golden_total: Events present in the golden regression fixture.
+        golden_pass: Golden events whose latest judge matches the frozen label.
+    """
+
+    accepted: int
+    refined: int
+    pending: int
+    noise_judged: int
+    unjudged: int
+    total_pairs: int
+    pairs_per_event: float
+    by_category: Mapping[str, int]
+    audited: int
+    agree: int
+    disagree: int
+    flips: int
+    golden_total: int
+    golden_pass: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +419,57 @@ def corpus_stats(samples: Sequence[Sample]) -> CorpusStats:
         first=times[0][:10] if times else "",
         last=times[-1][:10] if times else "",
         by_month=dict(sorted(Counter(s.occurred_at[:7] for s in samples).items())),
+    )
+
+
+def candidate_status(row: Mapping[str, object]) -> Literal["refined", "accepted", "noise", "unjudged"]:
+    """Classifies one :meth:`FeedbackStore.candidates` row by how far it reached."""
+    match row["is_pushback"]:
+        case None:
+            return "unjudged"
+        case 0:
+            return "noise"
+        case _:
+            return "refined" if row["pair_count"] else "accepted"
+
+
+def golden_label(is_pushback: object) -> str:
+    return "pushback" if is_pushback else "noise"
+
+
+def golden_status(
+    dedup_key: str, final: VerdictRow | None, golden_map: Mapping[str, GoldenRow]
+) -> Literal["pass", "fail"] | None:
+    """Returns whether the latest judge matches the frozen golden label, or ``None`` off-fixture."""
+    if (gold := golden_map.get(dedup_key)) is None or final is None:
+        return None
+    return "pass" if golden_label(final.is_pushback) == gold.expected else "fail"
+
+
+def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Mapping[str, GoldenRow]) -> PipelineStats:
+    statuses = Counter(candidate_status(row) for row in candidates)
+    refined_rows = [row for row in candidates if candidate_status(row) == "refined"]
+    total_pairs = sum(int(str(row["pair_count"])) for row in refined_rows)
+    audited = [row for row in candidates if row["auditor_is_pushback"] is not None and row["is_pushback"] is not None]
+    agree = sum(bool(row["auditor_is_pushback"]) == bool(row["is_pushback"]) for row in audited)
+    golden = [(row, golden_map[key]) for row in candidates if (key := str(row["dedup_key"])) in golden_map]
+    return PipelineStats(
+        accepted=statuses["accepted"] + statuses["refined"],
+        refined=statuses["refined"],
+        pending=statuses["accepted"],
+        noise_judged=statuses["noise"],
+        unjudged=statuses["unjudged"],
+        total_pairs=total_pairs,
+        pairs_per_event=total_pairs / len(refined_rows) if refined_rows else 0.0,
+        by_category=dict(
+            Counter(str(row["category"]) for row in candidates if row["is_pushback"]).most_common()
+        ),
+        audited=len(audited),
+        agree=agree,
+        disagree=len(audited) - agree,
+        flips=sum(bool(row["flipped"]) for row in candidates),
+        golden_total=len(golden),
+        golden_pass=sum(golden_label(row["is_pushback"]) == gold.expected for row, gold in golden),
     )
 
 
@@ -368,117 +589,75 @@ def meta_chips(sample: Sample) -> str:
     return "".join(f'<span class="chip">{escape(chip)}</span>' for chip in chips)
 
 
-def render_card(sample: Sample) -> str:
-    return "".join(
-        [
-            f'<article class="card" data-kind="{escape(sample.source_kind)}" '
-            f'data-noise="{"1" if is_noise(sample) else "0"}">',
-            f'<header><span class="badge badge-{escape(sample.source_kind)}">{escape(sample.source_kind)}</span>',
-            f"<time>{escape(sample.occurred_at[:19])}</time>{meta_chips(sample)}</header>",
-            f'<div class="text"><pre>{escape(sample.text)}</pre></div>',
-            render_context(sample.context),
-            "</article>",
-        ]
-    )
+def highlight_spans(text: str, spans: Sequence[str]) -> str:
+    escaped = escape(text)
+    for span in spans:
+        escaped = escaped.replace(escape(span), f"<mark>{escape(span)}</mark>")
+    return escaped
 
 
-def render_highlight(sample: Sample, why: str | None) -> str:
-    blurb = f'<p class="why">{escape(why)}</p>' if why else ""
-    return f'<div class="highlight">{blurb}{render_card(sample)}</div>'
-
-
-def render_stat_cards(stats: CorpusStats) -> str:
-    cards = (
-        (stats.total, "samples"),
-        (stats.sessions, "sessions"),
-        (stats.projects, "projects"),
-        (stats.noise, "low-signal"),
-        (f"{stats.first} – {stats.last}", "span"),
-    )
-    return '<div class="stat-cards">' + "".join(
-        f'<div class="stat"><div class="n">{escape(str(value))}</div><div class="l">{escape(label)}</div></div>'
-        for value, label in cards
-    ) + "</div>"
-
-
-def render_dist(stats: CorpusStats) -> str:
-    top = max(stats.by_kind.values(), default=1)
-    rows = "".join(
-        f"<tr><td>{escape(kind)}</td><td>{n}</td>"
-        f'<td><span class="bar" style="width:{round(n / top * 200)}px"></span></td></tr>'
-        for kind, n in stats.by_kind.items()
-    )
-    return f'<table class="dist">{rows}</table>'
-
-
-def render_months(by_month: Mapping[str, int]) -> str:
-    if not by_month:
-        return ""
-    top = max(by_month.values())
-    cols = "".join(
-        f'<div class="mcol"><div class="m" style="height:{round(n / top * 72) + 4}px" '
-        f'title="{escape(month)}: {n}"></div><span>{escape(month[5:])}</span></div>'
-        for month, n in by_month.items()
-    )
-    return f'<div class="months">{cols}</div>'
-
-
-def render_controls(stats: CorpusStats) -> str:
-    buttons = "".join(
-        f'<button class="kind-btn{" active" if kind == "all" else ""}" data-kind="{escape(kind)}">'
-        f'{escape(kind)}{"" if kind == "all" else f" {n}"}</button>'
-        for kind, n in [("all", stats.total), *stats.by_kind.items()]
-    )
+def render_verdict_stage(verdict: VerdictRow, *, flipped: bool = False) -> str:
+    flag = '<span class="flip">flipped across versions</span>' if flipped else ""
     return (
-        f'<section id="controls"><div class="kinds">{buttons}</div>'
-        f'<input id="search" type="search" placeholder="search text…">'
-        f'<label class="noise"><input type="checkbox" id="hide-noise"> hide low-signal</label>'
-        f'<span id="count">{stats.total} / {stats.total}</span></section>'
+        f'<div class="verdict stage-{escape(verdict.role)}"><div class="vhead">'
+        f'<span class="badge cat-{escape(verdict.category)}">{escape(verdict.category)}</span>'
+        f'<span class="chip">{escape(verdict.role)} v{verdict.prompt_version} · {escape(verdict.model)}</span>'
+        f'<span class="chip">conf {verdict.confidence:.2f}</span>'
+        f'<span class="chip">{golden_label(verdict.is_pushback)}</span>{flag}</div>'
+        f'<pre class="vsum">{escape(truncate(verdict.what_claude_did))}</pre>'
+        f'<pre class="vrat">{escape(truncate(verdict.rationale))}</pre></div>'
     )
 
 
-def render_html(samples: Sequence[Sample], summary: Summary) -> str:
-    """Renders the whole corpus and its summary into one self-contained HTML page.
-
-    The returned string embeds its own CSS and JavaScript and references no external
-    resources, so it can be written to a file and opened directly in a browser.
-
-    Args:
-        samples: Every sample to list, in display order.
-        summary: The overview to render above the list.
-
-    Returns:
-        The complete HTML document.
-    """
-    by_id = {sample.id: sample for sample in samples}
-    highlights = "\n".join(
-        render_highlight(by_id[h.event_id], h.why) for h in summary.highlights if h.event_id in by_id
+def render_refiner_stage(pairs: Sequence[RefinedPairRow], original: str) -> str:
+    if not pairs:
+        return '<p class="muted">not yet refined</p>'
+    cards = "".join(
+        f'<div class="pair"><div class="vhead"><span class="chip">pair {pair.pair_index}</span>'
+        f'<span class="chip">v{pair.prompt_version} · {escape(pair.model)}</span></div>'
+        f'<pre class="paction">{escape(truncate(pair.action))}</pre>'
+        f'<blockquote class="pverbatim">{escape(pair.complaint_verbatim)}</blockquote>'
+        f'<pre class="pcomplaint">{escape(pair.complaint)}</pre></div>'
+        for pair in pairs
     )
-    narrative = f'<div class="narrative">{escape(summary.narrative)}</div>' if summary.narrative else ""
-    generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    original_html = highlight_spans(original, [pair.complaint_verbatim for pair in pairs])
+    return f'<div class="orig"><pre>{original_html}</pre></div>{cards}'
+
+
+def render_lineage_detail(lineage: Lineage, golden_map: Mapping[str, GoldenRow]) -> str:
+    """Renders one candidate's full pipeline trail as a five-stage rail."""
+    sample = lineage.sample
+    judge_html = "".join(
+        render_verdict_stage(verdict, flipped=lineage.flipped) for verdict in lineage.judge_verdicts
+    )
+    match lineage.auditor_verdict:
+        case None:
+            auditor_html = '<p class="muted">not audited</p>'
+        case auditor:
+            agree = lineage.agreement
+            auditor_html = render_verdict_stage(auditor) + f'<span class="{agree}">{agree} with judge</span>'
+    match golden_status(lineage.dedup_key, lineage.final, golden_map):
+        case None:
+            golden_html = '<p class="muted">not in golden set</p>'
+        case verdict:
+            expected = golden_map[lineage.dedup_key].expected
+            golden_html = f'<span class="badge {verdict}">golden {verdict} · expected {escape(expected)}</span>'
     return "".join(
         [
-            "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
-            "<meta name='viewport' content='width=device-width,initial-scale=1'>",
-            "<title>cc-pushback samples</title><style>",
-            CSS,
-            "</style></head><body>",
-            f'<header class="top"><h1>cc-pushback — feedback samples</h1>'
-            f'<div class="sub">{summary.stats.total} samples · generated {escape(generated)}</div></header>',
-            "<section><h2>Summary</h2>",
-            render_stat_cards(summary.stats),
-            render_dist(summary.stats),
-            render_months(summary.stats.by_month),
-            narrative,
+            '<div class="lineage">',
+            '<section class="stage stage-detector"><h3>1 · detector</h3>',
+            f'<header class="card-head"><span class="badge badge-{escape(sample.source_kind)}">'
+            f"{escape(sample.source_kind)}</span><time>{escape(sample.occurred_at[:19])}</time>"
+            f"{meta_chips(sample)}</header>",
+            f'<div class="text"><pre>{escape(sample.text)}</pre></div>{render_context(sample.context)}</section>',
+            '<section class="stage stage-judge"><h3>2 · judge</h3>',
+            judge_html or '<p class="muted">unjudged</p>',
             "</section>",
-            '<section id="highlights"><h2>Highlights</h2>',
-            highlights or "<p>none</p>",
+            f'<section class="stage stage-auditor"><h3>3 · auditor</h3>{auditor_html}</section>',
+            '<section class="stage stage-refiner"><h3>4 · refiner — atomic pairs</h3>',
+            render_refiner_stage(lineage.pairs, sample.text),
             "</section>",
-            render_controls(summary.stats),
-            '<section id="samples">',
-            "\n".join(render_card(sample) for sample in samples),
-            "</section><script>",
-            JS,
-            "</script></body></html>",
+            f'<section class="stage stage-golden"><h3>5 · golden gate</h3>{golden_html}</section>',
+            "</div>",
         ]
     )

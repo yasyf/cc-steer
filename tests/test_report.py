@@ -14,7 +14,6 @@ from cc_pushback.report import (
     is_noise,
     parse_summary_json,
     project_label,
-    render_html,
 )
 
 if TYPE_CHECKING:
@@ -165,33 +164,6 @@ async def test_build_summary_falls_back_when_claude_errors(monkeypatch: pytest.M
 )
 def test_parse_summary_json(raw: str, ok: bool) -> None:
     assert (parse_summary_json(raw) is not None) is ok
-
-
-@pytest.mark.anyio
-async def test_render_html_escapes_and_includes_controls() -> None:
-    trigger = ContextTurn(role="assistant", text="I built the thing", tool_calls=("Edit",))
-    samples = [
-        make_sample(
-            7,
-            "review_comment",
-            "<script>alert('xss')</script> this should be escaped",
-            payload={"format": "superset-inline", "file": ".claude/hooks/style.py", "line_start": 17},
-            before=(ContextTurn(role="user", text="please do X"), trigger),
-            trigger=trigger,
-            after=(ContextTurn(role="user", text="that was wrong"),),
-        )
-    ]
-    summary = await build_summary(samples, use_llm=False, model="m")
-    html = render_html(samples, summary)
-
-    assert "&lt;script&gt;alert(&#x27;xss&#x27;)" in html
-    assert "<script>alert('xss')" not in html
-    assert 'class="badge badge-review_comment"' in html
-    assert 'id="search"' in html and 'id="hide-noise"' in html
-    assert 'data-kind="review_comment"' in html
-    assert "turn-trigger" in html
-    assert ".claude/hooks/style.py:17" in html
-    assert "<details" in html
 
 
 def test_sample_from_row_round_trips() -> None:

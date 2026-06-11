@@ -183,6 +183,50 @@ async def test_unrefined_honors_version_model_and_limit(store: FeedbackStore) ->
 
 
 @pytest.mark.integration
+async def test_candidates_reports_status_pair_count_auditor_and_flip(store: FeedbackStore) -> None:
+    keys = await seeded_keys(store)
+    assert len(keys) >= 2
+    await store.record_verdict(keys[0], verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_verdict(keys[0], verdict("wrong_approach"), role=JUDGE, prompt_version=2, model="sonnet")
+    await store.record_verdict(keys[0], verdict("status_update"), role="auditor", prompt_version=2, model="opus")
+    await store.record_refinement(keys[0], refinement("a", "b"), prompt_version=1, model="sonnet")
+    await store.record_verdict(keys[1], verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet")
+
+    rows = {str(row["dedup_key"]): row for row in await store.candidates()}
+    assert len(rows) == len(keys)
+
+    accepted = rows[keys[0]]
+    assert accepted["is_pushback"] == 1 and accepted["judge_version"] == 2  # latest judge (v2) wins
+    assert accepted["pair_count"] == 2
+    assert accepted["flipped"] == 1  # noise (v1) -> pushback (v2)
+    assert accepted["auditor_is_pushback"] == 0  # auditor disagreed, called it noise
+
+    noise = rows[keys[1]]
+    assert noise["is_pushback"] == 0 and noise["pair_count"] is None
+    assert noise["flipped"] == 0 and noise["auditor_is_pushback"] is None
+
+    for row in (rows[key] for key in keys[2:]):
+        assert row["is_pushback"] is None and row["pair_count"] is None and row["flipped"] == 0
+
+
+@pytest.mark.integration
+async def test_lineage_returns_all_verdicts_and_latest_pairs(store: FeedbackStore) -> None:
+    key = (await seeded_keys(store))[0]
+    await store.record_verdict(key, verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_verdict(key, verdict("wrong_approach"), role=JUDGE, prompt_version=2, model="sonnet")
+    await store.record_verdict(key, verdict("status_update"), role="auditor", prompt_version=2, model="opus")
+    await store.record_refinement(key, refinement("x", "y"), prompt_version=1, model="sonnet")
+
+    lineage = await store.lineage(key)
+    assert str(lineage["dedup_key"]) == key
+    verdicts = [(str(v["role"]), int(str(v["prompt_version"]))) for v in lineage["verdicts"]]
+    assert verdicts == [("auditor", 2), ("judge", 1), ("judge", 2)]
+    assert [int(str(p["pair_index"])) for p in lineage["pairs"]] == [0, 1]
+    assert {str(p["complaint_verbatim"]) for p in lineage["pairs"]} == {"x", "y"}
+    assert await store.lineage("nope") == {}
+
+
+@pytest.mark.integration
 async def test_refined_pairs_latest_generation_wins(store: FeedbackStore) -> None:
     key = (await seeded_keys(store))[0]
     await store.record_verdict(key, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
