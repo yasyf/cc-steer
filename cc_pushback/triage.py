@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from cc_pushback.store import FeedbackStore
 
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 AUDIT_VERSION = 2
 JUDGE = "judge"
 AUDITOR = "auditor"
@@ -79,15 +79,24 @@ Pick exactly one category:
 - question: a genuine request for information. A skeptical or rhetorical question that
   presses on a choice the assistant made ("why are we hardcoding this?", "should this
   ever be optional?", "there's really no better way?") is pushback, not a question —
-  categorize it by what it challenges.
+  categorize it by what it challenges. But a question proposing a NEW addition
+  ("should we add a pyright config?", "can we also bundle the plugin?") presses on
+  nothing the assistant did — it stays a question or new_task.
 - other: none of the above.
 
 The first five categories are pushback; the rest are noise.
 A mixed message that contains ANY genuine corrective content is pushback — pick the
 category of the corrective part. Corrective content is often implicit in a directive:
 "figure out the right proper fix" faults the current fix, "look more closely" faults a
-shallow look, "not just X — give me Y" faults an insufficient answer, and exasperation
-("stop wasting time") faults the behavior, even when phrased as the next step.
+shallow look, "not just X — give me Y" faults an insufficient answer, praise followed
+by a redirect ("its good that you did X, but the more important thing is Y") faults the
+scope, and exasperation ("stop wasting time", "fucking hell just commit") faults the
+behavior, even when phrased as the next step.
+An implicit fault only counts when the faulted thing exists in the assistant's prior
+work: "set the right headers" while assigning fresh config work is a plain directive;
+"use the right template" after the assistant used the wrong one is a correction. And
+when the user corrects their own earlier instruction ("ah sorry, my bad — we treat it
+as native"), that is a spec clarification, not pushback on the assistant.
 The assistant action being corrected may predate the trigger shown: when the message
 critiques files or output the assistant produced earlier in the session, it is pushback
 on that work even if the immediately preceding action is unrelated.
