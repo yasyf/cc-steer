@@ -231,13 +231,6 @@
     "note": "adopt-and-ship directive"
   },
   {
-    "dedup_key": "429081df70c6f9e80ff890a4d7ba397717faf25709fcf5d595ac7f9544a16540",
-    "source_kind": "transcript_message",
-    "text": "set a higher max tokens, set the right beta headers etc for anthropic from ~/code/bioqa",
-    "expected": "noise",
-    "note": "canonical: set a higher max tokens"
-  },
-  {
     "dedup_key": "080f4bc4e86eb73d600d39612e65cf68d162cb819999f4b671d55a1aaaea44b3",
     "source_kind": "transcript_message",
     "text": "nope just push the resolved yasyf/adapt-decomp-to-rag",
@@ -325,8 +318,8 @@
     "dedup_key": "0a06e5b0d539d0a6b7e72f2aa9284374471cb96e79ee71cd4158624d0bd789f5",
     "source_kind": "review_comment",
     "text": "no comments",
-    "expected": "noise",
-    "note": "literal no-comments marker"
+    "expected": "pushback",
+    "note": "inline review comment on decoder.py:50 = remove/avoid comments here; style correction (user ruling)"
   },
   {
     "dedup_key": "2c35cb158a9a2c5344ccd2a68b0d0ddc02d570ee7d32b2bab905115a56d20fb6",
