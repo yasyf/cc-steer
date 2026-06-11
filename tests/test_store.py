@@ -7,6 +7,7 @@ import pytest
 from cc_transcript.domains.mining import DedupKey
 
 from cc_pushback.detectors import detect
+from cc_pushback.refine import RefinedPair, Refinement
 from cc_pushback.triage import JUDGE, Verdict
 from tests.builders import assistant_tool_use, denial_result, interrupt_result, parse, user_text
 
@@ -28,6 +29,15 @@ async def seeded_keys(store: FeedbackStore) -> list[DedupKey]:
 def verdict(category: str, *, confidence: float = 0.9) -> Verdict:
     return Verdict.model_validate(
         {"category": category, "what_claude_did": "ran a tool", "confidence": confidence, "rationale": "r"}
+    )
+
+
+def refinement(*complaints: str) -> Refinement:
+    return Refinement(
+        pairs=[
+            RefinedPair(action="ran a tool", complaint_verbatim=text, complaint=f"distilled: {text}")
+            for text in (complaints or ("stop that",))
+        ]
     )
 
 
@@ -98,9 +108,7 @@ async def test_events_returns_full_rows_newest_first(store: FeedbackStore) -> No
         "session_id",
     }
     assert all(row["context_json"] for row in rows)
-    assert [str(row["occurred_at"]) for row in rows] == sorted(
-        (str(row["occurred_at"]) for row in rows), reverse=True
-    )
+    assert [str(row["occurred_at"]) for row in rows] == sorted((str(row["occurred_at"]) for row in rows), reverse=True)
 
 
 @pytest.mark.integration
@@ -125,27 +133,66 @@ async def test_unjudged_honors_version_model_and_limit(store: FeedbackStore) -> 
 
 
 @pytest.mark.integration
-async def test_training_pairs_filters_noise_and_latest_version_wins(store: FeedbackStore) -> None:
+async def test_accepted_pushback_filters_noise_and_latest_judge_wins(store: FeedbackStore) -> None:
     keys = await seeded_keys(store)
     await store.record_verdict(keys[0], verdict("unwanted_action"), role=JUDGE, prompt_version=1, model="sonnet")
     await store.record_verdict(keys[1], verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet")
-    pairs = await store.pairs()
-    assert [str(row["dedup_key"]) for row in pairs] == [keys[0]]
-    assert pairs[0]["claude_action_summary"] == "ran a tool"
-    assert pairs[0]["pushback"]
-    assert pairs[0]["claude_action_tools"] is not None
+    accepted = await store.unrefined(prompt_version=1, model="sonnet")
+    assert [str(row["dedup_key"]) for row in accepted] == [keys[0]]
     await store.record_verdict(keys[0], verdict("operational_directive"), role=JUDGE, prompt_version=2, model="sonnet")
     await store.record_verdict(keys[1], verdict("incorrect_change"), role=JUDGE, prompt_version=2, model="sonnet")
-    flipped = await store.pairs()
+    flipped = await store.unrefined(prompt_version=1, model="sonnet")
     assert [str(row["dedup_key"]) for row in flipped] == [keys[1]]
-    assert flipped[0]["prompt_version"] == 2
 
 
 @pytest.mark.integration
-async def test_auditor_verdicts_never_enter_training_pairs(store: FeedbackStore) -> None:
+async def test_auditor_only_event_is_not_accepted_pushback(store: FeedbackStore) -> None:
     key = (await seeded_keys(store))[0]
     await store.record_verdict(key, verdict("wrong_approach"), role="auditor", prompt_version=1, model="opus")
+    assert await store.unrefined(prompt_version=1, model="sonnet") == []
     assert await store.pairs() == []
+
+
+@pytest.mark.integration
+async def test_record_refinement_is_idempotent(store: FeedbackStore) -> None:
+    key = (await seeded_keys(store))[0]
+    await store.record_refinement(
+        key, refinement("use a generator", "stop hardcoding"), prompt_version=1, model="sonnet"
+    )
+    await store.record_refinement(
+        key, refinement("use a generator", "stop hardcoding"), prompt_version=1, model="sonnet"
+    )
+    rows = await store.pairs()
+    assert len(rows) == 2
+    assert [int(row["pair_index"]) for row in rows] == [0, 1]
+    assert {str(row["complaint_verbatim"]) for row in rows} == {"use a generator", "stop hardcoding"}
+
+
+@pytest.mark.integration
+async def test_unrefined_honors_version_model_and_limit(store: FeedbackStore) -> None:
+    keys = await seeded_keys(store)
+    for key in keys:
+        await store.record_verdict(key, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_refinement(keys[0], refinement("x"), prompt_version=1, model="sonnet")
+    remaining = await store.unrefined(prompt_version=1, model="sonnet")
+    assert keys[0] not in {str(row["dedup_key"]) for row in remaining}
+    assert len(remaining) == len(keys) - 1
+    assert len(await store.unrefined(prompt_version=2, model="sonnet")) == len(keys)
+    assert len(await store.unrefined(prompt_version=1, model="haiku")) == len(keys)
+    assert len(await store.unrefined(prompt_version=1, model="sonnet", limit=1)) == 1
+
+
+@pytest.mark.integration
+async def test_refined_pairs_latest_generation_wins(store: FeedbackStore) -> None:
+    key = (await seeded_keys(store))[0]
+    await store.record_verdict(key, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_refinement(key, refinement("a", "b"), prompt_version=1, model="sonnet")
+    await store.record_refinement(key, refinement("c"), prompt_version=2, model="sonnet")
+    rows = await store.pairs()
+    assert [str(row["complaint_verbatim"]) for row in rows] == ["c"]
+    assert rows[0]["prompt_version"] == 2
+    assert rows[0]["category"] == "wrong_approach"
+    assert rows[0]["action"] == "ran a tool"
 
 
 @pytest.mark.integration

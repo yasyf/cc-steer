@@ -227,7 +227,8 @@ async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, a
     )
     click.echo(f"golden: {metrics.golden.passed}/{metrics.golden.total} (sha256 {metrics.golden.sha256[:12]})")
     for failure in metrics.golden.failures:
-        click.echo(f"  FAIL expected {failure.expected}, got {failure.category}: {failure.text[:120]}")
+        why = f" — {failure.rationale}" if failure.rationale else ""
+        click.echo(f"  FAIL expected {failure.expected}, got {failure.category}{why}: {failure.text[:120]}")
     core_a, core_r = metrics.core_accepts, metrics.core_rejects
     click.echo(
         f"precision (core): {core_a.hits}/{core_a.audited}"
@@ -247,13 +248,51 @@ async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, a
     click.echo(f"disagreements: {len(metrics.disagreements)}")
     for item in metrics.disagreements:
         click.echo(
-            f"  [{item.source_kind}] judge={item.judge_category} auditor={item.auditor_category}: {item.text[:120]}"
+            f"  [{item.source_kind}] judge={item.judge_category} ({item.judge_rationale}) "
+            f"auditor={item.auditor_category} ({item.auditor_rationale}): {item.text[:120]}"
         )
     if flips is not None:
         rate = f" ({r:.0%})" if (r := flips.rate) is not None else ""
         click.echo(f"flips vs v{compare_to}: {len(flips.flips)}/{flips.common}{rate}")
         for flip in flips.flips:
             click.echo(f"  {flip.from_category} -> {flip.to_category}: {flip.text[:120]}")
+
+
+@main.command()
+@click.option(
+    "--model", "tier", type=click.Choice(TIERS), default="medium", show_default=True, help="Refiner model tier."
+)
+@click.option("--limit", type=int, default=None, help="Refine at most this many events this pass.")
+@click.option("--concurrency", type=int, default=8, show_default=True, help="Maximum concurrent claude subshells.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | None) -> None:
+    """Refine every accepted pushback event into atomic training pairs.
+
+    Incremental and idempotent: pairs commit per event as soon as each call
+    completes, failed events stay pending and are retried on the next run, and
+    re-running over a fully refined corpus is a no-op.
+    """
+    from cc_pushback.claude import resolved_model
+    from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
+    from cc_pushback.refine import refine as run_refine
+
+    if not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        pending = len(await store.unrefined(prompt_version=REFINE_VERSION, model=resolved_model(tier)))
+        if pending > PENDING_CAP:
+            raise click.ClickException(f"{pending} pending events exceeds the {PENDING_CAP} safety cap — wrong DB?")
+        click.echo(f"pending: {pending} events at refine v{REFINE_VERSION} ({resolved_model(tier)})")
+        report = await run_refine(store, tier=tier, limit=limit, concurrency=concurrency)
+    click.echo(
+        f"refined {report.refined} events into {report.pairs} pairs ({report.failed} failed), {report.pending} pending"
+    )
 
 
 @main.command()
@@ -266,10 +305,10 @@ async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, a
 )
 @coro
 async def pairs(jsonl: bool, db: Path | None) -> None:
-    """Print the training pairs — the pipeline's deliverable.
+    """Print the refined training pairs — the pipeline's deliverable.
 
-    Each pair is one accepted candidate: what Claude did (the faithful trigger
-    context plus the judge's one-line normalization) and the user's pushback.
+    Each pair is one atomic complaint: a faithful re-synthesis of what Claude did,
+    the verbatim user excerpt, and the distilled one-sentence complaint.
     """
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         rows = await store.pairs()
@@ -277,7 +316,7 @@ async def pairs(jsonl: bool, db: Path | None) -> None:
         if jsonl:
             click.echo(json.dumps(row | {"project": project_label(str(row["origin_path"] or ""))}))
         else:
-            click.echo(f"[{row['category']}] {str(row['claude_action_summary'])[:80]} -> {str(row['pushback'])[:100]}")
+            click.echo(f"[{row['category']}] {str(row['action'])[:80]} -> {str(row['complaint'])[:100]}")
 
 
 @main.command(name="view-samples")
