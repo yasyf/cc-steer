@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from cc_pushback.store import FeedbackStore
 
-PROMPT_VERSION = 3
+PROMPT_VERSION = 4
 AUDIT_VERSION = 2
 JUDGE = "judge"
 AUDITOR = "auditor"
@@ -71,7 +71,13 @@ Pick exactly one category:
 - operational_directive: a forward instruction ("commit and push", "set a higher timeout")
   that does not criticize prior work. Approving then adding scope ("yes — also do Y",
   "upgrade our alias as well") is operational; forward words like "fix" or "review"
-  aimed at future work do not by themselves fault what was already done.
+  aimed at future work do not by themselves fault what was already done. A preventive or
+  verification directive after a completion claim ("make sure main has all your changes",
+  "check that 2.5c is done then move on", "no dangling commits") is operational unless it
+  names a specific failure — wanting to confirm clean state is not the same as asserting
+  it is broken. Plain sequencing ("present the plan for approval", "bump the version",
+  "pass this to a new agent, so remove cruft and add context") is operational, even when
+  it says remove/add, when nothing in the assistant's work is being faulted.
 - status_update: the user reporting state ("done, its running", "I killed it already").
 - new_task: a fresh request or spec, not a reaction to the preceding action. A report
   that an external tool or pre-existing system is broken is new_task or status_update,
@@ -82,7 +88,11 @@ Pick exactly one category:
   categorize it by what it challenges. But a question proposing a NEW addition
   ("should we add a pyright config?", "can we also bundle the plugin?") presses on
   nothing the assistant did — it stays a question or new_task.
-- other: none of the above.
+- other: none of the above — including messages ABOUT feedback or classification as data
+  rather than directed at the assistant ("this one is a neutral but its getting
+  classified as a 1", analyzing the dataset, meta-commentary on the labeling). A
+  correction quoted inside such a message is data, not a live correction, so the message
+  is not pushback.
 
 The first five categories are pushback; the rest are noise.
 A mixed message that contains ANY genuine corrective content is pushback — pick the
