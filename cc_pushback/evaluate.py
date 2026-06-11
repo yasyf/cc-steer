@@ -53,12 +53,14 @@ class GoldenFailure:
         dedup_key: The failing row's key.
         expected: The frozen label.
         category: The judge's category, or ``None`` when the row is unjudged.
+        rationale: The judge's stated reason, or ``None`` when the row is unjudged.
         text: The verbatim message.
     """
 
     dedup_key: str
     expected: str
     category: str | None
+    rationale: str | None
     text: str
 
 
@@ -107,6 +109,8 @@ class Disagreement:
         text: The verbatim message.
         judge_category: The judge's category.
         auditor_category: The auditor's category.
+        judge_rationale: The judge's stated reason.
+        auditor_rationale: The auditor's stated reason.
     """
 
     dedup_key: str
@@ -114,6 +118,8 @@ class Disagreement:
     text: str
     judge_category: str
     auditor_category: str
+    judge_rationale: str
+    auditor_rationale: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,10 +262,16 @@ def golden_sha256(path: Path = GOLDEN_PATH) -> str:
 def golden_failure(row: GoldenRow, verdict: Mapping[str, object] | None) -> GoldenFailure | None:
     match verdict:
         case None:
-            return GoldenFailure(dedup_key=row.dedup_key, expected=row.expected, category=None, text=row.text)
+            return GoldenFailure(
+                dedup_key=row.dedup_key, expected=row.expected, category=None, rationale=None, text=row.text
+            )
         case v if bool(v["is_pushback"]) is not (row.expected == "pushback"):
             return GoldenFailure(
-                dedup_key=row.dedup_key, expected=row.expected, category=str(v["category"]), text=row.text
+                dedup_key=row.dedup_key,
+                expected=row.expected,
+                category=str(v["category"]),
+                rationale=str(v["rationale"]),
+                text=row.text,
             )
         case _:
             return None
@@ -313,9 +325,7 @@ async def evaluate(
     judged = await store.judged(role=JUDGE, prompt_version=prompt_version)
     corpus_keys = await store.dedup_keys()
     judge_by_key = {str(row["dedup_key"]): row for row in judged}
-    audits = {
-        str(row["dedup_key"]): row for row in await store.judged(role=AUDITOR, prompt_version=AUDIT_VERSION)
-    }
+    audits = {str(row["dedup_key"]): row for row in await store.judged(role=AUDITOR, prompt_version=AUDIT_VERSION)}
     core = sample_audit(judged, accepts=accepts, rejects=rejects, seed=seed).core
     accepted_all = [row for row in judged if row["is_pushback"]]
     rejected_all = [row for row in judged if not row["is_pushback"]]
@@ -342,6 +352,8 @@ async def evaluate(
                 text=str(row["text"]),
                 judge_category=str(row["category"]),
                 auditor_category=str(audit["category"]),
+                judge_rationale=str(row["rationale"]),
+                auditor_rationale=str(audit["rationale"]),
             )
             for key, row in judge_by_key.items()
             if (audit := audits.get(key)) is not None and bool(audit["is_pushback"]) is not bool(row["is_pushback"])

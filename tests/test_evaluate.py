@@ -50,12 +50,13 @@ def test_golden_result_passes_fails_and_flags_unjudged() -> None:
         GoldenRow(dedup_key="k3", source_kind="transcript_message", text="t3", expected="pushback", note=""),
     )
     judge = {
-        "k1": {"is_pushback": 1, "category": "wrong_approach"},
-        "k2": {"is_pushback": 1, "category": "premature"},
+        "k1": {"is_pushback": 1, "category": "wrong_approach", "rationale": "clear rejection"},
+        "k2": {"is_pushback": 1, "category": "premature", "rationale": "stopped early"},
     }
     result = golden_result(golden, {"k1", "k2", "k3"}, judge, "sha")
     assert (result.total, result.passed) == (3, 1)
     assert [(f.dedup_key, f.category) for f in result.failures] == [("k2", "premature"), ("k3", None)]
+    assert [(f.dedup_key, f.rationale) for f in result.failures] == [("k2", "stopped early"), ("k3", None)]
 
 
 @pytest.mark.unit
@@ -117,6 +118,8 @@ async def test_evaluate_end_to_end(store: FeedbackStore, tmp_path: Path, monkeyp
     assert metrics.contamination == 1.0  # the auditor found pushback in the reject
     assert len(metrics.disagreements) == 1
     assert metrics.disagreements[0].judge_category == "status_update"
+    assert metrics.disagreements[0].judge_rationale == "r"
+    assert metrics.disagreements[0].auditor_rationale == "r"
 
 
 @pytest.mark.integration
