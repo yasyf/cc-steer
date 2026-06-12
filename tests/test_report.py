@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from cc_transcript.domains.mining import firm, noise, weak
+from cc_transcript.context import ContextWindow, TurnRef
+from cc_transcript.mining import firm, noise, weak
 
-from cc_pushback.context import ContextSnapshot, ContextTurn
 from cc_pushback.report import (
     Sample,
     build_summary,
@@ -17,12 +17,22 @@ from cc_pushback.report import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from cc_transcript.domains.mining import CandidateSignal
+    from cc_transcript.mining import CandidateSignal
 
 PROJ = "/h/.claude/projects/-Users-y-Code-proj/sess.jsonl"
 OTHER = "/h/.claude/projects/-Users-y-projects-other/sess.jsonl"
+
+
+def preview_window(*previews: str) -> ContextWindow:
+    return ContextWindow(
+        anchor=None,
+        before=tuple(TurnRef(role="user", refs=(), preview=preview, tool_digests=()) for preview in previews),
+        trigger=None,
+        after=(),
+        fidelity="summary",
+        preview_chars=200,
+        origin="migrated",
+    )
 
 
 def make_sample(
@@ -34,9 +44,6 @@ def make_sample(
     occurred_at: str = "2026-05-01T12:00:00+00:00",
     session: str = "s1",
     origin: str = PROJ,
-    before: Sequence[ContextTurn] = (),
-    trigger: ContextTurn | None = None,
-    after: Sequence[ContextTurn] = (),
     signal: CandidateSignal | None = None,
 ) -> Sample:
     return Sample(
@@ -45,7 +52,7 @@ def make_sample(
         occurred_at=occurred_at,
         text=text,
         payload=payload or {},
-        context=ContextSnapshot(before=tuple(before), trigger=trigger, after=tuple(after)),
+        window=preview_window(),
         origin_path=origin,
         session_id=session,
         signal=signal,
@@ -167,18 +174,19 @@ def test_parse_summary_json(raw: str, ok: bool) -> None:
 
 
 def test_sample_from_row_round_trips() -> None:
-    snapshot = ContextSnapshot(before=(ContextTurn(role="user", text="hello there"),), trigger=None, after=())
+    window = preview_window("hello there")
     row = {
         "id": 5,
         "source_kind": "plan_review",
         "occurred_at": "2026-05-01T00:00:00+00:00",
         "text": "do it differently",
         "payload_json": '{"detector": "plan_reentry"}',
-        "context_json": snapshot.to_json(),
+        "context_json": window.to_json(),
+        "event_uuid": "u5",
         "origin_path": PROJ,
         "session_id": "abc",
     }
     sample = Sample.from_row(row)
     assert sample.id == 5
     assert sample.payload == {"detector": "plan_reentry"}
-    assert sample.context.before[0].text == "hello there"
+    assert sample.window == window

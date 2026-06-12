@@ -43,6 +43,8 @@ border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;ma
 .card-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
 .complaint{color:var(--accent);margin-top:6px}
 .st-refined{color:#7ee787}.st-accepted{color:#58a6ff}.st-noise{color:#8b949e}.st-unjudged{color:#6e7681}
+details.diff{margin-top:8px}
+details.diff summary{color:var(--accent);cursor:pointer}
 """
 
 DASHBOARD_JS = """
@@ -68,13 +70,29 @@ function attrs(r){
     +`data-agree="${esc(r.agreement||'')}" data-golden="${esc(r.golden||'')}" data-key="${esc(r.dedup_key)}"`;
 }
 
+function diffLines(cls,text){
+  return text.split('\\n').map(l=>`<div class="${cls}">${esc(l)}</div>`).join('');
+}
+function diffPane(label,side){
+  return `<div class="pane"><div class="plabel">${esc(label)}</div>`
+    +diffLines('del',side.old)+diffLines('ins',side.new)+'</div>';
+}
+function evidenceHtml(ev){
+  if(!ev)return '';
+  const git=ev.source==='git'?'<span class="chip chip-git">git</span>':'';
+  const correct=ev.correct?diffPane('correct',ev.correct):'';
+  return `<details class="diff"><summary>code evidence</summary>`
+    +`<div class="vhead"><span class="chip">${esc(ev.file_path)}</span>${git}</div>`
+    +`<div class="panes">${diffPane('incorrect',ev.incorrect)}${correct}</div></details>`;
+}
+
 function pairRow(r){
   return `<article class="card" ${attrs(r)}><header class="card-head">`
     +badge('cat-'+(r.category||'other'),r.category||'—')+badge('badge-'+r.source_kind,r.source_kind)
     +`${chip(r.project)}<span class="chip">pair ${r.pair_index}</span></header>`
     +`<div class="text"><pre>${esc(r.action)}</pre></div>`
     +`<blockquote class="pverbatim">${esc(r.complaint_verbatim)}</blockquote>`
-    +`<div class="complaint">↳ ${esc(r.complaint)}</div></article>`;
+    +`<div class="complaint">↳ ${esc(r.complaint)}</div>${evidenceHtml(r.evidence)}</article>`;
 }
 
 function candRow(r){
@@ -124,6 +142,7 @@ function fillFacet(el,key,label){
 function render(){
   listEl.innerHTML=rows.map(rowHtml).join('')||'<p class="muted">none</p>';
   for(const c of listEl.querySelectorAll('.card'))c.addEventListener('click',()=>openDetail(c.dataset.key));
+  for(const s of listEl.querySelectorAll('details.diff summary'))s.addEventListener('click',e=>e.stopPropagation());
   apply();
 }
 
@@ -222,6 +241,21 @@ def project_of(origin_path: object) -> str | None:
     return report.project_label(str(origin_path)) if origin_path else None
 
 
+def edit_json(old: str, new: str) -> dict[str, str]:
+    return {"old": report.truncate(old, LIST_TEXT_LIMIT), "new": report.truncate(new, LIST_TEXT_LIMIT)}
+
+
+def serialize_evidence(row: Mapping[str, object]) -> dict[str, object] | None:
+    if (evidence := report.EvidenceRow.from_row(row)) is None:
+        return None
+    return {
+        "file_path": evidence.file_path,
+        "source": evidence.source,
+        "incorrect": edit_json(*evidence.incorrect),
+        "correct": None if evidence.correct is None else edit_json(*evidence.correct),
+    }
+
+
 def serialize_pair(row: Mapping[str, object]) -> dict[str, object]:
     return {
         "dedup_key": row["dedup_key"],
@@ -233,6 +267,7 @@ def serialize_pair(row: Mapping[str, object]) -> dict[str, object]:
         "source_kind": row["source_kind"],
         "project": project_of(row["origin_path"]),
         "occurred_at": str(row["occurred_at"])[:19],
+        "evidence": serialize_evidence(row),
     }
 
 

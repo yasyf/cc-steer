@@ -4,9 +4,8 @@ import itertools
 import json
 from typing import TYPE_CHECKING, Any
 
+from cc_transcript.mining import DENIAL_PREFIX, USER_SAID_MARKER
 from cc_transcript.parser import parse_events_from_bytes
-
-from cc_pushback.markers import DENIAL_PREFIX, USER_SAID_MARKER
 
 if TYPE_CHECKING:
     from pathlib import Path

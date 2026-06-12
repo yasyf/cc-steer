@@ -12,18 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cc_transcript.domains.mining import (
-    ContextSnapshot,
-    DedupKey,
-    render_turn,
-    render_turns,
-    resolved_model,
-    run_verdicts,
-    structured_judge,
-)
+from cc_transcript.context import ContextWindow
+from cc_transcript.judge import resolved_model, run_verdicts, structured_judge
+from cc_transcript.mining import DedupKey
 from pydantic import BaseModel, Field
 
-from cc_pushback.triage import TRIGGER_TEXT_LIMIT
+from cc_pushback.triage import render_context
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -32,7 +26,7 @@ if TYPE_CHECKING:
 
     from cc_pushback.store import FeedbackStore
 
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 
 REFINE_PROMPT = """\
 You are refining one accepted piece of developer PUSHBACK — corrective feedback a
@@ -58,14 +52,9 @@ For EACH complaint produce:
 
 [source: {source_kind}]
 [judge's hint about the action: {what_claude_did}]
-=== conversation before ===
-{before}
-=== assistant action under review ===
-{trigger}
+{context}
 === USER PUSHBACK TO REFINE ===
-{text}
-=== conversation after ===
-{after}"""
+{text}"""
 
 
 class RefinedPair(BaseModel):
@@ -110,15 +99,13 @@ class RefineReport:
     pending: int
 
 
-def build_refine_prompt(row: Mapping[str, object]) -> str:
-    ctx = ContextSnapshot.from_json(str(row["context_json"]))
+async def build_refine_prompt(row: Mapping[str, object]) -> str:
+    context, _ = await render_context(ContextWindow.from_json(str(row["context_json"])))
     return REFINE_PROMPT.format(
         source_kind=row["source_kind"],
         what_claude_did=row["what_claude_did"],
-        before=render_turns(ctx.before),
-        trigger=render_turn(ctx.trigger, TRIGGER_TEXT_LIMIT) if ctx.trigger else "(unknown)",
+        context=context,
         text=row["text"],
-        after=render_turns(ctx.after),
     )
 
 

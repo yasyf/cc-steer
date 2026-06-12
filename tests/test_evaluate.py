@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from cc_transcript.domains.mining import DedupKey
+from cc_transcript.mining import DedupKey
 
 from cc_pushback.evaluate import (
     AuditEstimate,
@@ -86,13 +86,17 @@ async def test_evaluate_end_to_end(store: FeedbackStore, tmp_path: Path, monkeyp
     rows = await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model="sonnet")
     keys = [DedupKey(str(row["dedup_key"])) for row in rows]
     accepted, rejected = keys[0], keys[1]
-    await store.record_verdict(accepted, verdict(), role=JUDGE, prompt_version=PROMPT_VERSION, model="sonnet")
     await store.record_verdict(
-        rejected, verdict("status_update"), role=JUDGE, prompt_version=PROMPT_VERSION, model="sonnet"
+        accepted, verdict(), role=JUDGE, prompt_version=PROMPT_VERSION, model="sonnet", fidelity="full"
     )
-    await store.record_verdict(accepted, verdict(), role=AUDITOR, prompt_version=AUDIT_VERSION, model="opus")
     await store.record_verdict(
-        rejected, verdict("wrong_approach"), role=AUDITOR, prompt_version=AUDIT_VERSION, model="opus"
+        rejected, verdict("status_update"), role=JUDGE, prompt_version=PROMPT_VERSION, model="sonnet", fidelity="full"
+    )
+    await store.record_verdict(
+        accepted, verdict(), role=AUDITOR, prompt_version=AUDIT_VERSION, model="opus", fidelity="full"
+    )
+    await store.record_verdict(
+        rejected, verdict("wrong_approach"), role=AUDITOR, prompt_version=AUDIT_VERSION, model="opus", fidelity="full"
     )
     golden_path = tmp_path / "golden.json"
     golden_path.write_text(
@@ -132,10 +136,18 @@ async def test_flip_report_counts_only_side_changes(store: FeedbackStore) -> Non
     rows = await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet")
     keys = [DedupKey(str(row["dedup_key"])) for row in rows]
     flipper, stayer = keys[0], keys[1]
-    await store.record_verdict(flipper, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
-    await store.record_verdict(stayer, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
-    await store.record_verdict(flipper, verdict("new_task"), role=JUDGE, prompt_version=2, model="sonnet")
-    await store.record_verdict(stayer, verdict("incorrect_change"), role=JUDGE, prompt_version=2, model="sonnet")
+    await store.record_verdict(
+        flipper, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
+    await store.record_verdict(
+        stayer, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
+    await store.record_verdict(
+        flipper, verdict("new_task"), role=JUDGE, prompt_version=2, model="sonnet", fidelity="full"
+    )
+    await store.record_verdict(
+        stayer, verdict("incorrect_change"), role=JUDGE, prompt_version=2, model="sonnet", fidelity="full"
+    )
     report = await flip_report(store, from_version=1, to_version=2)
     assert report.common == 2
     assert [(flip.from_category, flip.to_category) for flip in report.flips] == [("wrong_approach", "new_task")]

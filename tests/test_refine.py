@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from cc_transcript.domains.mining import ContextSnapshot, ContextTurn, resolved_model
+from cc_transcript.judge import resolved_model
 from pydantic import ValidationError
 
 from cc_pushback.detectors import detect
 from cc_pushback.refine import PROMPT_VERSION, RefinedPair, Refinement, build_refine_prompt, refine
 from cc_pushback.triage import Verdict, triage
-from tests.builders import assistant_text, parse, user_text
+from tests.builders import (
+    SESSION,
+    assistant_text,
+    assistant_tool_use,
+    interrupt_result,
+    parse,
+    user_text,
+    write_transcript,
+)
+from tests.test_triage import candidate_row
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cc_pushback.store import FeedbackStore
 
 pytestmark = pytest.mark.anyio
@@ -44,7 +54,7 @@ async def seed_accepted(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -
             user_text("also stop hardcoding the path"),
         ]
     )
-    assert await store.record_file_scan(FILE, 1.0, detect(Path(FILE), events)) >= 2
+    assert await store.record_file_scan(FILE, 1.0, detect(events)) >= 2
 
     async def fake_judge(prompt: str) -> Verdict:
         return verdict()
@@ -55,25 +65,24 @@ async def seed_accepted(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.unit
-def test_build_refine_prompt_includes_action_hint_and_context() -> None:
-    snapshot = ContextSnapshot(
-        before=(ContextTurn(role="user", text="please clean the build dir"),),
-        trigger=ContextTurn(role="assistant", text="cleaning now", tool_calls=("Bash",), tool_inputs=("rm -rf build",)),
-        after=(),
-    )
-    row = {
-        "source_kind": "interrupt_rejection",
-        "context_json": snapshot.to_json(),
-        "text": "no, stop",
-        "what_claude_did": "force-pushed to main",
-    }
-    prompt = build_refine_prompt(row)
-    assert "Bash(rm -rf build)" in prompt
+async def test_build_refine_prompt_includes_action_hint_and_context(projects_root: Path) -> None:
+    entries = [
+        user_text("please clean the build dir"),
+        assistant_text("cleaning now"),
+        assistant_tool_use("t1", "Bash", {"command": "rm -rf build"}),
+        interrupt_result("t1"),
+        user_text("no, stop"),
+    ]
+    write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
+    row = candidate_row(parse(entries), source_kind="interrupt_rejection") | {"what_claude_did": "force-pushed to main"}
+    prompt = await build_refine_prompt(row)
+    assert "rm -rf build" in prompt
     assert "cleaning now" in prompt
     assert "no, stop" in prompt
     assert "please clean the build dir" in prompt
     assert "[source: interrupt_rejection]" in prompt
     assert "force-pushed to main" in prompt
+    assert "=== USER PUSHBACK TO REFINE ===" in prompt
 
 
 @pytest.mark.unit
@@ -111,7 +120,7 @@ async def test_refine_only_touches_accepted_pushback(store: FeedbackStore, monke
             user_text("also stop hardcoding the path"),
         ]
     )
-    await store.record_file_scan(FILE, 1.0, detect(Path(FILE), events))
+    await store.record_file_scan(FILE, 1.0, detect(events))
 
     async def picky_judge(prompt: str) -> Verdict:
         noise = "USER MESSAGE TO CLASSIFY ===\nalso stop hardcoding" in prompt

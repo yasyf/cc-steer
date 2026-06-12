@@ -1,8 +1,8 @@
 """Decode the feedback corpus and render it for the dashboard.
 
 Holds the data model the dashboard serves — :class:`Sample`, :class:`VerdictRow`,
-:class:`RefinedPairRow`, and the :class:`Lineage` that stitches a candidate's whole
-pipeline trail together — plus the corpus :class:`Summary` (written by the ``claude``
+:class:`RefinedPairRow` with its :class:`EvidenceRow`, and the :class:`Lineage` that
+stitches a candidate's whole pipeline trail together — plus the corpus :class:`Summary` (written by the ``claude``
 CLI when available, falling back to heuristics) and the HTML renderers for a
 candidate's five-stage lineage. The FastAPI surface lives in :mod:`cc_pushback.dashboard`.
 """
@@ -19,19 +19,19 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cc_transcript.domains.mining import NOISE_FLOOR, effective_confidence
-from cc_transcript.domains.mining.confidence import from_payload
+from cc_transcript.context import ContextWindow
+from cc_transcript.mining import NOISE_FLOOR, effective_confidence
+from cc_transcript.mining.confidence import from_payload
 
 from cc_pushback.claude import claude_available, run_claude
-from cc_pushback.context import ContextSnapshot
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from typing import Any, Literal
 
-    from cc_transcript.domains.mining import CandidateSignal
+    from cc_transcript.context import TurnRef
+    from cc_transcript.mining import CandidateSignal
 
-    from cc_pushback.context import ContextTurn
     from cc_pushback.evaluate import GoldenRow
 
 CONTEXT_TURN_LIMIT = 700
@@ -112,6 +112,16 @@ details.ctx summary{color:var(--accent);cursor:pointer}
 .pverbatim{border-left:2px solid #7ee787;margin:6px 0;padding:2px 0 2px 10px;color:var(--fg)}
 .orig pre{white-space:pre-wrap;word-break:break-word;margin:0 0 8px;color:var(--muted)}
 mark{background:#7ee78733;color:var(--fg);border-radius:3px}
+.evidence{margin-top:8px}
+.panes{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+.pane{flex:1;min-width:220px;border:1px solid var(--border);border-radius:6px;padding:6px 8px}
+.pane .plabel{font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.pane .del,.pane .ins{white-space:pre-wrap;word-break:break-word;padding:0 4px;border-radius:3px}
+.pane .del{background:#ff7b7222}
+.pane .ins{background:#7ee78722}
+.pane .del::before{content:"- ";color:#ff7b72}
+.pane .ins::before{content:"+ ";color:#7ee787}
+.chip-git{color:#ffa657}
 .flip{font-size:11px;color:#ffa657}
 .agree{font-size:11px;color:#7ee787}
 .disagree{font-size:11px;color:#ff7b72}
@@ -125,7 +135,7 @@ mark{background:#7ee78733;color:var(--fg);border-radius:3px}
 
 @dataclass(frozen=True, slots=True)
 class Sample:
-    """One stored feedback event, decoded from a :meth:`FeedbackStore.events` row.
+    """One stored feedback event, decoded from a :meth:`FeedbackStore.candidates` row.
 
     Attributes:
         id: The event's database id.
@@ -133,8 +143,8 @@ class Sample:
         occurred_at: The ISO timestamp of the feedback.
         text: The verbatim pushback text.
         payload: The detector-specific metadata, decoded from ``payload_json``.
-        context: The conversational window around the feedback.
-        origin_path: The transcript file the event came from.
+        window: The durable context window around the feedback.
+        origin_path: The transcript file the event came from — a display hint only.
         session_id: The session the event came from.
         signal: The de-noising confidence signal, decoded from the payload.
     """
@@ -144,14 +154,14 @@ class Sample:
     occurred_at: str
     text: str
     payload: Mapping[str, Any]
-    context: ContextSnapshot
+    window: ContextWindow
     origin_path: str | None
     session_id: str | None
     signal: CandidateSignal | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> Sample:
-        """Decodes a :meth:`FeedbackStore.events` row into a :class:`Sample`."""
+        """Decodes a :meth:`FeedbackStore.candidates` row into a :class:`Sample`."""
         payload = json.loads(str(row["payload_json"])) if row["payload_json"] else {}
         return cls(
             id=int(str(row["id"])),
@@ -159,7 +169,7 @@ class Sample:
             occurred_at=str(row["occurred_at"]),
             text=str(row["text"]),
             payload=payload,
-            context=ContextSnapshot.from_json(str(row["context_json"])),
+            window=ContextWindow.from_json(str(row["context_json"])),
             origin_path=str(row["origin_path"]) if row["origin_path"] else None,
             session_id=str(row["session_id"]) if row["session_id"] else None,
             signal=from_payload(payload.get("signal")),
@@ -209,6 +219,38 @@ class VerdictRow:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceRow:
+    """One refined pair's grounding code evidence, distilled by the enrich stage.
+
+    Attributes:
+        file_path: The file the incorrect edit touched.
+        incorrect: The incorrect edit's verbatim ``(old, new)`` content.
+        correct: The correction's verbatim ``(old, new)`` content, when one exists.
+        note: The linker's one-clause explanation of the call.
+        source: Where the correction came from — ``session`` or ``git`` — when one exists.
+    """
+
+    file_path: str
+    incorrect: tuple[str, str]
+    correct: tuple[str, str] | None
+    note: str
+    source: str | None
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, object]) -> EvidenceRow | None:
+        """Decodes a pair row's evidence columns, or ``None`` when no code evidence exists."""
+        if row["evidence_kind"] != "code":
+            return None
+        return cls(
+            file_path=str(row["evidence_file_path"]),
+            incorrect=(str(row["incorrect_old"]), str(row["incorrect_new"])),
+            correct=None if row["correct_old"] is None else (str(row["correct_old"]), str(row["correct_new"])),
+            note=str(row["evidence_note"]),
+            source=str(row["evidence_source"]) if row["evidence_source"] else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RefinedPairRow:
     """One atomic training pair distilled by the refiner from a single complaint.
 
@@ -219,6 +261,7 @@ class RefinedPairRow:
         complaint: The one-sentence distillation of the objection.
         prompt_version: The refine prompt version that produced it.
         model: The resolved model name that produced it.
+        evidence: The enrich stage's code evidence, when it grounded the pair.
     """
 
     pair_index: int
@@ -227,6 +270,7 @@ class RefinedPairRow:
     complaint: str
     prompt_version: int
     model: str
+    evidence: EvidenceRow | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> RefinedPairRow:
@@ -238,6 +282,7 @@ class RefinedPairRow:
             complaint=str(row["complaint"]),
             prompt_version=int(str(row["prompt_version"])),
             model=str(row["model"]),
+            evidence=EvidenceRow.from_row(row),
         )
 
 
@@ -570,20 +615,21 @@ def truncate(text: str, limit: int = CONTEXT_TURN_LIMIT) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
-def render_turn(turn: ContextTurn, *, is_trigger: bool = False) -> str:
-    cls = f"turn turn-{turn.role}" + (" turn-trigger" if is_trigger else "")
-    tools = f'<span class="tools">{escape(" ".join(turn.tool_calls))}</span>' if turn.tool_calls else ""
+def render_turn(ref: TurnRef, *, is_trigger: bool = False) -> str:
+    cls = f"turn turn-{ref.role}" + (" turn-trigger" if is_trigger else "")
+    tools = f'<span class="tools">{len(ref.tool_digests)} tool calls</span>' if ref.tool_digests else ""
     return (
-        f'<div class="{cls}"><span class="role">{escape(turn.role)}</span>{tools}'
-        f"<pre>{escape(truncate(turn.text))}</pre></div>"
+        f'<div class="{cls}"><span class="role">{escape(ref.role)}</span>{tools}'
+        f"<pre>{escape(truncate(ref.preview))}</pre></div>"
     )
 
 
-def render_context(ctx: ContextSnapshot) -> str:
-    turns = [render_turn(turn, is_trigger=turn == ctx.trigger) for turn in ctx.before]
-    if ctx.trigger is not None and ctx.trigger not in ctx.before:
-        turns.append(render_turn(ctx.trigger, is_trigger=True))
-    turns.extend(render_turn(turn) for turn in ctx.after)
+def render_context(window: ContextWindow) -> str:
+    turns = [
+        *(render_turn(ref) for ref in window.before),
+        *(() if window.trigger is None else (render_turn(window.trigger, is_trigger=True),)),
+        *(render_turn(ref) for ref in window.after),
+    ]
     if not turns:
         return ""
     return f'<details class="ctx"><summary>context ({len(turns)} turns)</summary>{"".join(turns)}</details>'
@@ -620,6 +666,29 @@ def render_verdict_stage(verdict: VerdictRow, *, flipped: bool = False) -> str:
     )
 
 
+def render_diff_pane(label: str, old: str, new: str) -> str:
+    lines = "".join(
+        f'<div class="{cls}">{escape(line)}</div>'
+        for cls, side in (("del", old), ("ins", new))
+        for line in side.split("\n")
+    )
+    return f'<div class="pane"><div class="plabel">{escape(label)}</div>{lines}</div>'
+
+
+def render_evidence(evidence: EvidenceRow) -> str:
+    git = '<span class="chip chip-git">git</span>' if evidence.source == "git" else ""
+    panes = "".join(
+        (
+            render_diff_pane("incorrect", *evidence.incorrect),
+            *(() if evidence.correct is None else (render_diff_pane("correct", *evidence.correct),)),
+        )
+    )
+    return (
+        f'<div class="evidence"><div class="vhead"><span class="chip">{escape(evidence.file_path)}</span>{git}</div>'
+        f'<div class="panes">{panes}</div><div class="muted">{escape(evidence.note)}</div></div>'
+    )
+
+
 def render_refiner_stage(pairs: Sequence[RefinedPairRow], original: str) -> str:
     if not pairs:
         return '<p class="muted">not yet refined</p>'
@@ -628,7 +697,8 @@ def render_refiner_stage(pairs: Sequence[RefinedPairRow], original: str) -> str:
         f'<span class="chip">v{pair.prompt_version} · {escape(pair.model)}</span></div>'
         f'<pre class="paction">{escape(truncate(pair.action))}</pre>'
         f'<blockquote class="pverbatim">{escape(pair.complaint_verbatim)}</blockquote>'
-        f'<pre class="pcomplaint">{escape(pair.complaint)}</pre></div>'
+        f'<pre class="pcomplaint">{escape(pair.complaint)}</pre>'
+        f"{'' if pair.evidence is None else render_evidence(pair.evidence)}</div>"
         for pair in pairs
     )
     original_html = highlight_spans(original, [pair.complaint_verbatim for pair in pairs])
@@ -660,7 +730,7 @@ def render_lineage_detail(lineage: Lineage, golden_map: Mapping[str, GoldenRow])
             f'<header class="card-head"><span class="badge badge-{escape(sample.source_kind)}">'
             f"{escape(sample.source_kind)}</span><time>{escape(sample.occurred_at[:19])}</time>"
             f"{meta_chips(sample)}</header>",
-            f'<div class="text"><pre>{escape(sample.text)}</pre></div>{render_context(sample.context)}</section>',
+            f'<div class="text"><pre>{escape(sample.text)}</pre></div>{render_context(sample.window)}</section>',
             '<section class="stage stage-judge"><h3>2 · judge</h3>',
             judge_html or '<p class="muted">unjudged</p>',
             "</section>",

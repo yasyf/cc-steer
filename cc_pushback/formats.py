@@ -1,9 +1,9 @@
-"""cc-pushback's concrete code-review formats over the mining domain's parser infra.
+"""cc-pushback's concrete code-review formats over the platform's parser infra.
 
 The generic :class:`ReviewComment`/:class:`ReviewFormat` types and the
-format-dispatch live in :mod:`cc_transcript.domains.mining`; this module supplies
+format-dispatch live in :mod:`cc_transcript.mining`; this module supplies
 cc-pushback's policy — the three review formats it recognizes — and injects them
-into the domain's :func:`extract_all`.
+into the platform's :func:`extract_all`.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from cc_transcript.domains.mining import ReviewComment, ReviewFormat
-from cc_transcript.domains.mining import extract_all as domain_extract_all
+from cc_transcript.mining import ReviewComment, ReviewFormat
+from cc_transcript.mining import extract_all as platform_extract_all
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -95,4 +95,4 @@ def extract_all(text: str) -> Iterator[tuple[ReviewFormat, ReviewComment]]:
     Yields:
         One pair per extracted comment, across all formats whose pattern matches.
     """
-    return domain_extract_all(text, formats())
+    return platform_extract_all(text, formats())

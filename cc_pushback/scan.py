@@ -53,6 +53,6 @@ async def scan(store: FeedbackStore, roots: Sequence[Path], *, full: bool = Fals
     scanned = 0
     inserted = 0
     async for parsed in TranscriptParser.stream_transcripts(paths):
-        inserted += await store.record_file_scan(str(parsed.path), parsed.mtime, detect(parsed.path, parsed.events))
+        inserted += await store.record_file_scan(str(parsed.path), parsed.mtime, detect(parsed.events))
         scanned += 1
     return ScanReport(scanned=scanned, inserted=inserted)

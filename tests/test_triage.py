@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from random import Random
 from typing import TYPE_CHECKING
 
 import pytest
-from cc_transcript.domains.mining import ContextSnapshot, ContextTurn, sample_audit
-from cc_transcript.domains.mining.verdicts import stratified
+from cc_transcript.context import SUMMARY_LABEL
+from cc_transcript.judge import sample_audit
+from cc_transcript.judge.verdicts import stratified
 
 from cc_pushback.detectors import detect
 from cc_pushback.triage import (
@@ -23,11 +23,24 @@ from cc_pushback.triage import (
     build_prompt,
     triage,
 )
-from tests.builders import assistant_text, parse, user_text
+from tests.builders import (
+    SESSION,
+    assistant_text,
+    assistant_tool_use,
+    denial_result,
+    interrupt_result,
+    parse,
+    user_text,
+    write_transcript,
+)
 from tests.fixture_prompt import FIXTURE_PATH, render
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
+    from typing import Any
+
+    from cc_transcript.models import TranscriptEvent
 
     from cc_pushback.store import FeedbackStore
     from cc_pushback.triage import Category
@@ -37,16 +50,17 @@ pytestmark = pytest.mark.anyio
 FILE = "/repo/projects/session.jsonl"
 
 
+def seed_entries() -> list[dict[str, Any]]:
+    return [
+        assistant_text("here is the diff"),
+        user_text("no, use a generator here, this is wrong"),
+        assistant_text("switched to a generator"),
+        user_text("also stop hardcoding the path"),
+    ]
+
+
 async def seed(store: FeedbackStore) -> int:
-    events = parse(
-        [
-            assistant_text("here is the diff"),
-            user_text("no, use a generator here, this is wrong"),
-            assistant_text("switched to a generator"),
-            user_text("also stop hardcoding the path"),
-        ]
-    )
-    inserted = await store.record_file_scan(FILE, 1.0, detect(Path(FILE), events))
+    inserted = await store.record_file_scan(FILE, 1.0, detect(parse(seed_entries())))
     assert inserted >= 2
     return inserted
 
@@ -59,36 +73,71 @@ def judged_row(key: str, kind: str = "transcript_message", *, confidence: float 
     return {"dedup_key": key, "source_kind": kind, "confidence": confidence, "accepted": 1}
 
 
+def candidate_row(events: list[TranscriptEvent], *, source_kind: str) -> dict[str, object]:
+    candidate = next(c for c in detect(events) if c.source_kind == source_kind)
+    return {"source_kind": candidate.source_kind, "context_json": candidate.window.to_json(), "text": candidate.text}
+
+
+async def judge_fidelities(store: FeedbackStore) -> set[str]:
+    cur = await store.store.conn.execute("SELECT DISTINCT fidelity FROM triage WHERE role = 'judge'")
+    return {str(row["fidelity"]) async for row in cur}
+
+
 @pytest.mark.unit
-def test_build_prompt_renders_trigger_inputs_and_text() -> None:
-    snapshot = ContextSnapshot(
-        before=(ContextTurn(role="user", text="please clean the build dir"),),
-        trigger=ContextTurn(
-            role="assistant",
-            text="cleaning now",
-            tool_calls=("Bash",),
-            tool_inputs=("rm -rf build",),
-        ),
-        after=(),
-    )
-    row = {"source_kind": "interrupt_rejection", "context_json": snapshot.to_json(), "text": "no, stop"}
-    prompt = build_prompt(JUDGE_PROMPT, row)
-    assert "Bash(rm -rf build)" in prompt
+async def test_build_prompt_renders_full_fidelity_while_the_transcript_lives(projects_root: Path) -> None:
+    entries = [
+        user_text("please clean the build dir"),
+        assistant_text("cleaning now"),
+        assistant_tool_use("t1", "Bash", {"command": "rm -rf build"}),
+        interrupt_result("t1"),
+        user_text("no, stop"),
+    ]
+    write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
+    row = candidate_row(parse(entries), source_kind="interrupt_rejection")
+    prompt, fidelity = await build_prompt(JUDGE_PROMPT, row)
+    assert fidelity == "full"
+    assert "rm -rf build" in prompt
     assert "cleaning now" in prompt
     assert "no, stop" in prompt
     assert "please clean the build dir" in prompt
     assert "[source: interrupt_rejection]" in prompt
+    assert "=== the turn the message arrived in ===" in prompt
+    assert SUMMARY_LABEL not in prompt
 
 
 @pytest.mark.unit
-def test_build_prompt_tolerates_legacy_context_without_tool_inputs() -> None:
-    snapshot = ContextSnapshot(
-        before=(),
-        trigger=ContextTurn(role="assistant", text="ran it", tool_calls=("Bash",)),
-        after=(),
-    )
-    row = {"source_kind": "transcript_message", "context_json": snapshot.to_json(), "text": "stop"}
-    assert "Bash()" in build_prompt(AUDIT_PROMPT, row)
+async def test_build_prompt_renders_an_oversized_edit_unclipped(projects_root: Path) -> None:
+    long_new = "\n".join(f"refreshed_line_{i:03d} = compute_refreshed_value({i})" for i in range(40))
+    assert len(long_new) > 1500  # would have been bake-truncated pre-2.0
+    entries = [
+        user_text("wire up the release job"),
+        assistant_tool_use(
+            "t2", "Edit", {"file_path": "/repo/app.py", "old_string": "old_line()", "new_string": long_new}
+        ),
+        denial_result("t2", said="no, stop — this rewrites the deploy script"),
+        user_text("leave the deploy script alone"),
+    ]
+    write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
+    row = candidate_row(parse(entries), source_kind="interrupt_rejection")
+    prompt, fidelity = await build_prompt(JUDGE_PROMPT, row)
+    assert fidelity == "full"
+    assert all(f"+ {line}" in prompt for line in long_new.splitlines())
+    assert "…(+" not in prompt  # nothing in this window hits a budget
+
+
+@pytest.mark.unit
+async def test_build_prompt_falls_back_to_labeled_previews_once_expired() -> None:
+    entries = [
+        assistant_text("here is the diff"),
+        user_text("no, this clobbers the config"),
+    ]
+    row = candidate_row(parse(entries), source_kind="transcript_message")  # no transcript on disk
+    prompt, fidelity = await build_prompt(AUDIT_PROMPT, row)
+    assert fidelity == "summary"
+    assert SUMMARY_LABEL in prompt
+    assert "here is the diff" in prompt
+    assert "no, this clobbers the config" in prompt
+    assert "=== HUMAN MESSAGE TO ASSESS ===" in prompt
 
 
 @pytest.mark.unit
@@ -105,8 +154,8 @@ def test_verdict_aliases_satisfy_verdict_like() -> None:
 
 
 @pytest.mark.unit
-def test_build_prompt_matches_pre_refactor_fixture() -> None:
-    assert render().encode() == FIXTURE_PATH.read_bytes()
+async def test_build_prompt_matches_the_byte_fixture(projects_root: Path) -> None:
+    assert (await render(projects_root)).encode() == FIXTURE_PATH.read_bytes()
 
 
 @pytest.mark.integration
@@ -125,6 +174,41 @@ async def test_triage_judges_all_then_noop(store: FeedbackStore, monkeypatch: py
     again = await triage(store)
     assert (again.judged, again.failed, again.pending) == (0, 0, 0)
     assert len(calls) == total
+
+
+@pytest.mark.integration
+async def test_triage_records_summary_fidelity_for_expired_transcripts(
+    store: FeedbackStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await seed(store)  # FILE is never written under projects_root, so windows cannot hydrate
+
+    async def fake(prompt: str) -> Verdict:
+        return verdict()
+
+    monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: fake)
+    await triage(store)
+    assert await judge_fidelities(store) == {"summary"}
+
+
+@pytest.mark.integration
+async def test_refresh_summary_rejudges_at_full_fidelity_once_hydratable(
+    store: FeedbackStore, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entries = seed_entries()
+    total = await store.record_file_scan(FILE, 1.0, detect(parse(entries)))
+
+    async def fake(prompt: str) -> Verdict:
+        return verdict()
+
+    monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: fake)
+    await triage(store)
+    assert await judge_fidelities(store) == {"summary"}
+    assert (await triage(store)).judged == 0  # without the flag, summary rows stay settled
+
+    write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
+    refreshed = await triage(store, refresh_summary=True)
+    assert refreshed.judged == total
+    assert await judge_fidelities(store) == {"full"}
 
 
 @pytest.mark.integration

@@ -132,31 +132,45 @@ async def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
 @click.option("--limit", type=int, default=None, help="Judge at most this many rows this pass.")
 @click.option("--concurrency", type=int, default=8, show_default=True, help="Maximum concurrent claude subshells.")
 @click.option(
+    "--refresh-summary",
+    "refresh_summary",
+    is_flag=True,
+    help="Also re-judge rows whose verdict was recorded at summary fidelity.",
+)
+@click.option(
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
 @coro
-async def triage(tier: TModel, limit: int | None, concurrency: int, db: Path | None) -> None:
+async def triage(tier: TModel, limit: int | None, concurrency: int, refresh_summary: bool, db: Path | None) -> None:
     """Judge every stored candidate lacking a verdict at the current prompt version.
 
     Incremental and idempotent: verdicts persist per row as soon as each call
     completes, failed rows stay pending and are retried on the next run, and
-    re-running over a fully judged corpus is a no-op.
+    re-running over a fully judged corpus is a no-op. With ``--refresh-summary``,
+    rows judged at summary fidelity are re-judged; a full-fidelity verdict
+    replaces the summary one once the row's window hydrates again.
     """
-    from cc_transcript.domains.mining import resolved_model
+    from cc_transcript.judge import resolved_model
 
     from cc_pushback.triage import JUDGE
 
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        pending = len(await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model=resolved_model(tier)))
+        pending = len(
+            await store.unjudged(
+                role=JUDGE, prompt_version=PROMPT_VERSION, model=resolved_model(tier), refresh_summary=refresh_summary
+            )
+        )
         if pending > PENDING_CAP:
             raise click.ClickException(f"{pending} pending rows exceeds the {PENDING_CAP} safety cap — wrong DB?")
         click.echo(f"pending: {pending} rows at prompt v{PROMPT_VERSION} ({resolved_model(tier)})")
-        report = await run_triage(store, tier=tier, limit=limit, concurrency=concurrency)
+        report = await run_triage(
+            store, tier=tier, limit=limit, concurrency=concurrency, refresh_summary=refresh_summary
+        )
     click.echo(f"judged {report.judged} rows ({report.failed} failed), {report.pending} pending")
 
 
@@ -289,7 +303,7 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     completes, failed events stay pending and are retried on the next run, and
     re-running over a fully refined corpus is a no-op.
     """
-    from cc_transcript.domains.mining import resolved_model
+    from cc_transcript.judge import resolved_model
 
     from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
     from cc_pushback.refine import refine as run_refine
@@ -305,6 +319,77 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     click.echo(
         f"refined {report.refined} events into {report.pairs} pairs ({report.failed} failed), {report.pending} pending"
     )
+
+
+@main.command()
+@click.option(
+    "--model", "tier", type=click.Choice(TIERS), default="medium", show_default=True, help="Linking model tier."
+)
+@click.option("--limit", type=int, default=None, help="Enrich at most this many pairs this pass.")
+@click.option("--concurrency", type=int, default=8, show_default=True, help="Maximum concurrent claude subshells.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | None) -> None:
+    """Ground every refined pair in the code it complains about.
+
+    Harvests candidate incorrect edits and their later corrections (from the
+    session, or from git history) around each pair's pushback anchor, then has an
+    LLM pick the one edit the complaint faults, copied verbatim. Expired
+    transcripts and editless windows persist free ``no_code`` rows with no LLM
+    call. Incremental and idempotent: evidence persists per pair as soon as each
+    row resolves, failed pairs stay pending and are retried on the next run, and
+    a refine re-run resurfaces its new pairs here automatically.
+    """
+    from cc_transcript.evidence import EXTRACTOR_VERSION
+    from cc_transcript.judge import resolved_model
+
+    from cc_pushback.enrich import ENRICH_VERSION
+    from cc_pushback.enrich import enrich as run_enrich
+
+    if not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        pending = len(
+            await store.unenriched(
+                enrich_version=ENRICH_VERSION, enrich_model=resolved_model(tier), extractor_version=EXTRACTOR_VERSION
+            )
+        )
+        if pending > PENDING_CAP:
+            raise click.ClickException(f"{pending} pending pairs exceeds the {PENDING_CAP} safety cap — wrong DB?")
+        click.echo(f"pending: {pending} pairs at enrich v{ENRICH_VERSION} ({resolved_model(tier)})")
+        report = await run_enrich(store, tier=tier, limit=limit, concurrency=concurrency)
+    click.echo(
+        f"enriched {report.enriched} pairs ({report.code} code, {report.no_code} no_code, "
+        f"{report.git} git-sourced, {report.failed} failed), {report.pending} pending"
+    )
+
+
+@main.command(name="migrate-corpus")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def migrate_corpus_(db: Path | None) -> None:
+    """Convert a pre-2.0 corpus in place to the cc-transcript 2.0 shapes.
+
+    One-time and idempotent: legacy ``context_json`` snapshots become
+    ``cc-transcript.context/1`` documents (previews only, summary fidelity,
+    ``origin='migrated'``), the ``event_uuid`` and ``triage.fidelity`` columns
+    are added, and rows already in the new schema are skipped.
+    """
+    from cc_pushback.migrate import migrate_corpus
+
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await migrate_corpus(store)
+    click.echo(f"migrated {report.migrated} rows ({report.skipped} already current)")
 
 
 @main.command()

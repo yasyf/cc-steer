@@ -1,9 +1,11 @@
 """cc-pushback's detector policy: map neutral mining facts to feedback candidates.
 
-The fact-recognition mechanism lives in :mod:`cc_transcript.domains.mining`; this
-module injects cc-pushback's policy — its filter spec, its trigger-absence
+The fact-recognition mechanism lives in :mod:`cc_transcript.mining`; this module
+injects cc-pushback's policy — its filter spec, its trigger-absence
 disqualification, and its review formats — and maps each surviving
-:class:`MiningSignal` to a :class:`FeedbackCandidate`.
+:class:`MiningSignal` to a :class:`FeedbackCandidate` whose durable
+:class:`~cc_transcript.context.ContextWindow` is captured over the lifted
+:class:`~cc_transcript.activity.SessionActivity`.
 """
 
 from __future__ import annotations
@@ -11,9 +13,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cc_transcript import keep
-from cc_transcript.domains.mining import (
+from cc_transcript.activity import SessionActivity, meta_of
+from cc_transcript.context import capture_window
+from cc_transcript.ids import EventRef
+from cc_transcript.mining import (
     FeedbackCandidate,
-    build_snapshot,
     dedup_key,
     iter_interrupt_marker_signals,
     iter_plan_reentry_signals,
@@ -28,15 +32,15 @@ from cc_pushback.spec import PUSHBACK_SPEC
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
-    from pathlib import Path
     from typing import Any
 
-    from cc_transcript.domains.mining import MiningSignal
+    from cc_transcript.mining import MiningSignal
     from cc_transcript.models import TranscriptEvent
 
-type Detector = Callable[[Path, Sequence[TranscriptEvent]], Iterator[FeedbackCandidate]]
+type Detector = Callable[[Sequence[TranscriptEvent]], list[FeedbackCandidate]]
 
 SPEC_DETECTORS = frozenset({"transcript_message", "plan_reentry", "review_comment"})
+DEFAULT_BEFORE = 6
 
 
 def survives(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool:
@@ -80,59 +84,70 @@ def payload_of(sig: MiningSignal) -> Mapping[str, Any] | None:
     raise AssertionError(sig.detector)
 
 
-def to_candidate(path: Path, events: Sequence[TranscriptEvent], sig: MiningSignal) -> FeedbackCandidate:
+def clamped_before(activity: SessionActivity, events: Sequence[TranscriptEvent], sig: MiningSignal) -> int:
+    if sig.lower_bound is None or (meta := meta_of(events[sig.lower_bound])) is None:
+        return DEFAULT_BEFORE
+    match (
+        activity.turn_of(EventRef(meta.session_id, meta.uuid)),
+        activity.turn_of(EventRef(sig.session_id, sig.event_uuid)),
+    ):
+        case (None, _) | (_, None):
+            return DEFAULT_BEFORE
+        case lower, anchor:
+            return min(DEFAULT_BEFORE, anchor.index - lower.index)
+
+
+def to_candidate(activity: SessionActivity, events: Sequence[TranscriptEvent], sig: MiningSignal) -> FeedbackCandidate:
+    anchor = EventRef(sig.session_id, sig.event_uuid)
     return FeedbackCandidate(
         dedup_key=dedup_key(*parts(sig)),
         source_kind=sig.kind,
         occurred_at=sig.occurred_at,
         text=sig.text,
-        context=build_snapshot(events, sig.event_index, lower_bound=sig.lower_bound),
+        window=capture_window(activity, anchor, before=clamped_before(activity, events, sig)),
+        ref=anchor,
         session_id=sig.session_id,
-        origin_path=path,
-        origin_uuid=sig.event_uuid,
         cc_version=sig.cc_version,
-        payload=payload_of(sig),
         signal=sig.signal,
+        payload=payload_of(sig),
     )
 
 
-def candidates_from(
-    path: Path, events: Sequence[TranscriptEvent], *streams: Iterator[MiningSignal]
-) -> Iterator[FeedbackCandidate]:
-    return (to_candidate(path, events, sig) for stream in streams for sig in stream if survives(events, sig))
+def candidates_from(events: Sequence[TranscriptEvent], *streams: Iterator[MiningSignal]) -> list[FeedbackCandidate]:
+    signals = [sig for stream in streams for sig in stream if survives(events, sig)]
+    if not signals:
+        return []
+    activity = SessionActivity.from_events(signals[0].session_id, events)
+    return [to_candidate(activity, events, sig) for sig in signals]
 
 
-def transcript_messages(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:
-    return candidates_from(path, events, iter_user_message_signals(events))
+def transcript_messages(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
+    return candidates_from(events, iter_user_message_signals(events))
 
 
-def plan_reviews(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:
-    return candidates_from(path, events, iter_plan_rejection_signals(events), iter_plan_reentry_signals(events))
+def plan_reviews(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
+    return candidates_from(events, iter_plan_rejection_signals(events), iter_plan_reentry_signals(events))
 
 
-def interrupt_rejections(path: Path, events: Sequence[TranscriptEvent]) -> Iterator[FeedbackCandidate]:
-    return candidates_from(path, events, iter_tool_denial_signals(events), iter_interrupt_marker_signals(events))
+def interrupt_rejections(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
+    return candidates_from(events, iter_tool_denial_signals(events), iter_interrupt_marker_signals(events))
 
 
-def detect(path: Path, events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
+def detect(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
     """Runs every detector over one transcript's events.
 
     Args:
-        path: The transcript file the events came from.
         events: The transcript's full ordered event stream.
 
     Returns:
         Every feedback candidate the detectors found, in detector order.
     """
-    return list(
-        candidates_from(
-            path,
-            events,
-            iter_user_message_signals(events),
-            iter_plan_rejection_signals(events),
-            iter_plan_reentry_signals(events),
-            iter_tool_denial_signals(events),
-            iter_interrupt_marker_signals(events),
-            iter_review_comment_signals(events, formats()),
-        )
+    return candidates_from(
+        events,
+        iter_user_message_signals(events),
+        iter_plan_rejection_signals(events),
+        iter_plan_reentry_signals(events),
+        iter_tool_denial_signals(events),
+        iter_interrupt_marker_signals(events),
+        iter_review_comment_signals(events, formats()),
     )

@@ -17,7 +17,7 @@ pytestmark = pytest.mark.anyio
 
 def good_entries() -> list[dict[str, Any]]:
     return [
-        assistant_tool_use("t1", "Write", {"file_path": "/a.py"}),
+        assistant_tool_use("t1", "Write", {"file_path": "/a.py", "content": "x = 1"}),
         denial_result("t1", said="don't do that"),
         user_text("use a frozen dataclass here instead of a dict"),
     ]

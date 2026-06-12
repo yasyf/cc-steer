@@ -4,7 +4,7 @@ Argv construction and envelope parsing come from the shared ``spawnllm`` library
 the spawn stays local (``anyio.run_process``). It uses the user's existing Claude
 Code auth (no API key), so the package stays offline unless ``claude`` is
 actually on the path. The structured path lives in
-:mod:`cc_transcript.domains.mining.llm` (``run_structured``/``structured_judge``).
+:mod:`cc_transcript.judge` (``run_structured``/``structured_judge``).
 """
 
 from __future__ import annotations

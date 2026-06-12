@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from cc_pushback.context import ContextSnapshot, ContextTurn, build_snapshot
 from cc_pushback.detectors import Detector, detect
+from cc_pushback.migrate import MigrationReport, migrate_corpus
 from cc_pushback.models import DedupKey, FeedbackCandidate, SourceKind, dedup_key
 from cc_pushback.scan import ScanReport, scan
 from cc_pushback.spec import PUSHBACK_SPEC
@@ -15,14 +15,13 @@ from cc_pushback.store import FeedbackStore
 # great-docs documents __all__ when present; keep it in sync with the re-exports above.
 __all__ = [
     "PUSHBACK_SPEC",
-    "ContextSnapshot",
-    "ContextTurn",
     "Detector",
     "FeedbackCandidate",
     "FeedbackStore",
+    "MigrationReport",
     "ScanReport",
-    "build_snapshot",
     "dedup_key",
     "detect",
+    "migrate_corpus",
     "scan",
 ]

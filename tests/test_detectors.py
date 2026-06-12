@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from cc_transcript import keep
 
@@ -23,8 +21,6 @@ from tests.builders import (
     user_text,
 )
 
-FILE = Path("session.jsonl")
-
 
 @pytest.mark.unit
 def test_exit_plan_rejection_extracts_embedded_user_text() -> None:
@@ -34,7 +30,7 @@ def test_exit_plan_rejection_extracts_embedded_user_text() -> None:
             denial_result("t1", said="actually do Y instead"),
         ]
     )
-    [candidate] = list(plan_reviews(FILE, events))
+    [candidate] = plan_reviews(events)
     assert candidate.source_kind == "plan_review"
     assert candidate.text == "actually do Y instead"
     assert candidate.payload == {"detector": "exit_plan_rejection"}
@@ -44,12 +40,12 @@ def test_exit_plan_rejection_extracts_embedded_user_text() -> None:
 def test_plan_reentry_fires_only_after_an_edit() -> None:
     after_edit = parse(
         [
-            assistant_tool_use("e1", "Edit", {"file_path": "/a.py"}),
+            assistant_tool_use("e1", "Edit", {"file_path": "/a.py", "old_string": "a", "new_string": "b"}),
             mode_entry("plan"),
             user_text("this approach is wrong, use a generator"),
         ]
     )
-    [candidate] = list(plan_reviews(FILE, after_edit))
+    [candidate] = plan_reviews(after_edit)
     assert candidate.payload == {"detector": "plan_reentry"}
     assert candidate.text == "this approach is wrong, use a generator"
 
@@ -60,7 +56,25 @@ def test_plan_reentry_fires_only_after_an_edit() -> None:
             user_text("this approach is wrong, use a generator"),
         ]
     )
-    assert list(plan_reviews(FILE, without_edit)) == []
+    assert plan_reviews(without_edit) == []
+
+
+@pytest.mark.unit
+def test_plan_reentry_window_clamps_before_to_the_edit_turn() -> None:
+    events = parse(
+        [
+            user_text("write the feature"),
+            assistant_text("starting"),
+            user_text("continue"),
+            assistant_tool_use("e1", "Edit", {"file_path": "/a.py", "old_string": "a", "new_string": "b"}),
+            mode_entry("plan"),
+            user_text("this approach is wrong, use a generator"),
+        ]
+    )
+    [candidate] = plan_reviews(events)
+    assert len(candidate.window.before) == 1
+    assert "continue" in candidate.window.before[0].preview
+    assert "write the feature" not in "".join(ref.preview for ref in candidate.window.before)
 
 
 @pytest.mark.unit
@@ -72,10 +86,29 @@ def test_interrupt_marker_pairs_the_following_correction() -> None:
             user_text("no, run the tests instead please"),
         ]
     )
-    [candidate] = list(interrupt_rejections(FILE, events))
+    [candidate] = interrupt_rejections(events)
     assert candidate.source_kind == "interrupt_rejection"
     assert candidate.text == "no, run the tests instead please"
     assert candidate.payload == {"detector": "interrupt"}
+
+
+@pytest.mark.unit
+def test_candidate_window_anchors_the_signal_event() -> None:
+    events = parse(
+        [
+            assistant_tool_use("t2", "Bash", {"command": "ls"}),
+            interrupt_result("t2"),
+            user_text("no, run the tests instead please"),
+        ]
+    )
+    [candidate] = interrupt_rejections(events)
+    window = candidate.window
+    assert candidate.ref is not None
+    assert window.anchor == candidate.ref
+    assert (window.fidelity, window.origin) == ("full", "live")
+    assert window.trigger is not None
+    assert "ls" in window.trigger.preview
+    assert any("no, run the tests instead please" in ref.preview for ref in window.after)
 
 
 @pytest.mark.unit
@@ -86,7 +119,7 @@ def test_interrupt_marker_without_correction_drops_the_row() -> None:
             interrupt_result("t2"),
         ]
     )
-    assert list(interrupt_rejections(FILE, events)) == []
+    assert interrupt_rejections(events) == []
 
 
 @pytest.mark.unit
@@ -98,7 +131,7 @@ def test_permission_denial_pairs_the_following_correction() -> None:
             user_text("no, just clean the cache, don't delete build"),
         ]
     )
-    [candidate] = list(interrupt_rejections(FILE, events))
+    [candidate] = interrupt_rejections(events)
     assert candidate.text == "no, just clean the cache, don't delete build"
     assert candidate.payload == {"tool": "Bash", "file_path": None}
 
@@ -106,7 +139,7 @@ def test_permission_denial_pairs_the_following_correction() -> None:
 @pytest.mark.unit
 def test_reasonless_denial_without_correction_drops_the_row() -> None:
     events = parse([assistant_tool_use("t6", "Agent", {}), denial_result("t6")])
-    assert list(interrupt_rejections(FILE, events)) == []
+    assert interrupt_rejections(events) == []
 
 
 @pytest.mark.unit
@@ -117,7 +150,7 @@ def test_ask_user_question_denial_is_not_pushback() -> None:
             denial_result("t7", said="The user wants to clarify these questions."),
         ]
     )
-    assert list(interrupt_rejections(FILE, events)) == []
+    assert interrupt_rejections(events) == []
 
 
 @pytest.mark.unit
@@ -128,18 +161,18 @@ def test_interrupt_marker_ignores_marker_buried_in_tool_output() -> None:
             tool_result("t9", '1\tPATTERN = r"\\[Request interrupted by user"  # just source code\n2\tx = 1'),
         ]
     )
-    assert list(interrupt_rejections(FILE, events)) == []
+    assert interrupt_rejections(events) == []
 
 
 @pytest.mark.unit
 def test_permission_denial_captures_tool_and_path() -> None:
     events = parse(
         [
-            assistant_tool_use("t3", "Write", {"file_path": "/a/b.py"}),
+            assistant_tool_use("t3", "Write", {"file_path": "/a/b.py", "content": "x = 1"}),
             denial_result("t3", said="don't touch that file"),
         ]
     )
-    [candidate] = list(interrupt_rejections(FILE, events))
+    [candidate] = interrupt_rejections(events)
     assert candidate.text == "don't touch that file"
     assert candidate.payload == {"tool": "Write", "file_path": "/a/b.py"}
 
@@ -152,7 +185,7 @@ def test_exit_plan_denial_is_not_an_interrupt_rejection() -> None:
             denial_result("t1", said="actually do Y instead"),
         ]
     )
-    assert list(interrupt_rejections(FILE, events)) == []
+    assert interrupt_rejections(events) == []
 
 
 @pytest.mark.unit
@@ -164,7 +197,7 @@ def test_transcript_message_keeps_substance_drops_ack() -> None:
             user_text("ok"),
         ]
     )
-    assert [c.text for c in transcript_messages(FILE, events)] == ["please refactor this to be functional"]
+    assert [c.text for c in transcript_messages(events)] == ["please refactor this to be functional"]
 
 
 @pytest.mark.unit
@@ -176,7 +209,7 @@ def test_transcript_message_drops_bare_interrupt_marker_keeps_marker_with_correc
             user_text("[Request interrupted by user] run the tests instead, not the build"),
         ]
     )
-    assert [c.text for c in transcript_messages(FILE, events)] == [
+    assert [c.text for c in transcript_messages(events)] == [
         "[Request interrupted by user] run the tests instead, not the build"
     ]
 
@@ -190,13 +223,13 @@ def test_transcript_message_requires_a_preceding_assistant_turn() -> None:
             user_text("no, use JWT, sessions are wrong here"),
         ]
     )
-    assert [c.text for c in transcript_messages(FILE, events)] == ["no, use JWT, sessions are wrong here"]
+    assert [c.text for c in transcript_messages(events)] == ["no, use JWT, sessions are wrong here"]
 
 
 @pytest.mark.unit
 def test_review_comment_explodes_one_row_per_inline_cite() -> None:
     body = "Two issues:\nIn src/foo.py:L10-12: this is wrong\nIn src/bar.py:L5: fix this too"
-    candidates = [c for c in detect(FILE, parse([user_text(body)])) if c.source_kind == "review_comment"]
+    candidates = [c for c in detect(parse([user_text(body)])) if c.source_kind == "review_comment"]
     assert [c.text for c in candidates] == ["this is wrong", "fix this too"]
     assert [c.payload["file"] for c in candidates if c.payload] == ["src/foo.py", "src/bar.py"]
     assert [c.payload["line_start"] for c in candidates if c.payload] == [10, 5]
@@ -206,7 +239,7 @@ def test_review_comment_explodes_one_row_per_inline_cite() -> None:
 def test_duplicate_review_entries_share_a_dedup_key() -> None:
     body = "In src/foo.py:L10: use a dataclass here"
     events = parse([user_text(body, uuid="uuid-A"), user_text(body, uuid="uuid-B")])
-    cands = [c for c in detect(FILE, events) if c.source_kind == "review_comment"]
+    cands = [c for c in detect(events) if c.source_kind == "review_comment"]
     assert len(cands) == 2
     assert cands[0].dedup_key == cands[1].dedup_key  # same comment, two entries -> one row on insert
 
@@ -222,7 +255,7 @@ def test_repeated_interrupt_markers_collapse_on_the_shared_correction() -> None:
             user_text("stop, do it the other way"),
         ]
     )
-    cands = list(interrupt_rejections(FILE, events))
+    cands = interrupt_rejections(events)
     assert len(cands) == 2
     assert len({c.dedup_key for c in cands}) == 1  # both markers pair the same correction
     assert all(c.text == "stop, do it the other way" for c in cands)
@@ -243,13 +276,14 @@ def test_pushback_spec_drops_structural_noise_and_acks() -> None:
 
 
 @pytest.mark.unit
-def test_dedup_keys_are_stable_and_path_independent() -> None:
-    events = parse(
-        [
+def test_dedup_keys_derive_from_content_not_entry_identity() -> None:
+    def entries() -> list[dict[str, object]]:
+        return [
             assistant_tool_use("t1", "ExitPlanMode", {"plan": "do x"}),
             denial_result("t1", said="do Y"),
         ]
-    )
-    [from_a] = list(plan_reviews(Path("/home/a/session.jsonl"), events))
-    [from_b] = list(plan_reviews(Path("/elsewhere/session.jsonl"), events))
-    assert from_a.dedup_key == from_b.dedup_key
+
+    [first] = plan_reviews(parse(entries()))
+    [second] = plan_reviews(parse(entries()))  # fresh entries: new uuids, same content
+    assert first.ref != second.ref
+    assert first.dedup_key == second.dedup_key

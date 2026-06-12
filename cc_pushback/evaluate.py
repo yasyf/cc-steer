@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cc_transcript.domains.mining import (
+from cc_transcript.judge import (
     AuditEstimate,
     Disagreement,
     FlipReport,

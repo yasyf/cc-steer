@@ -3,39 +3,40 @@
 The deterministic detectors are tuned for recall; this module supplies the precision.
 A judge classifies every stored candidate into a pushback or noise category, and an
 independently-prompted auditor (a stronger model, blind to the judge's verdicts)
-samples the results so the judge's error rate is measurable. Verdicts land in the
-``triage`` table; accepted rows surface through the ``training_pairs`` view.
+samples the results so the judge's error rate is measurable. Prompts render each
+candidate's :class:`~cc_transcript.context.ContextWindow` at full fidelity while the
+transcript lives — a generous budget on the trigger turn, a moderate budget on the
+surrounding turns — and fall back to the labeled summary previews once it expires;
+each verdict records the fidelity it was judged at. Verdicts land in the ``triage``
+table; accepted rows surface through the ``accepted_pushback`` view.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
-from cc_transcript.domains.mining import (
-    ContextSnapshot,
-    DedupKey,
-    render_turn,
-    render_turns,
-    resolved_model,
-    run_verdicts,
-    sample_audit,
-    structured_judge,
-)
+from cc_transcript.context import ContextWindow, HydratedWindow
+from cc_transcript.judge import resolved_model, run_verdicts, sample_audit, structured_judge
+from cc_transcript.mining import DedupKey
+from cc_transcript.render import Budget
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from cc_transcript.activity import Turn
+    from cc_transcript.context import Fidelity
     from spawnllm import TModel
 
     from cc_pushback.store import FeedbackStore
 
-PROMPT_VERSION = 3
-AUDIT_VERSION = 2
+PROMPT_VERSION = 4
+AUDIT_VERSION = 3
 JUDGE = "judge"
 AUDITOR = "auditor"
-TRIGGER_TEXT_LIMIT = 2000
+TRIGGER_BUDGET = Budget(turn_chars=2000, tool_chars=6000)
+CONTEXT_BUDGET = Budget()
 KIND_QUOTAS: dict[str, int | None] = {"interrupt_rejection": None, "review_comment": 10, "plan_review": 10}
 REMAINDER_KIND = "transcript_message"
 
@@ -96,7 +97,7 @@ work: "set the right headers" while assigning fresh config work is a plain direc
 "use the right template" after the assistant used the wrong one is a correction. And
 when the user corrects their own earlier instruction ("ah sorry, my bad — we treat it
 as native"), that is a spec clarification, not pushback on the assistant.
-The assistant action being corrected may predate the trigger shown: when the message
+The assistant action being corrected may predate the context shown: when the message
 critiques files or output the assistant produced earlier in the session, it is pushback
 on that work even if the immediately preceding action is unrelated.
 When the source is review_comment, the message is an inline code-review comment on code
@@ -111,14 +112,9 @@ confidence: your probability (0 to 1) that your pushback-vs-noise call is correc
 rationale: one short clause.
 
 [source: {source_kind}]
-=== conversation before ===
-{before}
-=== assistant action under review ===
-{trigger}
+{context}
 === USER MESSAGE TO CLASSIFY ===
-{text}
-=== conversation after ===
-{after}"""
+{text}"""
 
 AUDIT_PROMPT = """\
 A dataset is being built of developer corrections: moments where a human, reading what
@@ -153,14 +149,9 @@ preceding action; confidence — your probability (0 to 1) that your correction-
 call is right; rationale — one short clause.
 
 [source: {source_kind}]
-=== conversation before ===
-{before}
-=== assistant's preceding action ===
-{trigger}
+{context}
 === HUMAN MESSAGE TO ASSESS ===
-{text}
-=== conversation after ===
-{after}"""
+{text}"""
 
 
 class Verdict(BaseModel):
@@ -186,12 +177,12 @@ class Verdict(BaseModel):
 
     @property
     def accepted(self) -> bool:
-        """Alias satisfying the mining domain's ``VerdictLike`` protocol."""
+        """Alias satisfying the judge package's ``VerdictLike`` protocol."""
         return self.is_pushback
 
     @property
     def summary(self) -> str:
-        """Alias satisfying the mining domain's ``VerdictLike`` protocol."""
+        """Alias satisfying the judge package's ``VerdictLike`` protocol."""
         return self.what_claude_did
 
 
@@ -210,30 +201,75 @@ class TriageReport:
     pending: int
 
 
-def build_prompt(template: str, row: Mapping[str, object]) -> str:
-    ctx = ContextSnapshot.from_json(str(row["context_json"]))
-    return template.format(
-        source_kind=row["source_kind"],
-        before=render_turns(ctx.before),
-        trigger=render_turn(ctx.trigger, TRIGGER_TEXT_LIMIT) if ctx.trigger else "(unknown)",
-        text=row["text"],
-        after=render_turns(ctx.after),
+def section(window: ContextWindow, label: str, turns: tuple[Turn, ...], budget: Budget) -> str:
+    return f"=== {label} ===\n" + (HydratedWindow(window=window, turns=turns).render(budget=budget) or "(none)")
+
+
+async def render_context(window: ContextWindow) -> tuple[str, Fidelity]:
+    """Renders a candidate's window for a prompt, at the best fidelity available.
+
+    While the transcript lives, the window hydrates and renders at full fidelity —
+    the trigger turn under the generous :data:`TRIGGER_BUDGET`, the surrounding
+    turns under the moderate :data:`CONTEXT_BUDGET`. Once it expires (or any ref
+    was compacted away), the persisted previews render instead, led by the
+    built-in summary-fidelity label.
+
+    Returns:
+        The rendered context and the fidelity it was rendered at.
+    """
+    if (hydrated := await window.hydrate()) is None:
+        return replace(window, fidelity="summary").render_preview(budget=CONTEXT_BUDGET), "summary"
+    split = len(window.before)
+    end = split + (window.trigger is not None)
+    return (
+        "\n".join(
+            (
+                section(window, "conversation before", hydrated.turns[:split], CONTEXT_BUDGET),
+                section(window, "the turn the message arrived in", hydrated.turns[split:end], TRIGGER_BUDGET),
+                section(window, "conversation after", hydrated.turns[end:], CONTEXT_BUDGET),
+            )
+        ),
+        "full",
     )
 
 
+async def build_prompt(template: str, row: Mapping[str, object]) -> tuple[str, Fidelity]:
+    context, fidelity = await render_context(ContextWindow.from_json(str(row["context_json"])))
+    return template.format(source_kind=row["source_kind"], context=context, text=row["text"]), fidelity
+
+
+def prompt_builder(template: str, fidelities: dict[str, Fidelity]) -> Callable[[Mapping[str, object]], Awaitable[str]]:
+    async def build(row: Mapping[str, object]) -> str:
+        prompt, fidelity = await build_prompt(template, row)
+        fidelities[str(row["dedup_key"])] = fidelity
+        return prompt
+
+    return build
+
+
 def persist_verdict(
-    store: FeedbackStore, *, role: str, prompt_version: int, model: str
+    store: FeedbackStore, *, role: str, prompt_version: int, model: str, fidelities: Mapping[str, Fidelity]
 ) -> Callable[[Mapping[str, object], Verdict], Awaitable[None]]:
     async def persist(row: Mapping[str, object], verdict: Verdict) -> None:
         await store.record_verdict(
-            DedupKey(str(row["dedup_key"])), verdict, role=role, prompt_version=prompt_version, model=model
+            DedupKey(str(row["dedup_key"])),
+            verdict,
+            role=role,
+            prompt_version=prompt_version,
+            model=model,
+            fidelity=fidelities[str(row["dedup_key"])],
         )
 
     return persist
 
 
 async def triage(
-    store: FeedbackStore, *, tier: TModel = "medium", limit: int | None = None, concurrency: int = 8
+    store: FeedbackStore,
+    *,
+    tier: TModel = "medium",
+    limit: int | None = None,
+    concurrency: int = 8,
+    refresh_summary: bool = False,
 ) -> TriageReport:
     """Judges every stored candidate lacking a verdict at the current prompt version.
 
@@ -246,17 +282,23 @@ async def triage(
         tier: The judge's abstract model tier.
         limit: When set, judge at most this many rows this pass.
         concurrency: The maximum number of concurrent ``claude`` subshells.
+        refresh_summary: When True, also re-judge rows whose verdict was recorded
+            at summary fidelity; a full-fidelity verdict replaces the summary one
+            once the row's window hydrates again.
 
     Returns:
         The pass's judged/failed/pending counts.
     """
     model = resolved_model(tier)
-    rows = await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model=model, limit=limit)
+    rows = await store.unjudged(
+        role=JUDGE, prompt_version=PROMPT_VERSION, model=model, limit=limit, refresh_summary=refresh_summary
+    )
+    fidelities: dict[str, Fidelity] = {}
     judged, failed = await run_verdicts(
         rows,
-        lambda row: build_prompt(JUDGE_PROMPT, row),
+        prompt_builder(JUDGE_PROMPT, fidelities),
         structured_judge(Verdict, tier=tier),
-        persist_verdict(store, role=JUDGE, prompt_version=PROMPT_VERSION, model=model),
+        persist_verdict(store, role=JUDGE, prompt_version=PROMPT_VERSION, model=model, fidelities=fidelities),
         concurrency=concurrency,
     )
     pending = len(await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model=model))
@@ -300,11 +342,14 @@ async def audit(
     )
     audited = {str(row["dedup_key"]) for row in await store.judged(role=AUDITOR, prompt_version=AUDIT_VERSION)}
     fresh = [row for row in (*sample.core, *sample.oversample) if str(row["dedup_key"]) not in audited]
+    fidelities: dict[str, Fidelity] = {}
     judged, failed = await run_verdicts(
         fresh,
-        lambda row: build_prompt(AUDIT_PROMPT, row),
+        prompt_builder(AUDIT_PROMPT, fidelities),
         structured_judge(Verdict, tier=tier),
-        persist_verdict(store, role=AUDITOR, prompt_version=AUDIT_VERSION, model=resolved_model(tier)),
+        persist_verdict(
+            store, role=AUDITOR, prompt_version=AUDIT_VERSION, model=resolved_model(tier), fidelities=fidelities
+        ),
         concurrency=concurrency,
     )
     return TriageReport(judged=judged, failed=failed, pending=len(fresh) - judged)

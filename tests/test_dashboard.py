@@ -4,12 +4,14 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from cc_transcript.context import ContextWindow, TurnRef
 
-from cc_pushback.context import ContextSnapshot, ContextTurn
 from cc_pushback.dashboard import build_app
+from cc_pushback.enrich import CodeEvidence, EditSide
 from cc_pushback.evaluate import GoldenRow
 from cc_pushback.refine import RefinedPair, Refinement
 from cc_pushback.report import (
+    EvidenceRow,
     Lineage,
     RefinedPairRow,
     Sample,
@@ -49,17 +51,28 @@ def prow(index: int, verbatim: str) -> RefinedPairRow:
     )
 
 
+def preview_window(trigger: str | None) -> ContextWindow:
+    return ContextWindow(
+        anchor=None,
+        before=(),
+        trigger=None if trigger is None else TurnRef(role="assistant", refs=(), preview=trigger, tool_digests=()),
+        after=(),
+        fidelity="summary",
+        preview_chars=200,
+        origin="migrated",
+    )
+
+
 def lineage(
     verdicts: Sequence[VerdictRow], pairs: Sequence[RefinedPairRow] = (), *, text: str = "no, dont vendor it"
 ) -> Lineage:
-    trigger = ContextTurn(role="assistant", text="I vendored the lib", tool_calls=("Edit",))
     sample = Sample(
         id=1,
         source_kind="transcript_message",
         occurred_at="2026-01-01T00:00:00",
         text=text,
         payload={},
-        context=ContextSnapshot(before=(), trigger=trigger, after=()),
+        window=preview_window("I vendored the lib"),
         origin_path="/h-Code-proj/s.jsonl",
         session_id="s",
     )
@@ -76,13 +89,35 @@ def test_verdict_row_from_row_coerces_pushback_to_bool() -> None:
     assert verdict.is_pushback is True and verdict.prompt_version == 2
 
 
-def test_refined_pair_row_from_row() -> None:
-    row = {
+def pair_row(**overrides: object) -> dict[str, object]:
+    return {
         "pair_index": 1, "action": "a", "complaint_verbatim": "v", "complaint": "c",
         "prompt_version": 1, "model": "sonnet",
-    }
-    pair = RefinedPairRow.from_row(row)
+        "evidence_kind": None, "evidence_file_path": None, "incorrect_old": None, "incorrect_new": None,
+        "correct_old": None, "correct_new": None, "evidence_note": None, "evidence_source": None,
+    } | overrides
+
+
+def test_refined_pair_row_from_row() -> None:
+    pair = RefinedPairRow.from_row(pair_row())
     assert pair.pair_index == 1 and pair.complaint_verbatim == "v"
+    assert pair.evidence is None
+
+
+def test_refined_pair_row_decodes_code_evidence() -> None:
+    pair = RefinedPairRow.from_row(pair_row(
+        evidence_kind="code", evidence_file_path="/repo/a.py",
+        incorrect_old="bad", incorrect_new="worse", correct_old="worse", correct_new="good",
+        evidence_note="faults the edit", evidence_source="git",
+    ))
+    assert pair.evidence == EvidenceRow(
+        file_path="/repo/a.py", incorrect=("bad", "worse"), correct=("worse", "good"),
+        note="faults the edit", source="git",
+    )
+
+
+def test_evidence_row_is_none_for_no_code() -> None:
+    assert EvidenceRow.from_row(pair_row(evidence_kind="no_code", evidence_note="not about code")) is None
 
 
 @pytest.mark.parametrize(
@@ -159,12 +194,36 @@ def test_render_lineage_detail_has_five_stages_and_escapes() -> None:
     assert "<mark>dont vendor</mark>" in html  # complaint_verbatim highlighted in the original
     assert "not in golden set" in html
     assert "&lt;script&gt;alert(1)" in html and "<script>alert(1)" not in html
+    assert 'class="evidence"' not in html and 'class="pane"' not in html  # unenriched pair, no diff section
+
+
+def test_render_lineage_detail_renders_the_full_untruncated_diff() -> None:
+    long_call = "danger(" + "x" * 900 + ")"
+    pair = RefinedPairRow(
+        pair_index=0, action="vendored the dep", complaint_verbatim="dont vendor", complaint="c0",
+        prompt_version=1, model="sonnet",
+        evidence=EvidenceRow(
+            file_path="/repo/a.py",
+            incorrect=(f"if x < 1:\n    {long_call}", "safe()"),
+            correct=("safe()", "safer()"),
+            note="faults the danger call",
+            source="git",
+        ),
+    )
+    html = render_lineage_detail(lineage([vrow(JUDGE, 1, "wrong_approach", is_pushback=True)], [pair]), {})
+    assert '<div class="del">if x &lt; 1:</div>' in html  # escaped, split per line
+    assert "x" * 900 in html  # full content, no truncation
+    assert html.count('class="pane"') == 2  # incorrect and correct panes
+    assert '<div class="plabel">incorrect</div>' in html and '<div class="plabel">correct</div>' in html
+    assert '<div class="ins">safer()</div>' in html
+    assert '<span class="chip">/repo/a.py</span>' in html
+    assert '<span class="chip chip-git">git</span>' in html
 
 
 async def seed(store: FeedbackStore) -> None:
     conn = store.store.conn
-    trigger = '{"before":[],"trigger":{"role":"assistant","text":"I vendored it","tool_calls":["Edit"]},"after":[]}'
-    empty = '{"before":[],"trigger":null,"after":[]}'
+    trigger = preview_window("I vendored it").to_json()
+    empty = preview_window(None).to_json()
     rows = [
         ("k1", "no, dont vendor it; bake it in", trigger),
         ("k2", "run the tests not the build", empty),
@@ -172,10 +231,11 @@ async def seed(store: FeedbackStore) -> None:
     ]
     for i, (key, text, ctx) in enumerate(rows):
         await conn.execute(
-            "INSERT INTO feedback_events (dedup_key, source_kind, session_id, origin_path, origin_uuid, "
-            "occurred_at, text, payload_json, context_json, cc_version, ingested_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (key, "transcript_message", "s", "/h-Code-proj/s.jsonl", f"u{i}", f"2026-01-0{i + 1}T00:00:00",
-             text, "{}", ctx, "0.1", "2026-01-01T00:00:00"),
+            "INSERT INTO feedback_events (dedup_key, source_kind, session_id, event_uuid, "
+            "occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (key, "transcript_message", "s", f"u{i}", f"2026-01-0{i + 1}T00:00:00",
+             text, "{}", ctx, "0.1", "2026-01-01T00:00:00", "/h-Code-proj/s.jsonl"),
         )
 
     def verdict(category: str) -> Verdict:
@@ -183,12 +243,29 @@ async def seed(store: FeedbackStore) -> None:
             {"category": category, "what_claude_did": "did x", "confidence": 0.9, "rationale": "r"}
         )
 
-    await store.record_verdict("k1", verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
-    await store.record_verdict("k1", verdict("status_update"), role="auditor", prompt_version=1, model="opus")
-    await store.record_verdict("k2", verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet")
-    await store.record_verdict("k3", verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet")
+    await store.record_verdict(
+        "k1", verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
+    await store.record_verdict(
+        "k1", verdict("status_update"), role="auditor", prompt_version=1, model="opus", fidelity="full"
+    )
+    await store.record_verdict(
+        "k2", verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
+    await store.record_verdict(
+        "k3", verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
     pair = RefinedPair(action="vendored it", complaint_verbatim="dont vendor it", complaint="do not vendor")
     await store.record_refinement("k1", Refinement(pairs=[pair]), prompt_version=1, model="sonnet")
+
+
+async def enrich_k1(
+    store: FeedbackStore, evidence: CodeEvidence, *, pair_index: int = 0, source: str | None = "git"
+) -> None:
+    await store.record_evidence(
+        "k1", evidence, refine_version=1, refine_model="sonnet", pair_index=pair_index,
+        enrich_version=1, enrich_model="haiku", extractor_version=1, source=source,
+    )
 
 
 async def client(store: FeedbackStore) -> httpx.AsyncClient:
@@ -206,6 +283,76 @@ async def test_api_pairs_returns_atomic_rows(store: FeedbackStore) -> None:
     assert pair["dedup_key"] == "k1" and pair["category"] == "wrong_approach"
     assert pair["complaint"] == "do not vendor" and pair["project"] == "proj"
     assert pair["complaint_verbatim"] == "dont vendor it"
+    assert pair["evidence"] is None  # unenriched pair, card unchanged
+
+
+async def test_api_pairs_carries_code_evidence(store: FeedbackStore) -> None:
+    await seed(store)
+    await enrich_k1(
+        store,
+        CodeEvidence(
+            kind="code", file_path="/repo/a.py",
+            incorrect_edit=EditSide(old="x = eval(s)", new="y = eval(t)"),
+            correct_edit=EditSide(old="y = eval(t)", new="y = json.loads(t)"),
+            note="faults the eval",
+        ),
+    )
+    async with await client(store) as http:
+        pair = (await http.get("/api/pairs")).json()["pairs"][0]
+    assert pair["evidence"] == {
+        "file_path": "/repo/a.py",
+        "source": "git",
+        "incorrect": {"old": "x = eval(s)", "new": "y = eval(t)"},
+        "correct": {"old": "y = eval(t)", "new": "y = json.loads(t)"},
+    }
+
+
+async def test_api_pairs_clips_evidence_sides_for_the_list(store: FeedbackStore) -> None:
+    await seed(store)
+    await enrich_k1(
+        store,
+        CodeEvidence(
+            kind="code", file_path="/repo/a.py",
+            incorrect_edit=EditSide(old="a" * 400, new="b"),
+            correct_edit=None,
+            note="long edit",
+        ),
+        source=None,
+    )
+    async with await client(store) as http:
+        evidence = (await http.get("/api/pairs")).json()["pairs"][0]["evidence"]
+    assert evidence["incorrect"]["old"] == "a" * 280 + "…"
+    assert evidence["correct"] is None and evidence["source"] is None
+
+
+async def test_api_pairs_no_code_sentinel_keeps_evidence_none(store: FeedbackStore) -> None:
+    await seed(store)
+    await enrich_k1(store, CodeEvidence(kind="no_code", note="not about code"), pair_index=-1, source=None)
+    async with await client(store) as http:
+        pair = (await http.get("/api/pairs")).json()["pairs"][0]
+    assert pair["evidence"] is None
+    assert pair["complaint_verbatim"] == "dont vendor it"  # the card payload is otherwise unchanged
+
+
+async def test_api_lineage_shows_the_full_diff(store: FeedbackStore) -> None:
+    await seed(store)
+    long_new = "json.loads(" + "x" * 900 + ")"
+    await enrich_k1(
+        store,
+        CodeEvidence(
+            kind="code", file_path="/repo/a.py",
+            incorrect_edit=EditSide(old="bad < worse\nstill bad", new=long_new),
+            correct_edit=None,
+            note="grounds the complaint",
+        ),
+        source=None,
+    )
+    async with await client(store) as http:
+        html = (await http.get("/api/lineage/k1")).json()["detail_html"]
+    assert '<div class="del">bad &lt; worse</div><div class="del">still bad</div>' in html
+    assert "x" * 900 in html  # the full diff, untruncated
+    assert html.count('class="pane"') == 1  # no correction, incorrect pane only
+    assert "chip-git" not in html
 
 
 async def test_api_candidates_covers_every_status(store: FeedbackStore) -> None:
@@ -247,3 +394,5 @@ async def test_root_serves_shell(store: FeedbackStore) -> None:
     assert page.status_code == 200 and 'id="list"' in page.text and 'id="search"' in page.text
     for facet in ('id="cat-filter"', 'id="kind-filter"', 'id="project-filter"', "data-project"):
         assert facet in page.text
+    for token in ("evidenceHtml", "details.diff", "chip-git", ".pane .del", ".pane .ins"):
+        assert token in page.text
