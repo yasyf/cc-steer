@@ -13,8 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
-from cc_transcript.domains.mining import FEEDBACK_DDL, Stats, event_row
+from cc_transcript.domains.mining import FEEDBACK_DDL, Stats, VerdictStoreMixin, event_row
 from cc_transcript.domains.mining import FeedbackStore as BaseFeedbackStore
+from cc_transcript.domains.mining.verdicts import EVENT_COLUMNS
 from cc_transcript.store import FileStateStore
 
 if TYPE_CHECKING:
@@ -23,27 +24,10 @@ if TYPE_CHECKING:
     from cc_transcript.domains.mining import DedupKey
 
     from cc_pushback.refine import Refinement
-    from cc_pushback.triage import Verdict
 
 __all__ = ["FEEDBACK_DDL", "REFINE_DDL", "TRIAGE_DDL", "FeedbackStore", "Stats", "TriageStats", "event_row"]
 
-TRIAGE_DDL = """
-CREATE TABLE IF NOT EXISTS triage (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
-  role TEXT NOT NULL,
-  prompt_version INTEGER NOT NULL,
-  model TEXT NOT NULL,
-  category TEXT NOT NULL,
-  is_pushback INTEGER NOT NULL,
-  what_claude_did TEXT NOT NULL,
-  confidence REAL NOT NULL,
-  rationale TEXT NOT NULL,
-  judged_at TEXT NOT NULL,
-  UNIQUE(dedup_key, role, prompt_version, model)
-);
-CREATE INDEX IF NOT EXISTS idx_triage_dedup ON triage(dedup_key);
-DROP VIEW IF EXISTS training_pairs;
+TRIAGE_VIEWS_DDL = """DROP VIEW IF EXISTS training_pairs;
 DROP VIEW IF EXISTS accepted_pushback;
 CREATE VIEW accepted_pushback AS
 WITH latest AS (
@@ -113,23 +97,11 @@ LEFT JOIN accepted_pushback ap ON ap.dedup_key = r.dedup_key
 ORDER BY e.id, r.pair_index;
 """
 
-INSERT_VERDICT = """
-INSERT OR IGNORE INTO triage (
-  dedup_key, role, prompt_version, model, category, is_pushback,
-  what_claude_did, confidence, rationale, judged_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
-
 INSERT_REFINEMENT = """
 INSERT OR IGNORE INTO refinement (
   dedup_key, prompt_version, model, pair_index, action, complaint_verbatim, complaint, refined_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
-
-EVENT_COLUMNS = (
-    "e.id, e.dedup_key, e.source_kind, e.occurred_at, e.text, "
-    "e.payload_json, e.context_json, e.session_id, e.origin_path"
-)
 
 CANDIDATES_QUERY = f"""
 WITH latest_judge AS (
@@ -212,11 +184,12 @@ class TriageStats:
     by_category: Mapping[str, int]
 
 
-class FeedbackStore(BaseFeedbackStore):
+class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     """Persistent store for collected feedback over a :class:`FileStateStore`.
 
     Layers the ``feedback_events`` table onto cc-transcript's file-mtime ledger and
-    adds the ``triage`` verdict table, the ``refinement`` table, and the
+    adds the ``triage`` verdict table (the mining domain's verdict mechanism pinned
+    to cc-pushback's column names), the ``refinement`` table, and the
     ``accepted_pushback`` and ``refined_pairs`` views. Verdicts and refinements key
     on the content-derived dedup key, so they survive a database rebuild.
 
@@ -224,6 +197,10 @@ class FeedbackStore(BaseFeedbackStore):
         >>> async with await FeedbackStore.open(FeedbackStore.default_path()) as store:
         ...     await store.record_file_scan(str(path), mtime, candidates)
     """
+
+    VERDICT_TABLE = "triage"
+    ACCEPTED_COLUMN = "is_pushback"
+    SUMMARY_COLUMN = "what_claude_did"
 
     @staticmethod
     def default_path() -> Path:
@@ -234,61 +211,6 @@ class FeedbackStore(BaseFeedbackStore):
     async def open(cls, path: Path) -> Self:
         """Opens (creating if needed) the feedback database at ``path``."""
         return cls(await FileStateStore.open(path, extra_schema=FEEDBACK_DDL + TRIAGE_DDL + REFINE_DDL))
-
-    async def unjudged(
-        self, *, role: str, prompt_version: int, model: str, limit: int | None = None
-    ) -> list[dict[str, object]]:
-        """Returns events lacking a verdict for ``(role, prompt_version, model)``, oldest first.
-
-        Args:
-            role: The verdict role to check, ``judge`` or ``auditor``.
-            prompt_version: The prompt version the verdict must carry.
-            model: The resolved model name the verdict must carry.
-            limit: When set, the maximum number of rows to return.
-
-        Returns:
-            One dict per event with the columns needed to build its prompt.
-        """
-        query = (
-            f"SELECT {EVENT_COLUMNS} FROM feedback_events e "
-            "LEFT JOIN triage t ON t.dedup_key = e.dedup_key "
-            "AND t.role = ? AND t.prompt_version = ? AND t.model = ? "
-            "WHERE t.id IS NULL ORDER BY e.id"
-        )
-        params: tuple[object, ...] = (role, prompt_version, model)
-        if limit is not None:
-            query += " LIMIT ?"
-            params = (*params, limit)
-        cur = await self.store.conn.execute(query, params)
-        return [dict(row) async for row in cur]
-
-    async def record_verdict(
-        self, key: DedupKey, verdict: Verdict, *, role: str, prompt_version: int, model: str
-    ) -> None:
-        """Records one verdict, idempotently, keyed by ``(dedup_key, role, prompt_version, model)``.
-
-        Args:
-            key: The judged event's dedup key.
-            verdict: The structured verdict to persist.
-            role: Who produced it, ``judge`` or ``auditor``.
-            prompt_version: The prompt version that produced it.
-            model: The resolved model name that produced it.
-        """
-        await self.store.conn.execute(
-            INSERT_VERDICT,
-            (
-                key,
-                role,
-                prompt_version,
-                model,
-                verdict.category,
-                verdict.is_pushback,
-                verdict.what_claude_did,
-                verdict.confidence,
-                verdict.rationale,
-                datetime.now(UTC).isoformat(),
-            ),
-        )
 
     async def unrefined(self, *, prompt_version: int, model: str, limit: int | None = None) -> list[dict[str, object]]:
         """Returns accepted pushback events lacking a refinement at ``(prompt_version, model)``.
@@ -350,32 +272,6 @@ class FeedbackStore(BaseFeedbackStore):
                     for index, pair in enumerate(refinement.pairs)
                 ],
             )
-
-    async def judged(self, *, role: str, prompt_version: int) -> list[dict[str, object]]:
-        """Returns events joined with their ``(role, prompt_version)`` verdicts.
-
-        Args:
-            role: The verdict role to join, ``judge`` or ``auditor``.
-            prompt_version: The prompt version to join.
-
-        Returns:
-            One dict per verdict-bearing event: the event columns plus the
-            verdict's ``category``, ``is_pushback``, ``confidence``,
-            ``what_claude_did``, ``rationale``, and ``model``.
-        """
-        cur = await self.store.conn.execute(
-            f"SELECT {EVENT_COLUMNS}, t.category, t.is_pushback, t.confidence, "
-            "t.what_claude_did, t.rationale, t.model "
-            "FROM feedback_events e JOIN triage t ON t.dedup_key = e.dedup_key "
-            "WHERE t.role = ? AND t.prompt_version = ? ORDER BY e.id",
-            (role, prompt_version),
-        )
-        return [dict(row) async for row in cur]
-
-    async def dedup_keys(self) -> set[str]:
-        """Returns every stored event's dedup key."""
-        cur = await self.store.conn.execute("SELECT dedup_key FROM feedback_events")
-        return {str(row["dedup_key"]) async for row in cur}
 
     async def pairs(self) -> list[dict[str, object]]:
         """Returns every row of the ``refined_pairs`` view, the pipeline's deliverable."""
@@ -443,3 +339,6 @@ class FeedbackStore(BaseFeedbackStore):
             accepted=sum(accepted for _, accepted in by_category.values()),
             by_category={category: n for category, (n, _) in by_category.items()},
         )
+
+
+TRIAGE_DDL = FeedbackStore.verdicts_ddl() + TRIAGE_VIEWS_DDL

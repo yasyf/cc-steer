@@ -9,23 +9,24 @@ samples the results so the judge's error rate is measurable. Verdicts land in th
 
 from __future__ import annotations
 
-import json
-import subprocess
 from dataclasses import dataclass
-from itertools import zip_longest
-from random import Random
 from typing import TYPE_CHECKING, Literal
 
-import anyio
-from cc_transcript.domains.mining import ContextSnapshot, DedupKey
-from pydantic import BaseModel, Field, ValidationError
-
-from cc_pushback.claude import resolved_model, run_claude_structured
+from cc_transcript.domains.mining import (
+    ContextSnapshot,
+    DedupKey,
+    render_turn,
+    render_turns,
+    resolved_model,
+    run_verdicts,
+    sample_audit,
+    structured_judge,
+)
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping
 
-    from cc_transcript.domains.mining import ContextTurn
     from spawnllm import TModel
 
     from cc_pushback.store import FeedbackStore
@@ -34,9 +35,7 @@ PROMPT_VERSION = 3
 AUDIT_VERSION = 2
 JUDGE = "judge"
 AUDITOR = "auditor"
-TURN_TEXT_LIMIT = 700
 TRIGGER_TEXT_LIMIT = 2000
-OVERSAMPLE_SHARE = 0.3
 KIND_QUOTAS: dict[str, int | None] = {"interrupt_rejection": None, "review_comment": 10, "plan_review": 10}
 REMAINDER_KIND = "transcript_message"
 
@@ -185,6 +184,16 @@ class Verdict(BaseModel):
         """Whether the category marks genuine pushback."""
         return self.category in PUSHBACK_CATEGORIES
 
+    @property
+    def accepted(self) -> bool:
+        """Alias satisfying the mining domain's ``VerdictLike`` protocol."""
+        return self.is_pushback
+
+    @property
+    def summary(self) -> str:
+        """Alias satisfying the mining domain's ``VerdictLike`` protocol."""
+        return self.what_claude_did
+
 
 @dataclass(frozen=True, slots=True)
 class TriageReport:
@@ -201,35 +210,6 @@ class TriageReport:
     pending: int
 
 
-@dataclass(frozen=True, slots=True)
-class AuditSample:
-    """The seeded audit draw over one prompt version's judged rows.
-
-    Attributes:
-        core: Uniform draws — the only rows entering headline precision metrics.
-        oversample: Lowest-judge-confidence draws — diagnosis fuel only.
-    """
-
-    core: tuple[Mapping[str, object], ...]
-    oversample: tuple[Mapping[str, object], ...]
-
-
-def clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit].rstrip() + "…"
-
-
-def render_turn(turn: ContextTurn, limit: int = TURN_TEXT_LIMIT) -> str:
-    tools = "".join(
-        f"\n  {name}({clip(input, limit)})" if input else f"\n  {name}()"
-        for name, input in zip_longest(turn.tool_calls, turn.tool_inputs, fillvalue="")
-    )
-    return f"{turn.role}: {clip(turn.text, limit)}{tools}"
-
-
-def render_turns(turns: Sequence[ContextTurn]) -> str:
-    return "\n".join(render_turn(turn) for turn in turns) or "(none)"
-
-
 def build_prompt(template: str, row: Mapping[str, object]) -> str:
     ctx = ContextSnapshot.from_json(str(row["context_json"]))
     return template.format(
@@ -241,98 +221,15 @@ def build_prompt(template: str, row: Mapping[str, object]) -> str:
     )
 
 
-def stratified(
-    rows: Sequence[Mapping[str, object]], n: int, rng: Random
-) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
-    by_kind: dict[str, list[Mapping[str, object]]] = {}
-    for row in sorted(rows, key=lambda r: str(r["dedup_key"])):
-        by_kind.setdefault(str(row["source_kind"]), []).append(row)
-    core: list[Mapping[str, object]] = []
-    oversample: list[Mapping[str, object]] = []
-    spent = 0
-    for kind, quota in KIND_QUOTAS.items():
-        group = by_kind.get(kind, [])
-        take = len(group) if quota is None else min(quota, len(group))
-        kind_core, kind_over = draw(group, take, rng)
-        core.extend(kind_core)
-        oversample.extend(kind_over)
-        spent += take
-    remainder = by_kind.get(REMAINDER_KIND, [])
-    rest_core, rest_over = draw(remainder, min(max(n - spent, 0), len(remainder)), rng)
-    return core + rest_core, oversample + rest_over
-
-
-def draw(
-    group: Sequence[Mapping[str, object]], k: int, rng: Random
-) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
-    if k >= len(group):
-        return list(group), []
-    n_over = round(k * OVERSAMPLE_SHARE)
-    over = sorted(group, key=lambda r: (float(str(r["confidence"])), str(r["dedup_key"])))[:n_over]
-    over_keys = {str(r["dedup_key"]) for r in over}
-    pool = [r for r in group if str(r["dedup_key"]) not in over_keys]
-    return rng.sample(pool, k - n_over), over
-
-
-def sample_audit(judged_rows: Sequence[Mapping[str, object]], *, accepts: int, rejects: int, seed: int) -> AuditSample:
-    """Draws the deterministic stratified audit sample over one version's judged rows.
-
-    The draw is seeded and pure, so the evaluator can reproduce the exact core set
-    by calling it with the same inputs. Per side (accepted/rejected): every kind in
-    :data:`KIND_QUOTAS` gets its quota (``None`` means exhaustive), the remainder
-    budget goes to transcript messages, and within each subsampled kind 30% of the
-    draw oversamples the judge's lowest-confidence verdicts.
-
-    Args:
-        judged_rows: Events joined with their judge verdicts for one prompt version.
-        accepts: The audit budget for judge-accepted rows.
-        rejects: The audit budget for judge-rejected rows.
-        seed: The iteration's deterministic sampling seed.
-
-    Returns:
-        The sampled rows, split into the uniform core and the oversample.
-    """
-    rng = Random(seed)
-    accepted = [row for row in judged_rows if row["is_pushback"]]
-    rejected = [row for row in judged_rows if not row["is_pushback"]]
-    accept_core, accept_over = stratified(accepted, accepts, rng)
-    reject_core, reject_over = stratified(rejected, rejects, rng)
-    return AuditSample(core=(*accept_core, *reject_core), oversample=(*accept_over, *reject_over))
-
-
-async def run_verdicts(
-    store: FeedbackStore,
-    rows: Sequence[Mapping[str, object]],
-    prompt_for: Callable[[Mapping[str, object]], str],
-    *,
-    role: str,
-    prompt_version: int,
-    tier: TModel,
-    concurrency: int,
-) -> tuple[int, int]:
-    counts = {"judged": 0, "failed": 0}
-    limiter = anyio.CapacityLimiter(concurrency)
-
-    async def worker(row: Mapping[str, object]) -> None:
-        async with limiter:
-            try:
-                verdict = await run_claude_structured(prompt_for(row), response_model=Verdict, tier=tier)
-            except (subprocess.SubprocessError, ValidationError, json.JSONDecodeError):
-                counts["failed"] += 1
-                return
+def persist_verdict(
+    store: FeedbackStore, *, role: str, prompt_version: int, model: str
+) -> Callable[[Mapping[str, object], Verdict], Awaitable[None]]:
+    async def persist(row: Mapping[str, object], verdict: Verdict) -> None:
         await store.record_verdict(
-            DedupKey(str(row["dedup_key"])),
-            verdict,
-            role=role,
-            prompt_version=prompt_version,
-            model=resolved_model(tier),
+            DedupKey(str(row["dedup_key"])), verdict, role=role, prompt_version=prompt_version, model=model
         )
-        counts["judged"] += 1
 
-    async with anyio.create_task_group() as tg:
-        for row in rows:
-            tg.start_soon(worker, row)
-    return counts["judged"], counts["failed"]
+    return persist
 
 
 async def triage(
@@ -356,12 +253,10 @@ async def triage(
     model = resolved_model(tier)
     rows = await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model=model, limit=limit)
     judged, failed = await run_verdicts(
-        store,
         rows,
         lambda row: build_prompt(JUDGE_PROMPT, row),
-        role=JUDGE,
-        prompt_version=PROMPT_VERSION,
-        tier=tier,
+        structured_judge(Verdict, tier=tier),
+        persist_verdict(store, role=JUDGE, prompt_version=PROMPT_VERSION, model=model),
         concurrency=concurrency,
     )
     pending = len(await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model=model))
@@ -396,17 +291,20 @@ async def audit(
         The pass's judged/failed/pending counts over the sampled rows.
     """
     sample = sample_audit(
-        await store.judged(role=JUDGE, prompt_version=PROMPT_VERSION), accepts=accepts, rejects=rejects, seed=seed
+        await store.judged(role=JUDGE, prompt_version=PROMPT_VERSION),
+        accepts=accepts,
+        rejects=rejects,
+        seed=seed,
+        quotas=KIND_QUOTAS,
+        remainder_kind=REMAINDER_KIND,
     )
     audited = {str(row["dedup_key"]) for row in await store.judged(role=AUDITOR, prompt_version=AUDIT_VERSION)}
     fresh = [row for row in (*sample.core, *sample.oversample) if str(row["dedup_key"]) not in audited]
     judged, failed = await run_verdicts(
-        store,
         fresh,
         lambda row: build_prompt(AUDIT_PROMPT, row),
-        role=AUDITOR,
-        prompt_version=AUDIT_VERSION,
-        tier=tier,
+        structured_judge(Verdict, tier=tier),
+        persist_verdict(store, role=AUDITOR, prompt_version=AUDIT_VERSION, model=resolved_model(tier)),
         concurrency=concurrency,
     )
     return TriageReport(judged=judged, failed=failed, pending=len(fresh) - judged)

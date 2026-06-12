@@ -37,7 +37,7 @@ def test_exact_upper_bound_matches_rule_of_three() -> None:
 @pytest.mark.unit
 def test_estimate_counts_only_audited_rows() -> None:
     rows = [{"dedup_key": "a"}, {"dedup_key": "b"}, {"dedup_key": "c"}]
-    audits = {"a": {"is_pushback": 1}, "b": {"is_pushback": 0}}
+    audits = {"a": {"accepted": 1}, "b": {"accepted": 0}}
     assert estimate(rows, audits) == AuditEstimate(audited=2, hits=1)
     assert AuditEstimate(audited=0, hits=0).rate is None
 
@@ -45,13 +45,13 @@ def test_estimate_counts_only_audited_rows() -> None:
 @pytest.mark.unit
 def test_golden_result_passes_fails_and_flags_unjudged() -> None:
     golden = (
-        GoldenRow(dedup_key="k1", source_kind="transcript_message", text="t1", expected="pushback", note=""),
-        GoldenRow(dedup_key="k2", source_kind="transcript_message", text="t2", expected="noise", note=""),
-        GoldenRow(dedup_key="k3", source_kind="transcript_message", text="t3", expected="pushback", note=""),
+        GoldenRow(dedup_key="k1", source_kind="transcript_message", text="t1", expected=True, note=""),
+        GoldenRow(dedup_key="k2", source_kind="transcript_message", text="t2", expected=False, note=""),
+        GoldenRow(dedup_key="k3", source_kind="transcript_message", text="t3", expected=True, note=""),
     )
     judge = {
-        "k1": {"is_pushback": 1, "category": "wrong_approach", "rationale": "clear rejection"},
-        "k2": {"is_pushback": 1, "category": "premature", "rationale": "stopped early"},
+        "k1": {"accepted": 1, "category": "wrong_approach", "rationale": "clear rejection"},
+        "k2": {"accepted": 1, "category": "premature", "rationale": "stopped early"},
     }
     result = golden_result(golden, {"k1", "k2", "k3"}, judge, "sha")
     assert (result.total, result.passed) == (3, 1)
@@ -61,19 +61,23 @@ def test_golden_result_passes_fails_and_flags_unjudged() -> None:
 
 @pytest.mark.unit
 def test_golden_result_hard_fails_on_corpus_drift() -> None:
-    golden = (GoldenRow(dedup_key="gone", source_kind="transcript_message", text="t", expected="noise", note=""),)
+    golden = (GoldenRow(dedup_key="gone", source_kind="transcript_message", text="t", expected=False, note=""),)
     with pytest.raises(LookupError, match="gone"):
         golden_result(golden, {"other"}, {}, "sha")
 
 
 @pytest.mark.unit
-def test_load_golden_round_trips(tmp_path: Path) -> None:
+def test_load_golden_maps_labels_to_bool(tmp_path: Path) -> None:
     path = tmp_path / "golden.json"
     rows = [
         {"dedup_key": "k", "source_kind": "plan_review", "text": "no", "expected": "pushback", "note": "terse"},
+        {"dedup_key": "k2", "source_kind": "plan_review", "text": "ok", "expected": "noise", "note": "approval"},
     ]
     path.write_text(json.dumps(rows))
-    assert load_golden(path) == (GoldenRow(**rows[0]),)  # type: ignore[arg-type]
+    assert load_golden(path) == (
+        GoldenRow(dedup_key="k", source_kind="plan_review", text="no", expected=True, note="terse"),
+        GoldenRow(dedup_key="k2", source_kind="plan_review", text="ok", expected=False, note="approval"),
+    )
 
 
 @pytest.mark.integration

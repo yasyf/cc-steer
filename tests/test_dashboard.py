@@ -131,7 +131,7 @@ def test_lineage_agreement(auditor_pushback: bool | None, agreement: str | None)
 
 
 def test_golden_status() -> None:
-    gold = GoldenRow(dedup_key="k1", source_kind="transcript_message", text="t", expected="pushback", note="n")
+    gold = GoldenRow(dedup_key="k1", source_kind="transcript_message", text="t", expected=True, note="n")
     golden_map = {"k1": gold}
     pushback = vrow(JUDGE, 1, "wrong_approach", is_pushback=True)
     noise = vrow(JUDGE, 1, "status_update", is_pushback=False)

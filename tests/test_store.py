@@ -8,6 +8,7 @@ from cc_transcript.domains.mining import DedupKey
 
 from cc_pushback.detectors import detect
 from cc_pushback.refine import RefinedPair, Refinement
+from cc_pushback.store import TRIAGE_DDL
 from cc_pushback.triage import JUDGE, Verdict
 from tests.builders import assistant_tool_use, denial_result, interrupt_result, parse, user_text
 
@@ -18,6 +19,55 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.anyio
 
 FILE = "/repo/projects/session.jsonl"
+
+# The pre-refactor TRIAGE_DDL literal, frozen verbatim. TRIAGE_DDL is now composed
+# from the mining domain's verdicts_ddl() (pinned to cc-pushback's column names)
+# plus TRIAGE_VIEWS_DDL; this byte-for-byte equality is the proof the composition
+# reproduces the original schema exactly.
+ORIGINAL_TRIAGE_DDL = """
+CREATE TABLE IF NOT EXISTS triage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
+  role TEXT NOT NULL,
+  prompt_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  category TEXT NOT NULL,
+  is_pushback INTEGER NOT NULL,
+  what_claude_did TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  rationale TEXT NOT NULL,
+  judged_at TEXT NOT NULL,
+  UNIQUE(dedup_key, role, prompt_version, model)
+);
+CREATE INDEX IF NOT EXISTS idx_triage_dedup ON triage(dedup_key);
+DROP VIEW IF EXISTS training_pairs;
+DROP VIEW IF EXISTS accepted_pushback;
+CREATE VIEW accepted_pushback AS
+WITH latest AS (
+  SELECT t.*, ROW_NUMBER() OVER (
+    PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
+  ) AS rn
+  FROM triage t
+  WHERE t.role = 'judge'
+)
+SELECT
+  e.id AS event_id,
+  e.dedup_key,
+  e.source_kind,
+  e.text,
+  e.context_json,
+  t.category,
+  t.what_claude_did,
+  e.origin_path
+FROM feedback_events e
+JOIN latest t ON t.dedup_key = e.dedup_key AND t.rn = 1
+WHERE t.is_pushback = 1;
+"""
+
+
+@pytest.mark.unit
+def test_composed_triage_ddl_matches_original_literal() -> None:
+    assert TRIAGE_DDL == ORIGINAL_TRIAGE_DDL
 
 
 async def seeded_keys(store: FeedbackStore) -> list[DedupKey]:

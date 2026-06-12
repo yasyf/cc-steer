@@ -212,9 +212,7 @@ def serialize_candidate(row: Mapping[str, object], golden_map: Mapping[str, Gold
         "agreement": ("agree" if bool(row["auditor_is_pushback"]) == bool(row["is_pushback"]) else "disagree")
         if audited
         else None,
-        "golden": ("pass" if report.golden_label(row["is_pushback"]) == golden_map[key].expected else "fail")
-        if in_golden
-        else None,
+        "golden": ("pass" if bool(row["is_pushback"]) == golden_map[key].expected else "fail") if in_golden else None,
         "text": report.truncate(str(row["text"]), LIST_TEXT_LIMIT),
     }
 

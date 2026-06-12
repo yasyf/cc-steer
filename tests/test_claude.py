@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import json
 import subprocess
 from typing import Any
 
 import anyio
 import pytest
-from pydantic import BaseModel
 
-from cc_pushback.claude import claude_available, run_claude, run_claude_structured
-
-
-class Pick(BaseModel):
-    choice: str
-    score: float
+from cc_pushback.claude import claude_available, run_claude
 
 
 def completed(stdout: bytes) -> subprocess.CompletedProcess[bytes]:
@@ -55,43 +48,7 @@ async def test_run_claude_raises_on_is_error(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.anyio
-async def test_run_claude_structured_builds_argv_and_parses_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        captured["argv"] = command
-        captured["input"] = kwargs["input"]
-        envelope = [{"type": "result", "structured_output": {"choice": "a", "score": 0.9}}]
-        return completed(json.dumps(envelope).encode())
-
-    monkeypatch.setattr(anyio, "run_process", fake_run)
-    pick = await run_claude_structured("JUDGE THIS", response_model=Pick)
-    assert pick == Pick(choice="a", score=0.9)
-    argv = captured["argv"]
-    assert captured["input"] == b"JUDGE THIS"
-    assert argv[argv.index("--model") + 1] == "sonnet"
-    assert argv[argv.index("--output-format") + 1] == "json"
-    schema = json.loads(argv[argv.index("--json-schema") + 1])
-    assert set(schema["properties"]) == {"choice", "score"}
-    assert schema["additionalProperties"] is False
-
-
-@pytest.mark.anyio
-async def test_run_claude_structured_resolves_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        captured["argv"] = command
-        return completed(b'{"choice": "b", "score": 0.1}')
-
-    monkeypatch.setattr(anyio, "run_process", fake_run)
-    pick = await run_claude_structured("p", response_model=Pick, tier="large")
-    assert pick == Pick(choice="b", score=0.1)
-    assert captured["argv"][captured["argv"].index("--model") + 1] == "opus"
-
-
-@pytest.mark.anyio
-async def test_run_claude_structured_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_claude_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cc_pushback.claude.CLAUDE_TIMEOUT", 0.01)
 
     async def fake_run(*_: Any, **__: Any) -> subprocess.CompletedProcess[bytes]:
@@ -100,4 +57,4 @@ async def test_run_claude_structured_times_out(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(anyio, "run_process", fake_run)
     with pytest.raises(subprocess.TimeoutExpired):
-        await run_claude_structured("p", response_model=Pick)
+        await run_claude("p", system="s", model="m")

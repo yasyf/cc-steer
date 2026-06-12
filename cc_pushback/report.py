@@ -443,7 +443,7 @@ def golden_status(
     """Returns whether the latest judge matches the frozen golden label, or ``None`` off-fixture."""
     if (gold := golden_map.get(dedup_key)) is None or final is None:
         return None
-    return "pass" if golden_label(final.is_pushback) == gold.expected else "fail"
+    return "pass" if final.is_pushback == gold.expected else "fail"
 
 
 def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Mapping[str, GoldenRow]) -> PipelineStats:
@@ -469,7 +469,7 @@ def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Ma
         disagree=len(audited) - agree,
         flips=sum(bool(row["flipped"]) for row in candidates),
         golden_total=len(golden),
-        golden_pass=sum(golden_label(row["is_pushback"]) == gold.expected for row, gold in golden),
+        golden_pass=sum(bool(row["is_pushback"]) == gold.expected for row, gold in golden),
     )
 
 
@@ -640,7 +640,7 @@ def render_lineage_detail(lineage: Lineage, golden_map: Mapping[str, GoldenRow])
         case None:
             golden_html = '<p class="muted">not in golden set</p>'
         case verdict:
-            expected = golden_map[lineage.dedup_key].expected
+            expected = golden_label(golden_map[lineage.dedup_key].expected)
             golden_html = f'<span class="badge {verdict}">golden {verdict} · expected {escape(expected)}</span>'
     return "".join(
         [

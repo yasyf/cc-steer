@@ -9,17 +9,21 @@ the complaint, and distills the objection into one sentence. Pairs land in the
 
 from __future__ import annotations
 
-import json
-import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import anyio
-from cc_transcript.domains.mining import ContextSnapshot, DedupKey
-from pydantic import BaseModel, Field, ValidationError
+from cc_transcript.domains.mining import (
+    ContextSnapshot,
+    DedupKey,
+    render_turn,
+    render_turns,
+    resolved_model,
+    run_verdicts,
+    structured_judge,
+)
+from pydantic import BaseModel, Field
 
-from cc_pushback.claude import resolved_model, run_claude_structured
-from cc_pushback.triage import TRIGGER_TEXT_LIMIT, render_turn, render_turns
+from cc_pushback.triage import TRIGGER_TEXT_LIMIT
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -126,26 +130,19 @@ async def run_refinements(
     tier: TModel,
     concurrency: int,
 ) -> tuple[int, int, int]:
-    counts = {"refined": 0, "pairs": 0, "failed": 0}
-    limiter = anyio.CapacityLimiter(concurrency)
+    pairs = 0
 
-    async def worker(row: Mapping[str, object]) -> None:
-        async with limiter:
-            try:
-                refinement = await run_claude_structured(build_refine_prompt(row), response_model=Refinement, tier=tier)
-            except (subprocess.SubprocessError, ValidationError, json.JSONDecodeError):
-                counts["failed"] += 1
-                return
+    async def persist(row: Mapping[str, object], refinement: Refinement) -> None:
+        nonlocal pairs
         await store.record_refinement(
             DedupKey(str(row["dedup_key"])), refinement, prompt_version=prompt_version, model=resolved_model(tier)
         )
-        counts["refined"] += 1
-        counts["pairs"] += len(refinement.pairs)
+        pairs += len(refinement.pairs)
 
-    async with anyio.create_task_group() as tg:
-        for row in rows:
-            tg.start_soon(worker, row)
-    return counts["refined"], counts["pairs"], counts["failed"]
+    refined, failed = await run_verdicts(
+        rows, build_refine_prompt, structured_judge(Refinement, tier=tier), persist, concurrency=concurrency
+    )
+    return refined, pairs, failed
 
 
 async def refine(

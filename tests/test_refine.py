@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
-from cc_transcript.domains.mining import ContextSnapshot, ContextTurn
+from cc_transcript.domains.mining import ContextSnapshot, ContextTurn, resolved_model
 from pydantic import ValidationError
 
-from cc_pushback.claude import resolved_model
 from cc_pushback.detectors import detect
 from cc_pushback.refine import PROMPT_VERSION, RefinedPair, Refinement, build_refine_prompt, refine
 from cc_pushback.triage import Verdict, triage
@@ -47,10 +46,10 @@ async def seed_accepted(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -
     )
     assert await store.record_file_scan(FILE, 1.0, detect(Path(FILE), events)) >= 2
 
-    async def fake_judge(prompt: str, **_: Any) -> Verdict:
+    async def fake_judge(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_pushback.triage.run_claude_structured", fake_judge)
+    monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: fake_judge)
     await triage(store)
     return len(await store.unrefined(prompt_version=PROMPT_VERSION, model=MODEL))
 
@@ -89,11 +88,11 @@ async def test_refine_refines_all_accepted_then_noop(store: FeedbackStore, monke
     assert accepted >= 2
     calls: list[str] = []
 
-    async def fake(prompt: str, **_: Any) -> Refinement:
+    async def fake(prompt: str) -> Refinement:
         calls.append(prompt)
         return refinement()
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", fake)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: fake)
     report = await refine(store)
     assert (report.refined, report.pairs, report.failed, report.pending) == (accepted, accepted, 0, 0)
     assert len(calls) == accepted
@@ -114,7 +113,7 @@ async def test_refine_only_touches_accepted_pushback(store: FeedbackStore, monke
     )
     await store.record_file_scan(FILE, 1.0, detect(Path(FILE), events))
 
-    async def picky_judge(prompt: str, **_: Any) -> Verdict:
+    async def picky_judge(prompt: str) -> Verdict:
         noise = "USER MESSAGE TO CLASSIFY ===\nalso stop hardcoding" in prompt
         return Verdict(
             category="status_update" if noise else "wrong_approach",
@@ -123,13 +122,13 @@ async def test_refine_only_touches_accepted_pushback(store: FeedbackStore, monke
             rationale="r",
         )
 
-    monkeypatch.setattr("cc_pushback.triage.run_claude_structured", picky_judge)
+    monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: picky_judge)
     await triage(store)
 
-    async def fake(prompt: str, **_: Any) -> Refinement:
+    async def fake(prompt: str) -> Refinement:
         return refinement()
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", fake)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: fake)
     report = await refine(store)
     assert report.refined == 1
     rows = await store.pairs()
@@ -143,12 +142,12 @@ async def test_multi_complaint_message_splits_into_atomic_pairs(
 ) -> None:
     await seed_accepted(store, monkeypatch)
 
-    async def splitter(prompt: str, **_: Any) -> Refinement:
+    async def splitter(prompt: str) -> Refinement:
         if "USER PUSHBACK TO REFINE ===\nno, use a generator" in prompt:
             return refinement("use a generator here", "this is wrong")
         return refinement()
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", splitter)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: splitter)
     report = await refine(store)
     assert report.pairs == report.refined + 1  # one event yields two pairs
 
@@ -164,16 +163,16 @@ async def test_refine_version_bump_re_refines_and_deliverable_shows_new(
 ) -> None:
     await seed_accepted(store, monkeypatch)
 
-    async def first(prompt: str, **_: Any) -> Refinement:
+    async def first(prompt: str) -> Refinement:
         return refinement("old complaint")
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", first)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: first)
     await refine(store)
 
-    async def second(prompt: str, **_: Any) -> Refinement:
+    async def second(prompt: str) -> Refinement:
         return refinement("new complaint")
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", second)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: second)
     monkeypatch.setattr("cc_pushback.refine.PROMPT_VERSION", PROMPT_VERSION + 1)
     report = await refine(store)
     assert report.refined >= 1
@@ -187,19 +186,19 @@ async def test_one_failing_event_does_not_abort_then_heals(
     accepted = await seed_accepted(store, monkeypatch)
     poison = "USER PUSHBACK TO REFINE ===\nalso stop hardcoding"
 
-    async def flaky(prompt: str, **_: Any) -> Refinement:
+    async def flaky(prompt: str) -> Refinement:
         if poison in prompt:
             raise subprocess.CalledProcessError(1, ["claude"])
         return refinement()
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", flaky)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: flaky)
     report = await refine(store)
     assert (report.refined, report.failed, report.pending) == (accepted - 1, 1, 1)
 
-    async def healed(prompt: str, **_: Any) -> Refinement:
+    async def healed(prompt: str) -> Refinement:
         return refinement()
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", healed)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: healed)
     retry = await refine(store)
     assert (retry.refined, retry.failed, retry.pending) == (1, 0, 0)
 
@@ -212,10 +211,10 @@ async def test_refine_leaves_triage_untouched(store: FeedbackStore, monkeypatch:
     await seed_accepted(store, monkeypatch)
     before = await store.judged(role=JUDGE, prompt_version=JUDGE_VERSION)
 
-    async def fake(prompt: str, **_: Any) -> Refinement:
+    async def fake(prompt: str) -> Refinement:
         return refinement()
 
-    monkeypatch.setattr("cc_pushback.refine.run_claude_structured", fake)
+    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: fake)
     await refine(store)
     after = await store.judged(role=JUDGE, prompt_version=JUDGE_VERSION)
     assert {str(row["dedup_key"]) for row in after} == {str(row["dedup_key"]) for row in before}

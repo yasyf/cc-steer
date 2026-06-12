@@ -17,7 +17,7 @@ from cc_pushback.claude import claude_available
 from cc_pushback.dashboard import build_app
 from cc_pushback.evaluate import evaluate, flip_report
 from cc_pushback.models import PUSHBACK_SOURCE_KINDS, SourceKind
-from cc_pushback.report import Sample, build_summary, project_label
+from cc_pushback.report import Sample, build_summary, golden_label, project_label
 from cc_pushback.scan import scan as run_scan
 from cc_pushback.serve import serve
 from cc_pushback.store import FeedbackStore
@@ -145,7 +145,8 @@ async def triage(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     completes, failed rows stay pending and are retried on the next run, and
     re-running over a fully judged corpus is a no-op.
     """
-    from cc_pushback.claude import resolved_model
+    from cc_transcript.domains.mining import resolved_model
+
     from cc_pushback.triage import JUDGE
 
     if not claude_available():
@@ -214,6 +215,13 @@ async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, a
         flips = await flip_report(store, from_version=compare_to, to_version=PROMPT_VERSION) if compare_to else None
     if as_json:
         payload = dataclasses.asdict(metrics) | {
+            "golden": dataclasses.asdict(metrics.golden)
+            | {
+                "failures": [
+                    dataclasses.asdict(failure) | {"expected": golden_label(failure.expected)}
+                    for failure in metrics.golden.failures
+                ]
+            },
             "precision": metrics.precision,
             "contamination": metrics.contamination,
             "contamination_upper": metrics.contamination_upper,
@@ -229,7 +237,9 @@ async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, a
     click.echo(f"golden: {metrics.golden.passed}/{metrics.golden.total} (sha256 {metrics.golden.sha256[:12]})")
     for failure in metrics.golden.failures:
         why = f" — {failure.rationale}" if failure.rationale else ""
-        click.echo(f"  FAIL expected {failure.expected}, got {failure.category}{why}: {failure.text[:120]}")
+        click.echo(
+            f"  FAIL expected {golden_label(failure.expected)}, got {failure.category}{why}: {failure.text[:120]}"
+        )
     core_a, core_r = metrics.core_accepts, metrics.core_rejects
     click.echo(
         f"precision (core): {core_a.hits}/{core_a.audited}"
@@ -279,7 +289,8 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     completes, failed events stay pending and are retried on the next run, and
     re-running over a fully refined corpus is a no-op.
     """
-    from cc_pushback.claude import resolved_model
+    from cc_transcript.domains.mining import resolved_model
+
     from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
     from cc_pushback.refine import refine as run_refine
 

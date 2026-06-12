@@ -1,0 +1,231 @@
+You are auditing one message a developer sent to an AI coding assistant (Claude),
+deciding whether it is genuine PUSHBACK — corrective feedback on something the
+assistant just did — or non-pushback noise.
+
+Pick exactly one category:
+- wrong_approach: rejects the assistant's plan, strategy, or design.
+- incorrect_change: the code or content the assistant produced is wrong or broken.
+- unwanted_action: the assistant did something the user did not ask for or want.
+- style_violation: the work violates the user's conventions or stated preferences.
+- premature: the assistant stopped early, skipped work, or claimed completion when work remains.
+- operational_directive: a forward instruction ("commit and push", "set a higher timeout")
+  that does not criticize prior work. Approving then adding scope ("yes — also do Y",
+  "upgrade our alias as well") is operational; forward words like "fix" or "review"
+  aimed at future work do not by themselves fault what was already done.
+- status_update: the user reporting state ("done, its running", "I killed it already").
+- new_task: a fresh request or spec, not a reaction to the preceding action. A report
+  that an external tool or pre-existing system is broken is new_task or status_update,
+  not incorrect_change, unless the assistant built it.
+- question: a genuine request for information. A skeptical or rhetorical question that
+  presses on a choice the assistant made ("why are we hardcoding this?", "should this
+  ever be optional?", "there's really no better way?") is pushback, not a question —
+  categorize it by what it challenges. But a question proposing a NEW addition
+  ("should we add a pyright config?", "can we also bundle the plugin?") presses on
+  nothing the assistant did — it stays a question or new_task.
+- other: none of the above.
+
+The first five categories are pushback; the rest are noise.
+A mixed message that contains ANY genuine corrective content is pushback — pick the
+category of the corrective part. Corrective content is often implicit in a directive:
+"figure out the right proper fix" faults the current fix, "look more closely" faults a
+shallow look, "not just X — give me Y" faults an insufficient answer, praise followed
+by a redirect ("its good that you did X, but the more important thing is Y") faults the
+scope, and exasperation ("stop wasting time", "fucking hell just commit") faults the
+behavior, even when phrased as the next step.
+An implicit fault only counts when the faulted thing exists in the assistant's prior
+work: "set the right headers" while assigning fresh config work is a plain directive;
+"use the right template" after the assistant used the wrong one is a correction. And
+when the user corrects their own earlier instruction ("ah sorry, my bad — we treat it
+as native"), that is a spec clarification, not pushback on the assistant.
+The assistant action being corrected may predate the trigger shown: when the message
+critiques files or output the assistant produced earlier in the session, it is pushback
+on that work even if the immediately preceding action is unrelated.
+When the source is review_comment, the message is an inline code-review comment on code
+the assistant wrote: terse imperatives there ("inline", "remove this one", "maybe make
+this _safe?") are corrections — usually style_violation, incorrect_change, or
+wrong_approach — not operational directives.
+
+what_claude_did: ONE neutral sentence naming the assistant action the message responds
+to (e.g. "Force-pushed to the shared branch with git push --force"). Write it even when
+the message is noise.
+confidence: your probability (0 to 1) that your pushback-vs-noise call is correct.
+rationale: one short clause.
+
+[source: transcript_message]
+=== conversation before ===
+user: please clean up the build pipeline
+assistant: before000 before001 before002 before003 before004 before005 before006 before007 before008 before009 before010 before011 before012 before013 before014 before015 before016 before017 before018 before019 before020 before021 before022 before023 before024 before025 before026 before027 before028 before029 before030 before031 before032 before033 before034 before035 before036 before037 before038 before039 before040 before041 before042 before043 before044 before045 before046 before047 before048 before049 before050 before051 before052 before053 before054 before055 before056 before057 before058 before059 before060 before061 before062 before063 before064 before065 before066 before067 before068 before069…
+  Bash(rm -rf build && make all)
+  Edit(/repo/app.py
+- old_line()
++ new_line())
+  Read()
+=== assistant action under review ===
+assistant: trigger000 trigger001 trigger002 trigger003 trigger004 trigger005 trigger006 trigger007 trigger008 trigger009 trigger010 trigger011 trigger012 trigger013 trigger014 trigger015 trigger016 trigger017 trigger018 trigger019 trigger020 trigger021 trigger022 trigger023 trigger024 trigger025 trigger026 trigger027 trigger028 trigger029 trigger030 trigger031 trigger032 trigger033 trigger034 trigger035 trigger036 trigger037 trigger038 trigger039 trigger040 trigger041 trigger042 trigger043 trigger044 trigger045 trigger046 trigger047 trigger048 trigger049 trigger050 trigger051 trigger052 trigger053 trigger054 trigger055 trigger056 trigger057 trigger058 trigger059 trigger060 trigger061 trigger062 trigger063 trigger064 trigger065 trigger066 trigger067 trigger068 trigger069 trigger070 trigger071 trigger072 trigger073 trigger074 trigger075 trigger076 trigger077 trigger078 trigger079 trigger080 trigger081 trigger082 trigger083 trigger084 trigger085 trigger086 trigger087 trigger088 trigger089 trigger090 trigger091 trigger092 trigger093 trigger094 trigger095 trigger096 trigger097 trigger098 trigger099 trigger100 trigger101 trigger102 trigger103 trigger104 trigger105 trigger106 trigger107 trigger108 trigger109 trigger110 trigger111 trigger112 trigger113 trigger114 trigger115 trigger116 trigger117 trigger118 trigger119 trigger120 trigger121 trigger122 trigger123 trigger124 trigger125 trigger126 trigger127 trigger128 trigger129 trigger130 trigger131 trigger132 trigger133 trigger134 trigger135 trigger136 trigger137 trigger138 trigger139 trigger140 trigger141 trigger142 trigger143 trigger144 trigger145 trigger146 trigger147 trigger148 trigger149 trigger150 trigger151 trigger152 trigger153 trigger154 trigger155 trigger156 trigger157 trigger158 trigger159 trigger160 trigger161 trigger162 trigger163 trigger164 trigger165 trigger166 trigger167 trigger168 trigger169 trigger170 trigger171 trigger172 trigger173 trigger174 trigger175 trigger176 trigger177 trigger178 trigger179 trigger180 trigger18…
+  Bash(git push --force origin main)
+  Edit(editinput000 editinput001 editinput002 editinput003 editinput004 editinput005 editinput006 editinput007 editinput008 editinput009 editinput010 editinput011 editinput012 editinput013 editinput014 editinput015 editinput016 editinput017 editinput018 editinput019 editinput020 editinput021 editinput022 editinput023 editinput024 editinput025 editinput026 editinput027 editinput028 editinput029 editinput030 editinput031 editinput032 editinput033 editinput034 editinput035 editinput036 editinput037 editinput038 editinput039 editinput040 editinput041 editinput042 editinput043 editinput044 editinput045 editinput046 editinput047 editinput048 editinput049 editinput050 editinput051 editinput052 editinput053 editinput054 editinput055 editinput056 editinput057 editinput058 editinput059 editinput060 editinput061 editinput062 editinput063 editinput064 editinput065 editinput066 editinput067 editinput068 editinput069 editinput070 editinput071 editinput072 editinput073 editinput074 editinput075 editinput076 editinput077 editinput078 editinput079 editinput080 editinput081 editinput082 editinput083 editinput084 editinput085 editinput086 editinput087 editinput088 editinput089 editinput090 editinput091 editinput092 editinput093 editinput094 editinput095 editinput096 editinput097 editinput098 editinput099 editinput100 editinput101 editinput102 editinput103 editinput104 editinput105 editinput106 editinput107 editinput108 editinput109 editinput110 editinput111 editinput112 editinput113 editinput114 editinput115 editinput116 editinput117 editinput118 editinput119 editinput120 editinput121 editinput122 editinput123 editinput124 editinput125 editinput126 editinput127 editinput128 editinput129 editinput130 editinput131 editinput132 editinput133 editinput134 editinput135 editinput136 editinput137 editinput138 editinput139 editinput140 editinput141 editinput142 editinput143 editinput144 editinput145 editinput146 editinput147 editinput148 editinput149 editinput150 editinput151 editinput152 editinput15…)
+=== USER MESSAGE TO CLASSIFY ===
+no, stop — complaint000 complaint001 complaint002 complaint003 complaint004 complaint005 complaint006 complaint007 complaint008 complaint009 complaint010 complaint011 complaint012 complaint013 complaint014 complaint015 complaint016 complaint017 complaint018 complaint019 complaint020 complaint021 complaint022 complaint023 complaint024 complaint025 complaint026 complaint027 complaint028 complaint029 complaint030 complaint031 complaint032 complaint033 complaint034 complaint035 complaint036 complaint037 complaint038 complaint039
+=== conversation after ===
+user: after000 after001 after002 after003 after004 after005 after006 after007 after008 after009 after010 after011 after012 after013 after014 after015 after016 after017 after018 after019 after020 after021 after022 after023 after024 after025 after026 after027 after028 after029 after030 after031 after032 after033 after034 after035 after036 after037 after038 after039 after040 after041 after042 after043 after044 after045 after046 after047 after048 after049 after050 after051 after052 after053 after054 after055 after056 after057 after058 after059 after060 after061 after062 after063 after064 after065 after066 after067 after068 after069 after070 after071 after072 after073 after074 after075 after076 after07…
+tool: exit status 1
+
+########
+
+A dataset is being built of developer corrections: moments where a human, reading what
+an AI coding assistant just did, told it that something about that work was wrong,
+unwanted, or off-course. You are the quality gate: given one human message and its
+surrounding conversation, decide independently whether the message belongs in that
+dataset.
+
+It belongs (it is a correction) when the message faults the assistant's preceding work
+or behavior in any way — its direction, its output, its side effects, its style, or its
+stopping point — even partially, even alongside unrelated content.
+
+It does not belong when the message only moves work forward or reports facts: telling
+the assistant what to do next, giving a new assignment, asking or answering a question,
+relaying status, or approving. A message that raises a doubt but ends by accepting the
+assistant's choice ("nevermind, if there's a reason for it, then do it") moves work
+forward and does not belong.
+
+Two sharp edges. An inline code-review comment (source review_comment) annotates a
+specific line of code the assistant authored: short imperatives and suggestions there
+("inline", "it is required", "use dataclasses always") fault that line and belong in
+the dataset. And a question can go either way: one that presses on a choice ("couldn't
+this inherit from userlist?") faults the work, while one that merely seeks information
+does not.
+
+Choose the single best-fitting label:
+- wrong_approach / incorrect_change / unwanted_action / style_violation / premature (corrections)
+- operational_directive / status_update / new_task / question / other (not corrections)
+
+Also provide: what_claude_did — one neutral sentence describing the assistant's
+preceding action; confidence — your probability (0 to 1) that your correction-vs-not
+call is right; rationale — one short clause.
+
+[source: transcript_message]
+=== conversation before ===
+user: please clean up the build pipeline
+assistant: before000 before001 before002 before003 before004 before005 before006 before007 before008 before009 before010 before011 before012 before013 before014 before015 before016 before017 before018 before019 before020 before021 before022 before023 before024 before025 before026 before027 before028 before029 before030 before031 before032 before033 before034 before035 before036 before037 before038 before039 before040 before041 before042 before043 before044 before045 before046 before047 before048 before049 before050 before051 before052 before053 before054 before055 before056 before057 before058 before059 before060 before061 before062 before063 before064 before065 before066 before067 before068 before069…
+  Bash(rm -rf build && make all)
+  Edit(/repo/app.py
+- old_line()
++ new_line())
+  Read()
+=== assistant's preceding action ===
+assistant: trigger000 trigger001 trigger002 trigger003 trigger004 trigger005 trigger006 trigger007 trigger008 trigger009 trigger010 trigger011 trigger012 trigger013 trigger014 trigger015 trigger016 trigger017 trigger018 trigger019 trigger020 trigger021 trigger022 trigger023 trigger024 trigger025 trigger026 trigger027 trigger028 trigger029 trigger030 trigger031 trigger032 trigger033 trigger034 trigger035 trigger036 trigger037 trigger038 trigger039 trigger040 trigger041 trigger042 trigger043 trigger044 trigger045 trigger046 trigger047 trigger048 trigger049 trigger050 trigger051 trigger052 trigger053 trigger054 trigger055 trigger056 trigger057 trigger058 trigger059 trigger060 trigger061 trigger062 trigger063 trigger064 trigger065 trigger066 trigger067 trigger068 trigger069 trigger070 trigger071 trigger072 trigger073 trigger074 trigger075 trigger076 trigger077 trigger078 trigger079 trigger080 trigger081 trigger082 trigger083 trigger084 trigger085 trigger086 trigger087 trigger088 trigger089 trigger090 trigger091 trigger092 trigger093 trigger094 trigger095 trigger096 trigger097 trigger098 trigger099 trigger100 trigger101 trigger102 trigger103 trigger104 trigger105 trigger106 trigger107 trigger108 trigger109 trigger110 trigger111 trigger112 trigger113 trigger114 trigger115 trigger116 trigger117 trigger118 trigger119 trigger120 trigger121 trigger122 trigger123 trigger124 trigger125 trigger126 trigger127 trigger128 trigger129 trigger130 trigger131 trigger132 trigger133 trigger134 trigger135 trigger136 trigger137 trigger138 trigger139 trigger140 trigger141 trigger142 trigger143 trigger144 trigger145 trigger146 trigger147 trigger148 trigger149 trigger150 trigger151 trigger152 trigger153 trigger154 trigger155 trigger156 trigger157 trigger158 trigger159 trigger160 trigger161 trigger162 trigger163 trigger164 trigger165 trigger166 trigger167 trigger168 trigger169 trigger170 trigger171 trigger172 trigger173 trigger174 trigger175 trigger176 trigger177 trigger178 trigger179 trigger180 trigger18…
+  Bash(git push --force origin main)
+  Edit(editinput000 editinput001 editinput002 editinput003 editinput004 editinput005 editinput006 editinput007 editinput008 editinput009 editinput010 editinput011 editinput012 editinput013 editinput014 editinput015 editinput016 editinput017 editinput018 editinput019 editinput020 editinput021 editinput022 editinput023 editinput024 editinput025 editinput026 editinput027 editinput028 editinput029 editinput030 editinput031 editinput032 editinput033 editinput034 editinput035 editinput036 editinput037 editinput038 editinput039 editinput040 editinput041 editinput042 editinput043 editinput044 editinput045 editinput046 editinput047 editinput048 editinput049 editinput050 editinput051 editinput052 editinput053 editinput054 editinput055 editinput056 editinput057 editinput058 editinput059 editinput060 editinput061 editinput062 editinput063 editinput064 editinput065 editinput066 editinput067 editinput068 editinput069 editinput070 editinput071 editinput072 editinput073 editinput074 editinput075 editinput076 editinput077 editinput078 editinput079 editinput080 editinput081 editinput082 editinput083 editinput084 editinput085 editinput086 editinput087 editinput088 editinput089 editinput090 editinput091 editinput092 editinput093 editinput094 editinput095 editinput096 editinput097 editinput098 editinput099 editinput100 editinput101 editinput102 editinput103 editinput104 editinput105 editinput106 editinput107 editinput108 editinput109 editinput110 editinput111 editinput112 editinput113 editinput114 editinput115 editinput116 editinput117 editinput118 editinput119 editinput120 editinput121 editinput122 editinput123 editinput124 editinput125 editinput126 editinput127 editinput128 editinput129 editinput130 editinput131 editinput132 editinput133 editinput134 editinput135 editinput136 editinput137 editinput138 editinput139 editinput140 editinput141 editinput142 editinput143 editinput144 editinput145 editinput146 editinput147 editinput148 editinput149 editinput150 editinput151 editinput152 editinput15…)
+=== HUMAN MESSAGE TO ASSESS ===
+no, stop — complaint000 complaint001 complaint002 complaint003 complaint004 complaint005 complaint006 complaint007 complaint008 complaint009 complaint010 complaint011 complaint012 complaint013 complaint014 complaint015 complaint016 complaint017 complaint018 complaint019 complaint020 complaint021 complaint022 complaint023 complaint024 complaint025 complaint026 complaint027 complaint028 complaint029 complaint030 complaint031 complaint032 complaint033 complaint034 complaint035 complaint036 complaint037 complaint038 complaint039
+=== conversation after ===
+user: after000 after001 after002 after003 after004 after005 after006 after007 after008 after009 after010 after011 after012 after013 after014 after015 after016 after017 after018 after019 after020 after021 after022 after023 after024 after025 after026 after027 after028 after029 after030 after031 after032 after033 after034 after035 after036 after037 after038 after039 after040 after041 after042 after043 after044 after045 after046 after047 after048 after049 after050 after051 after052 after053 after054 after055 after056 after057 after058 after059 after060 after061 after062 after063 after064 after065 after066 after067 after068 after069 after070 after071 after072 after073 after074 after075 after076 after07…
+tool: exit status 1
+
+########
+
+You are auditing one message a developer sent to an AI coding assistant (Claude),
+deciding whether it is genuine PUSHBACK — corrective feedback on something the
+assistant just did — or non-pushback noise.
+
+Pick exactly one category:
+- wrong_approach: rejects the assistant's plan, strategy, or design.
+- incorrect_change: the code or content the assistant produced is wrong or broken.
+- unwanted_action: the assistant did something the user did not ask for or want.
+- style_violation: the work violates the user's conventions or stated preferences.
+- premature: the assistant stopped early, skipped work, or claimed completion when work remains.
+- operational_directive: a forward instruction ("commit and push", "set a higher timeout")
+  that does not criticize prior work. Approving then adding scope ("yes — also do Y",
+  "upgrade our alias as well") is operational; forward words like "fix" or "review"
+  aimed at future work do not by themselves fault what was already done.
+- status_update: the user reporting state ("done, its running", "I killed it already").
+- new_task: a fresh request or spec, not a reaction to the preceding action. A report
+  that an external tool or pre-existing system is broken is new_task or status_update,
+  not incorrect_change, unless the assistant built it.
+- question: a genuine request for information. A skeptical or rhetorical question that
+  presses on a choice the assistant made ("why are we hardcoding this?", "should this
+  ever be optional?", "there's really no better way?") is pushback, not a question —
+  categorize it by what it challenges. But a question proposing a NEW addition
+  ("should we add a pyright config?", "can we also bundle the plugin?") presses on
+  nothing the assistant did — it stays a question or new_task.
+- other: none of the above.
+
+The first five categories are pushback; the rest are noise.
+A mixed message that contains ANY genuine corrective content is pushback — pick the
+category of the corrective part. Corrective content is often implicit in a directive:
+"figure out the right proper fix" faults the current fix, "look more closely" faults a
+shallow look, "not just X — give me Y" faults an insufficient answer, praise followed
+by a redirect ("its good that you did X, but the more important thing is Y") faults the
+scope, and exasperation ("stop wasting time", "fucking hell just commit") faults the
+behavior, even when phrased as the next step.
+An implicit fault only counts when the faulted thing exists in the assistant's prior
+work: "set the right headers" while assigning fresh config work is a plain directive;
+"use the right template" after the assistant used the wrong one is a correction. And
+when the user corrects their own earlier instruction ("ah sorry, my bad — we treat it
+as native"), that is a spec clarification, not pushback on the assistant.
+The assistant action being corrected may predate the trigger shown: when the message
+critiques files or output the assistant produced earlier in the session, it is pushback
+on that work even if the immediately preceding action is unrelated.
+When the source is review_comment, the message is an inline code-review comment on code
+the assistant wrote: terse imperatives there ("inline", "remove this one", "maybe make
+this _safe?") are corrections — usually style_violation, incorrect_change, or
+wrong_approach — not operational directives.
+
+what_claude_did: ONE neutral sentence naming the assistant action the message responds
+to (e.g. "Force-pushed to the shared branch with git push --force"). Write it even when
+the message is noise.
+confidence: your probability (0 to 1) that your pushback-vs-noise call is correct.
+rationale: one short clause.
+
+[source: interrupt_rejection]
+=== conversation before ===
+(none)
+=== assistant action under review ===
+(unknown)
+=== USER MESSAGE TO CLASSIFY ===
+no
+=== conversation after ===
+(none)
+
+########
+
+A dataset is being built of developer corrections: moments where a human, reading what
+an AI coding assistant just did, told it that something about that work was wrong,
+unwanted, or off-course. You are the quality gate: given one human message and its
+surrounding conversation, decide independently whether the message belongs in that
+dataset.
+
+It belongs (it is a correction) when the message faults the assistant's preceding work
+or behavior in any way — its direction, its output, its side effects, its style, or its
+stopping point — even partially, even alongside unrelated content.
+
+It does not belong when the message only moves work forward or reports facts: telling
+the assistant what to do next, giving a new assignment, asking or answering a question,
+relaying status, or approving. A message that raises a doubt but ends by accepting the
+assistant's choice ("nevermind, if there's a reason for it, then do it") moves work
+forward and does not belong.
+
+Two sharp edges. An inline code-review comment (source review_comment) annotates a
+specific line of code the assistant authored: short imperatives and suggestions there
+("inline", "it is required", "use dataclasses always") fault that line and belong in
+the dataset. And a question can go either way: one that presses on a choice ("couldn't
+this inherit from userlist?") faults the work, while one that merely seeks information
+does not.
+
+Choose the single best-fitting label:
+- wrong_approach / incorrect_change / unwanted_action / style_violation / premature (corrections)
+- operational_directive / status_update / new_task / question / other (not corrections)
+
+Also provide: what_claude_did — one neutral sentence describing the assistant's
+preceding action; confidence — your probability (0 to 1) that your correction-vs-not
+call is right; rationale — one short clause.
+
+[source: interrupt_rejection]
+=== conversation before ===
+(none)
+=== assistant's preceding action ===
+(unknown)
+=== HUMAN MESSAGE TO ASSESS ===
+no
+=== conversation after ===
+(none)
