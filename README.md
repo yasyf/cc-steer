@@ -1,6 +1,6 @@
 # cc-pushback
 
-![cc-pushback banner](https://github.com/yasyf/cc-pushback/raw/main/docs/assets/readme-banner.png)
+![cc-pushback banner](https://github.com/yasyf/cc-pushback/raw/main/docs/assets/readme-banner.webp)
 
 [![PyPI](https://img.shields.io/pypi/v/cc-pushback.svg)](https://pypi.org/project/cc-pushback/)
 [![Python](https://img.shields.io/pypi/pyversions/cc-pushback.svg)](https://pypi.org/project/cc-pushback/)
