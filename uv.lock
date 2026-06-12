@@ -206,7 +206,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.4" },
-    { name = "cc-transcript", specifier = ">=0.7.1,<0.8" },
+    { name = "cc-transcript", specifier = ">=0.8,<0.9" },
     { name = "click", specifier = ">=8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
@@ -224,19 +224,19 @@ docs = [{ name = "great-docs", specifier = ">=0.13,<0.14" }]
 
 [[package]]
 name = "cc-transcript"
-version = "0.7.1"
+version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "anyio" },
     { name = "orjson" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2e/82/a8affe22fde6c034f928f261779b48ece2fef912415e52e54cc944c144dd/cc_transcript-0.7.1.tar.gz", hash = "sha256:b35d0002fda17353f49a7390b1de7cb30fb8c3e70ed48d2ea4815cea72e2d106", size = 72477, upload-time = "2026-06-10T13:21:32.598Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/0d/d77470f959c9119522c4944f9f986d684457ae3bd23dacf46555e17c6e9b/cc_transcript-0.8.0.tar.gz", hash = "sha256:711957e76cb21ad2752dda22e22511098a36393a658faef4bb8aac6dc4e8f055", size = 82515, upload-time = "2026-06-12T00:11:33.37Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/ec/dde12972a87df89864a7459014c2da8e9cf96286fbacaef270f91d1c6f9d/cc_transcript-0.7.1-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:d7bd42df6a2ddad5d48a505d3f59e106217a2d88e165e52dac46f6502556b81d", size = 2102967, upload-time = "2026-06-10T13:21:26.668Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/fb/881cc8f47204205267043b5a6e7878ed58a08e570a9adf25fbca23367121/cc_transcript-0.7.1-cp313-abi3-macosx_11_0_x86_64.whl", hash = "sha256:f2f3f3724ec9fcf2f3517a94a3b649263861d62444af3fe9f3041c73e8664fd1", size = 2246727, upload-time = "2026-06-10T13:21:28.238Z" },
-    { url = "https://files.pythonhosted.org/packages/56/81/f4b5f1ef0fb3585c4005e00c8eaf4d6eaab5098830ce2e74990238406c6b/cc_transcript-0.7.1-cp313-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0deee52953a22957b78178d6729747e8feb0c3e6a2d78f73716494fe97ffd33f", size = 2247832, upload-time = "2026-06-10T13:21:29.62Z" },
-    { url = "https://files.pythonhosted.org/packages/06/8b/dc78759a2943ad964f9ddaf5146872c07bffc0d44764a182806ad8490020/cc_transcript-0.7.1-cp313-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:1365a17a71c3e9f253f1e6229d49d8f462918d92ae732fd5db9fb1bc3ffce0fd", size = 2376905, upload-time = "2026-06-10T13:21:31.12Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/43/7bef5ff6f87861da92ea30d35c23a7adf1c3ce854ef0854dc0a0f27f5ceb/cc_transcript-0.8.0-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:59b8ddafc2b5f1eb32190cfd437bea2ea57e44f316fe7801fb40a1906c1df1ad", size = 2107437, upload-time = "2026-06-12T00:11:27.02Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/48/901cbfc248a60c8c2d61dc0e4f06c572aab106fc720b05cfb408c0914687/cc_transcript-0.8.0-cp313-abi3-macosx_11_0_x86_64.whl", hash = "sha256:e6f62188fcda6a5d1ff17f4f3b3635723b09bf8b3e6b297e56a62e585b43f3ad", size = 2251027, upload-time = "2026-06-12T00:11:29.109Z" },
+    { url = "https://files.pythonhosted.org/packages/61/c3/89d46bc857432eb064dd37d9001d8a4074e92eebd4ffec2d0be52093ce11/cc_transcript-0.8.0-cp313-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:dee8c945ba3fe405de9e47f1192db25ae343d5c19727a6a5e39500d4753df376", size = 2259558, upload-time = "2026-06-12T00:11:30.677Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/2e/bbc143830089ee0f8904480fb5168ce8d1a23f779e9375b545bdb6bf1ed5/cc_transcript-0.8.0-cp313-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:e737ef2b0e426255352b42445edec243e37e88890d3fd718eec2c4dac1972a7f", size = 2388625, upload-time = "2026-06-12T00:11:32.033Z" },
 ]
 
 [[package]]
@@ -1807,14 +1807,14 @@ wheels = [
 
 [[package]]
 name = "starlette"
-version = "1.3.0"
+version = "1.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c1/37/cc24e33974e1439cf5ca62b0735b63026eabb768f472d8775f52d5851ed9/starlette-1.3.0.tar.gz", hash = "sha256:bb58cbb7a699da4ee4be9ed4cdfe4bc5b0390aa6dac1d1ac714ebebe8dc3c8df", size = 2702493, upload-time = "2026-06-11T06:27:41.869Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/44/ec35f1b6e83094b997da438a02c8c9b0ade2b1e84cfc48bd4656780760a6/starlette-1.2.1.tar.gz", hash = "sha256:9b9b5ebb992e67d6093741e63c2f59e4f6fff986f81163c087867bd7b924b3f6", size = 2701854, upload-time = "2026-05-31T01:07:51.847Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/42/56d31c5ee52dab0ad893d67d4f9c00f5ba2b4c5d87f392eca2c3fdce01cf/starlette-1.3.0-py3-none-any.whl", hash = "sha256:ff4ca1bc23de6a45cdfbbeb9b3caaea524c9221cdd8a6684ad7a4f651a83890b", size = 73492, upload-time = "2026-06-11T06:27:40.444Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/54/196d0c1db10af76baa4f64894448505d60d3cdf70ef92cbb35f46a4e4c71/starlette-1.2.1-py3-none-any.whl", hash = "sha256:4de0082d08c8f6764a85a54cf1120d6939507a19905c7768acad2a9f875d2b89", size = 73350, upload-time = "2026-05-31T01:07:50.09Z" },
 ]
 
 [[package]]
