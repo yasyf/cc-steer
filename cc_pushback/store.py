@@ -266,7 +266,7 @@ ORDER BY r.pair_index
 
 UNENRICHED_QUERY = """
 SELECT rp.dedup_key, rp.prompt_version AS refine_version, rp.model AS refine_model, rp.pair_index,
-  rp.action, rp.complaint, rp.complaint_verbatim, rp.source_kind, rp.session_id, e.event_uuid
+  rp.action, rp.complaint, rp.complaint_verbatim, rp.source_kind, rp.session_id, e.event_uuid, e.origin_path
 FROM refined_pairs rp
 JOIN feedback_events e ON e.dedup_key = rp.dedup_key
 LEFT JOIN pair_evidence px ON px.dedup_key = rp.dedup_key AND px.refine_version = rp.prompt_version

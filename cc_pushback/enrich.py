@@ -27,6 +27,7 @@ from cc_transcript.evidence import EXTRACTOR_VERSION, GitFix, harvest_pairs, rec
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.judge import resolved_model, structured_judge
 from cc_transcript.mining import DedupKey
+from cc_transcript.parser import parse_events_async
 from cc_transcript.render import Budget, clip, hunk_lines
 from pydantic import BaseModel, model_validator
 
@@ -213,6 +214,19 @@ def repo_of(turn: Turn, anchor: EventRef) -> Path | None:
     )
 
 
+async def load_activity(session_id: SessionId, origin_path: object) -> SessionActivity:
+    """Builds the session activity, preferring the exact transcript the event was mined from.
+
+    Re-discovery by session id only searches the default projects root, so a corpus
+    mined from a mirror or any non-default ``--transcripts`` root would resolve as
+    expired. The stored ``origin_path`` names the file directly; discovery is the
+    fallback for events whose original file is gone.
+    """
+    if origin_path is not None and (path := Path(str(origin_path))).exists():
+        return SessionActivity.from_events(session_id, await parse_events_async(path))
+    return await SessionActivity.from_session(session_id)
+
+
 async def resolve_evidence(
     row: Mapping[str, object], judge: Callable[[str], Awaitable[CodeEvidence]], log: CorrectionLog
 ) -> tuple[CodeEvidence, Source | None, int]:
@@ -222,7 +236,7 @@ async def resolve_evidence(
         case (session_id, event_uuid):
             anchor = EventRef(SessionId(str(session_id)), EventUuid(str(event_uuid)))
     try:
-        activity = await SessionActivity.from_session(anchor.session_id)
+        activity = await load_activity(anchor.session_id, row["origin_path"])
     except TranscriptExpiredError:
         return CodeEvidence(kind="no_code", note=EXPIRED_NOTE), None, SENTINEL_INDEX
     if (turn := activity.turn_of(anchor)) is None:

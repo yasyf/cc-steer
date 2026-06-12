@@ -97,9 +97,14 @@ def code_evidence(*, correct: EditSide | None) -> CodeEvidence:
 
 
 async def seed_refined(
-    store: FeedbackStore, monkeypatch: pytest.MonkeyPatch, entries: list[dict[str, Any]], *, pushback: str = PUSHBACK
+    store: FeedbackStore,
+    monkeypatch: pytest.MonkeyPatch,
+    entries: list[dict[str, Any]],
+    *,
+    pushback: str = PUSHBACK,
+    origin: str = FILE,
 ) -> None:
-    await store.record_file_scan(FILE, 1.0, detect(parse(entries)))
+    await store.record_file_scan(origin, 1.0, detect(parse(entries)))
 
     async def judge(prompt: str) -> Verdict:
         accepted = f"USER MESSAGE TO CLASSIFY ===\n{pushback}" in prompt
@@ -259,6 +264,26 @@ async def test_enrich_records_the_harvest_to_the_shared_corrections_ledger(
     assert (row.incorrect_old, row.incorrect_new) == (INCORRECT_OLD, INCORRECT_NEW)
     assert (row.correction_origin, row.correction_old, row.correction_new) == ("session", INCORRECT_NEW, CORRECT_NEW)
     assert row.overlap == 1.0 and row.extractor_version == EXTRACTOR_VERSION
+
+
+@pytest.mark.integration
+async def test_enrich_resolves_a_transcript_by_origin_path_outside_the_discovery_root(
+    store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A mirror-like corpus: the transcript lives outside CLAUDE_PROJECTS_DIR, so
+    # session discovery would fail — only the stored origin_path resolves it.
+    entries = coding_entries()
+    mirror = tmp_path / "mirror" / f"{SESSION}.jsonl"
+    write_transcript(mirror, entries)
+    await seed_refined(store, monkeypatch, entries, origin=str(mirror))
+
+    async def linker(prompt: str) -> CodeEvidence:
+        return code_evidence(correct=EditSide(old=INCORRECT_NEW, new=CORRECT_NEW))
+
+    monkeypatch.setattr("cc_pushback.enrich.structured_judge", lambda *_, **__: linker)
+    report = await enrich(store)
+    assert (report.code, report.no_code, report.pending) == (1, 0, 0)
+    assert (await store.pairs())[0]["evidence_kind"] == "code"
 
 
 @pytest.mark.integration

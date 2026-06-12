@@ -437,6 +437,7 @@ async def test_unenriched_keys_on_the_full_enrich_generation(store: FeedbackStor
         "source_kind",
         "session_id",
         "event_uuid",
+        "origin_path",
     }
     assert len(await store.unenriched(enrich_version=2, enrich_model="haiku", extractor_version=1)) == 2
     assert len(await store.unenriched(enrich_version=1, enrich_model="opus", extractor_version=1)) == 2
