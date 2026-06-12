@@ -35,8 +35,10 @@ DASHBOARD_CSS = """
 .view-btn{background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:14px;
 padding:4px 12px;cursor:pointer;font:inherit}
 .view-btn.active{background:var(--accent);color:#0d1117;border-color:var(--accent)}
-#status-filter{background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:6px;
-padding:5px 8px;font:inherit}
+#status-filter,#cat-filter,#kind-filter,#project-filter{background:var(--panel);color:var(--fg);
+border:1px solid var(--border);border-radius:6px;padding:5px 8px;font:inherit;max-width:200px}
+.comp h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:18px 0 0}
+.comp table.dist td{padding:3px 12px 3px 0}
 .card{cursor:pointer}
 .card-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
 .complaint{color:var(--accent);margin-top:6px}
@@ -50,6 +52,9 @@ const statsEl=document.getElementById('stats');
 const searchEl=document.getElementById('search');
 const countEl=document.getElementById('count');
 const statusEl=document.getElementById('status-filter');
+const catEl=document.getElementById('cat-filter');
+const kindEl=document.getElementById('kind-filter');
+const projEl=document.getElementById('project-filter');
 let view='pairs';
 let rows=[];
 
@@ -59,7 +64,7 @@ function badge(cls,t){return `<span class="badge ${cls}">${esc(t)}</span>`;}
 
 function attrs(r){
   return `data-kind="${esc(r.source_kind)}" data-status="${esc(r.status||'refined')}" `
-    +`data-cat="${esc(r.category||'')}" data-flip="${r.flipped?'1':'0'}" `
+    +`data-cat="${esc(r.category||'')}" data-project="${esc(r.project||'')}" data-flip="${r.flipped?'1':'0'}" `
     +`data-agree="${esc(r.agreement||'')}" data-golden="${esc(r.golden||'')}" data-key="${esc(r.dedup_key)}"`;
 }
 
@@ -68,6 +73,7 @@ function pairRow(r){
     +badge('cat-'+(r.category||'other'),r.category||'—')+badge('badge-'+r.source_kind,r.source_kind)
     +`${chip(r.project)}<span class="chip">pair ${r.pair_index}</span></header>`
     +`<div class="text"><pre>${esc(r.action)}</pre></div>`
+    +`<blockquote class="pverbatim">${esc(r.complaint_verbatim)}</blockquote>`
     +`<div class="complaint">↳ ${esc(r.complaint)}</div></article>`;
 }
 
@@ -88,12 +94,16 @@ function rowHtml(r){return view==='pairs'?pairRow(r):candRow(r);}
 function apply(){
   const q=searchEl.value.trim().toLowerCase();
   const status=statusEl.value;
+  const cat=catEl.value,kind=kindEl.value,proj=projEl.value;
   const fFlip=document.getElementById('f-flip').checked;
   const fDis=document.getElementById('f-dis').checked;
   const fGold=document.getElementById('f-gold').checked;
   let shown=0;
   for(const c of listEl.querySelectorAll('.card')){
     const ok=(status==='all'||c.dataset.status===status)
+      &&(cat==='all'||c.dataset.cat===cat)
+      &&(kind==='all'||c.dataset.kind===kind)
+      &&(proj==='all'||c.dataset.project===proj)
       &&(!fFlip||c.dataset.flip==='1')
       &&(!fDis||c.dataset.agree==='disagree')
       &&(!fGold||c.dataset.golden!=='')
@@ -101,6 +111,14 @@ function apply(){
     c.style.display=ok?'':'none';if(ok)shown++;
   }
   countEl.textContent=shown+' / '+rows.length;
+}
+
+function fillFacet(el,key,label){
+  const vals=[...new Set(rows.map(r=>r[key]).filter(Boolean))].sort();
+  const cur=el.value;
+  el.innerHTML=`<option value="all">all ${label}</option>`
+    +vals.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  el.value=vals.includes(cur)?cur:'all';
 }
 
 function render(){
@@ -119,11 +137,29 @@ async function openDetail(key){
 async function load(){
   const data=await (await fetch(view==='pairs'?'/api/pairs':'/api/candidates')).json();
   rows=view==='pairs'?data.pairs:data.candidates;
+  fillFacet(catEl,'category','category');
+  fillFacet(kindEl,'source_kind','kind');
+  fillFacet(projEl,'project','project');
   render();
 }
 
 function statHtml(label,val){
   return `<div class="stat"><div class="n">${esc(val)}</div><div class="l">${esc(label)}</div></div>`;
+}
+function compHtml(comp){
+  const cats=Object.keys(comp);
+  if(!cats.length)return '';
+  const kinds=[...new Set(cats.flatMap(c=>Object.keys(comp[c])))].sort();
+  const max=Math.max(1,...cats.flatMap(c=>kinds.map(k=>comp[c][k]||0)));
+  const head=`<tr><td></td>${kinds.map(k=>`<td>${esc(k)}</td>`).join('')}<td>total</td></tr>`;
+  const body=cats.map(c=>{
+    const tot=kinds.reduce((a,k)=>a+(comp[c][k]||0),0);
+    const cells=kinds.map(k=>{const n=comp[c][k]||0;
+      return `<td>${n?`<span class="bar" style="width:${Math.round(40*n/max)}px"></span> ${n}`:'·'}</td>`;}).join('');
+    return `<tr><td><span class="badge cat-${esc(c)}">${esc(c)}</span></td>${cells}<td>${tot}</td></tr>`;
+  }).join('');
+  return `<div class="comp"><h2>composition · accepted by category × kind</h2>`
+    +`<table class="dist"><tbody>${head}${body}</tbody></table></div>`;
 }
 async function loadStats(){
   const s=await (await fetch('/api/stats')).json();
@@ -133,6 +169,7 @@ async function loadStats(){
     ['unjudged',p.unjudged],['audited',p.audited],['disagree',p.disagree],['flips',p.flips],
     ['golden',p.golden_pass+'/'+p.golden_total]];
   statsEl.innerHTML=`<div class="stat-cards">${cards.map(x=>statHtml(x[0],x[1])).join('')}</div>`
+    +compHtml(p.by_category_kind)
     +(s.narrative?`<div class="narrative">${esc(s.narrative)}</div>`:'');
 }
 
@@ -142,7 +179,7 @@ for(const b of document.querySelectorAll('.view-btn'))b.addEventListener('click'
   load();
 });
 searchEl.addEventListener('input',apply);
-statusEl.addEventListener('change',apply);
+for(const el of [statusEl,catEl,kindEl,projEl])el.addEventListener('change',apply);
 for(const id of ['f-flip','f-dis','f-gold'])document.getElementById(id).addEventListener('change',apply);
 loadStats();load();
 """
@@ -164,6 +201,9 @@ SHELL = "".join(
         '<select id="status-filter"><option value="all">all status</option>',
         '<option value="refined">refined</option><option value="accepted">accepted</option>',
         '<option value="noise">noise</option><option value="unjudged">unjudged</option></select>',
+        '<select id="cat-filter"><option value="all">all category</option></select>',
+        '<select id="kind-filter"><option value="all">all kind</option></select>',
+        '<select id="project-filter"><option value="all">all project</option></select>',
         '<input id="search" type="search" placeholder="search…">',
         '<label class="noise"><input type="checkbox" id="f-flip"> flipped</label>',
         '<label class="noise"><input type="checkbox" id="f-dis"> disagreements</label>',
@@ -187,6 +227,7 @@ def serialize_pair(row: Mapping[str, object]) -> dict[str, object]:
         "dedup_key": row["dedup_key"],
         "pair_index": row["pair_index"],
         "action": report.truncate(str(row["action"]), LIST_TEXT_LIMIT),
+        "complaint_verbatim": report.truncate(str(row["complaint_verbatim"]), LIST_TEXT_LIMIT),
         "complaint": row["complaint"],
         "category": row["category"],
         "source_kind": row["source_kind"],

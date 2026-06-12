@@ -343,6 +343,8 @@ class PipelineStats:
         total_pairs: Atomic ``{action, complaint}`` pairs across the corpus.
         pairs_per_event: Mean pairs per refined event.
         by_category: Accepted-event counts keyed by judge category.
+        by_category_kind: Accepted-event counts keyed by category then source kind,
+            categories ordered by descending total.
         audited: Accepted-or-rejected events carrying an auditor verdict.
         agree: Audited events where the auditor matched the judge's side.
         disagree: Audited events where the auditor differed.
@@ -359,6 +361,7 @@ class PipelineStats:
     total_pairs: int
     pairs_per_event: float
     by_category: Mapping[str, int]
+    by_category_kind: Mapping[str, Mapping[str, int]]
     audited: int
     agree: int
     disagree: int
@@ -453,6 +456,10 @@ def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Ma
     audited = [row for row in candidates if row["auditor_is_pushback"] is not None and row["is_pushback"] is not None]
     agree = sum(bool(row["auditor_is_pushback"]) == bool(row["is_pushback"]) for row in audited)
     golden = [(row, golden_map[key]) for row in candidates if (key := str(row["dedup_key"])) in golden_map]
+    composition: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in candidates:
+        if row["is_pushback"]:
+            composition[str(row["category"])][str(row["source_kind"])] += 1
     return PipelineStats(
         accepted=statuses["accepted"] + statuses["refined"],
         refined=statuses["refined"],
@@ -464,6 +471,10 @@ def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Ma
         by_category=dict(
             Counter(str(row["category"]) for row in candidates if row["is_pushback"]).most_common()
         ),
+        by_category_kind={
+            category: dict(kinds.most_common())
+            for category, kinds in sorted(composition.items(), key=lambda item: -item[1].total())
+        },
         audited=len(audited),
         agree=agree,
         disagree=len(audited) - agree,

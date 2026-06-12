@@ -205,6 +205,7 @@ async def test_api_pairs_returns_atomic_rows(store: FeedbackStore) -> None:
     pair = body["pairs"][0]
     assert pair["dedup_key"] == "k1" and pair["category"] == "wrong_approach"
     assert pair["complaint"] == "do not vendor" and pair["project"] == "proj"
+    assert pair["complaint_verbatim"] == "dont vendor it"
 
 
 async def test_api_candidates_covers_every_status(store: FeedbackStore) -> None:
@@ -235,6 +236,7 @@ async def test_api_stats_shape(store: FeedbackStore) -> None:
     assert stats["narrative"] is None
     assert stats["pipeline"]["refined"] == 1 and stats["pipeline"]["accepted"] == 2
     assert stats["pipeline"]["noise_judged"] == 1 and stats["pipeline"]["total_pairs"] == 1
+    assert stats["pipeline"]["by_category_kind"] == {"wrong_approach": {"transcript_message": 2}}
     assert stats["corpus"]["total"] == 3
 
 
@@ -243,3 +245,5 @@ async def test_root_serves_shell(store: FeedbackStore) -> None:
     async with await client(store) as http:
         page = await http.get("/")
     assert page.status_code == 200 and 'id="list"' in page.text and 'id="search"' in page.text
+    for facet in ('id="cat-filter"', 'id="kind-filter"', 'id="project-filter"', "data-project"):
+        assert facet in page.text
