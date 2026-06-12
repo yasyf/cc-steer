@@ -5,8 +5,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from cc_transcript.activity import Edit, SessionActivity
+from cc_transcript.corrections import CorrectionLog
 from cc_transcript.evidence import EXTRACTOR_VERSION, CandidatePair, GitFix
-from cc_transcript.ids import EventRef, EventUuid, SessionId
+from cc_transcript.ids import EventRef, EventUuid, SessionId, tool_digest
 from cc_transcript.judge import resolved_model
 from cc_transcript.tools import Hunk
 from pydantic import ValidationError
@@ -235,6 +236,29 @@ async def test_enrich_links_a_real_harvest_then_noop_then_extractor_bump_rederiv
     assert (rederived.enriched, rederived.pending) == (1, 0)
     assert len(prompts) == 2
     assert (await store.pairs())[0]["extractor_version"] == EXTRACTOR_VERSION + 1
+
+
+@pytest.mark.integration
+async def test_enrich_records_the_harvest_to_the_shared_corrections_ledger(
+    store: FeedbackStore, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entries = coding_entries()
+    write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
+    await seed_refined(store, monkeypatch, entries)
+
+    async def linker(prompt: str) -> CodeEvidence:
+        return code_evidence(correct=EditSide(old=INCORRECT_NEW, new=CORRECT_NEW))
+
+    monkeypatch.setattr("cc_pushback.enrich.structured_judge", lambda *_, **__: linker)
+    report = await enrich(store)
+    assert report.corrections == 1
+
+    edit_input = {"file_path": "/repo/app.py", "old_string": INCORRECT_OLD, "new_string": INCORRECT_NEW}
+    (row,) = CorrectionLog.open().by_digest(SessionId(SESSION), incorrect_digest=tool_digest("Edit", edit_input))
+    assert (row.source, row.incorrect_file) == ("cc-pushback", "/repo/app.py")
+    assert (row.incorrect_old, row.incorrect_new) == (INCORRECT_OLD, INCORRECT_NEW)
+    assert (row.correction_origin, row.correction_old, row.correction_new) == ("session", INCORRECT_NEW, CORRECT_NEW)
+    assert row.overlap == 1.0 and row.extractor_version == EXTRACTOR_VERSION
 
 
 @pytest.mark.integration

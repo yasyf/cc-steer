@@ -22,6 +22,7 @@ def projects_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "claude-projects"
     root.mkdir()
     monkeypatch.setattr(cc_transcript.discovery, "CLAUDE_PROJECTS_DIR", root)
+    monkeypatch.setenv("HOME", str(tmp_path))  # keep the shared ~/.cc-transcript corrections ledger hermetic
     return root
 
 

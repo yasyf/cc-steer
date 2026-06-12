@@ -21,8 +21,9 @@ from typing import TYPE_CHECKING, Literal
 import anyio
 import anyio.to_thread
 from cc_transcript.activity import SessionActivity, meta_of
+from cc_transcript.corrections import CorrectionLog
 from cc_transcript.discovery import TranscriptExpiredError
-from cc_transcript.evidence import EXTRACTOR_VERSION, GitFix, harvest_pairs
+from cc_transcript.evidence import EXTRACTOR_VERSION, GitFix, harvest_pairs, record_harvest
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.judge import resolved_model, structured_judge
 from cc_transcript.mining import DedupKey
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from cc_pushback.store import FeedbackStore
 
 ENRICH_VERSION = 1
+SOURCE = "cc-pushback"
 SENTINEL_INDEX = -1
 HUNK_CHARS = 600
 HUNK_BUDGET = Budget(tool_chars=HUNK_CHARS)
@@ -127,6 +129,7 @@ class EnrichReport:
         code: How many of those grounded the complaint in a concrete edit.
         no_code: How many resolved as no-code (free sentinel or judged).
         git: How many code rows carry a git-history correction.
+        corrections: How many rows landed in the shared ``corrections_v1`` ledger.
         failed: How many rows failed (timeout, parse error) and stay pending.
         pending: How many pair rows remain unenriched after this pass.
     """
@@ -135,6 +138,7 @@ class EnrichReport:
     code: int
     no_code: int
     git: int
+    corrections: int
     failed: int
     pending: int
 
@@ -210,7 +214,7 @@ def repo_of(turn: Turn, anchor: EventRef) -> Path | None:
 
 
 async def resolve_evidence(
-    row: Mapping[str, object], judge: Callable[[str], Awaitable[CodeEvidence]]
+    row: Mapping[str, object], judge: Callable[[str], Awaitable[CodeEvidence]], log: CorrectionLog
 ) -> tuple[CodeEvidence, Source | None, int]:
     match row["session_id"], row["event_uuid"]:
         case (None, _) | (_, None):
@@ -226,6 +230,7 @@ async def resolve_evidence(
     pairs = await anyio.to_thread.run_sync(partial(harvest_pairs, activity, anchor, repo=repo_of(turn, anchor)))
     if not pairs:
         return CodeEvidence(kind="no_code", note=NO_EDITS_NOTE), None, SENTINEL_INDEX
+    record_harvest(log, activity, anchor, pairs, source=SOURCE)
     evidence = await judge(build_enrich_prompt(row, pairs, anchor_turn=turn.index))
     return evidence, correction_source(pairs, evidence), int(str(row["pair_index"]))
 
@@ -237,16 +242,18 @@ async def run_enrichments(
     enrich_version: int,
     tier: TModel,
     concurrency: int,
-) -> tuple[int, int, int, int]:
+    log: CorrectionLog,
+) -> tuple[int, int, int, int, int]:
     judge = structured_judge(CodeEvidence, tier=tier)
     model = resolved_model(tier)
     counts = {"code": 0, "no_code": 0, "git": 0, "failed": 0}
     limiter = anyio.CapacityLimiter(concurrency)
+    recorded_before = log.conn.total_changes
 
     async def worker(row: Mapping[str, object]) -> None:
         async with limiter:
             try:
-                evidence, source, pair_index = await resolve_evidence(row, judge)
+                evidence, source, pair_index = await resolve_evidence(row, judge, log)
             except Exception:
                 counts["failed"] += 1
                 return
@@ -267,7 +274,7 @@ async def run_enrichments(
     async with anyio.create_task_group() as tg:
         for row in rows:
             tg.start_soon(worker, row)
-    return counts["code"], counts["no_code"], counts["git"], counts["failed"]
+    return counts["code"], counts["no_code"], counts["git"], counts["failed"], log.conn.total_changes - recorded_before
 
 
 async def enrich(
@@ -282,7 +289,9 @@ async def enrich(
     ``no_code`` sentinel (``pair_index=-1``) covering the whole refine generation.
     Evidence keys to the refine generation it annotates, so a refine re-run
     resurfaces its new pairs here automatically; so does bumping the platform's
-    :data:`~cc_transcript.evidence.EXTRACTOR_VERSION`.
+    :data:`~cc_transcript.evidence.EXTRACTOR_VERSION`. The deterministic harvest
+    behind each pair also lands in the shared ``corrections_v1`` ledger
+    (``~/.cc-transcript/corrections.db``) for every consumer to join.
 
     Args:
         store: The open feedback store.
@@ -291,16 +300,24 @@ async def enrich(
         concurrency: The maximum number of concurrent ``claude`` subshells.
 
     Returns:
-        The pass's enriched/code/no_code/git/failed/pending counts.
+        The pass's enriched/code/no_code/git/corrections/failed/pending counts.
     """
     model = resolved_model(tier)
     rows = await store.unenriched(
         enrich_version=ENRICH_VERSION, enrich_model=model, extractor_version=EXTRACTOR_VERSION, limit=limit
     )
-    code, no_code, git, failed = await run_enrichments(
-        store, rows, enrich_version=ENRICH_VERSION, tier=tier, concurrency=concurrency
+    code, no_code, git, failed, corrections = await run_enrichments(
+        store, rows, enrich_version=ENRICH_VERSION, tier=tier, concurrency=concurrency, log=CorrectionLog.open()
     )
     pending = len(
         await store.unenriched(enrich_version=ENRICH_VERSION, enrich_model=model, extractor_version=EXTRACTOR_VERSION)
     )
-    return EnrichReport(enriched=code + no_code, code=code, no_code=no_code, git=git, failed=failed, pending=pending)
+    return EnrichReport(
+        enriched=code + no_code,
+        code=code,
+        no_code=no_code,
+        git=git,
+        corrections=corrections,
+        failed=failed,
+        pending=pending,
+    )

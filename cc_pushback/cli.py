@@ -367,6 +367,7 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
         f"enriched {report.enriched} pairs ({report.code} code, {report.no_code} no_code, "
         f"{report.git} git-sourced, {report.failed} failed), {report.pending} pending"
     )
+    click.echo(f"recorded {report.corrections} corrections to the shared ledger (~/.cc-transcript/corrections.db)")
 
 
 @main.command()
