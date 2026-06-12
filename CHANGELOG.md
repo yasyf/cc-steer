@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0]
 
 ### Changed
 - Rebuilt on the cc-transcript 2.0 platform (`cc_transcript.mining` / `judge` /
