@@ -7,14 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0]
 
 ### Changed
-- Requires cc-transcript `>=3.0,<4` and adopts its 3.0 APIs: a candidate's
-  de-noising signal is always present (`Sample.signal` is required), and the
-  context wire schema is `cc-transcript.context/2`.
-
-### Removed
-- The `migrate-corpus` command and the `cc_pushback.migrate` module
-  (`migrate_corpus`, `MigrationReport`, `window_from_snapshot`). Greenfield: no
-  migration path and no legacy corpora — a fresh store is created on first scan.
+- Requires cc-transcript `>=3.0,<4`; a candidate's de-noising signal is always
+  present (`Sample.signal` is required).
 
 ## [0.2.0]
 
