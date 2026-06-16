@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+### Changed
+- Requires cc-transcript `>=3.0,<4` and adopts its 3.0 APIs: a candidate's
+  de-noising signal is always present (`Sample.signal` is required), and the
+  context wire schema is `cc-transcript.context/2`.
+
+### Removed
+- The `migrate-corpus` command and the `cc_pushback.migrate` module
+  (`migrate_corpus`, `MigrationReport`, `window_from_snapshot`). Greenfield: no
+  migration path and no legacy corpora — a fresh store is created on first scan.
+
 ## [0.2.0]
 
 ### Changed

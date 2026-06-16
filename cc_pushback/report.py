@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cc_transcript.context import ContextWindow
-from cc_transcript.mining import NOISE_FLOOR, effective_confidence
+from cc_transcript.mining import NOISE_FLOOR
 from cc_transcript.mining.confidence import from_payload
 
 from cc_pushback.claude import claude_available, run_claude
@@ -157,7 +157,7 @@ class Sample:
     window: ContextWindow
     origin_path: str | None
     session_id: str | None
-    signal: CandidateSignal | None = None
+    signal: CandidateSignal
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> Sample:
@@ -172,7 +172,7 @@ class Sample:
             window=ContextWindow.from_json(str(row["context_json"])),
             origin_path=str(row["origin_path"]) if row["origin_path"] else None,
             session_id=str(row["session_id"]) if row["session_id"] else None,
-            signal=from_payload(payload.get("signal")),
+            signal=from_payload(payload["signal"]),
         )
 
 
@@ -445,7 +445,7 @@ class Summary:
 
 
 def is_noise(sample: Sample) -> bool:
-    return effective_confidence(sample.signal) < NOISE_FLOOR
+    return sample.signal.confidence < NOISE_FLOOR
 
 
 def project_label(origin_path: str) -> str:

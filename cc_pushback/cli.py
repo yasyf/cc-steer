@@ -369,29 +369,6 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     )
 
 
-@main.command(name="migrate-corpus")
-@click.option(
-    "--db",
-    type=click.Path(dir_okay=False, path_type=Path),
-    default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
-)
-@coro
-async def migrate_corpus_(db: Path | None) -> None:
-    """Convert a pre-2.0 corpus in place to the cc-transcript 2.0 shapes.
-
-    One-time and idempotent: legacy ``context_json`` snapshots become
-    ``cc-transcript.context/1`` documents (previews only, summary fidelity,
-    ``origin='migrated'``), the ``event_uuid`` and ``triage.fidelity`` columns
-    are added, and rows already in the new schema are skipped.
-    """
-    from cc_pushback.migrate import migrate_corpus
-
-    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        report = await migrate_corpus(store)
-    click.echo(f"migrated {report.migrated} rows ({report.skipped} already current)")
-
-
 @main.command()
 @click.option("--jsonl", is_flag=True, help="Emit full pairs as JSON lines for fine-tuning export.")
 @click.option(

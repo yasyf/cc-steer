@@ -3,17 +3,15 @@
 Running this module as a script regenerates ``tests/fixtures/build_prompt_2_0.txt``
 from the current :func:`cc_pushback.triage.build_prompt`; the regression test in
 ``tests/test_triage.py`` asserts the rendering reproduces the file byte-for-byte.
-The fixture covers every rendering branch of the 2.0 window pipeline: a denial
+The fixture covers every rendering branch of the window pipeline: a denial
 candidate whose trigger turn carries a >1500-char Edit rendered unclipped under the
 generous trigger budget, a transcript-message candidate whose long surrounding
-turns clip under the moderate budget, a candidate whose transcript is gone (the
-labeled summary-preview fallback), and a window migrated from a legacy
-``ContextSnapshot`` (anchorless, previews only).
+turns clip under the moderate budget, and a candidate whose transcript is gone (the
+labeled summary-preview fallback).
 """
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,7 +20,6 @@ import anyio
 import cc_transcript.discovery
 
 from cc_pushback.detectors import detect
-from cc_pushback.migrate import window_from_snapshot
 from cc_pushback.triage import AUDIT_PROMPT, JUDGE_PROMPT, build_prompt
 from tests.builders import (
     SESSION,
@@ -86,38 +83,10 @@ def expired_row() -> dict[str, object]:
     return row_of(candidate)
 
 
-def migrated_row() -> dict[str, object]:
-    snapshot = json.dumps(
-        {
-            "before": [
-                {"role": "user", "text": "please clean up the build pipeline", "tool_calls": [], "tool_inputs": []},
-                {
-                    "role": "assistant",
-                    "text": "running the cleanup",
-                    "tool_calls": ["Bash", "Edit"],
-                    "tool_inputs": ["rm -rf build && make all"],
-                },
-            ],
-            "trigger": {
-                "role": "assistant",
-                "text": "force pushing now",
-                "tool_calls": ["Bash"],
-                "tool_inputs": ["git push --force origin main"],
-            },
-            "after": [{"role": "tool", "text": "exit status 1", "tool_calls": [], "tool_inputs": []}],
-        }
-    )
-    return {
-        "source_kind": "transcript_message",
-        "context_json": window_from_snapshot(snapshot, None).to_json(),
-        "text": "no, stop — dont force push",
-    }
-
-
 async def render(root: Path) -> str:
     entries = session_entries()
     write_transcript(root / "proj" / f"{SESSION}.jsonl", entries)
-    rows = [*detected_rows(parse(entries)), expired_row(), migrated_row()]
+    rows = [*detected_rows(parse(entries)), expired_row()]
     return "\n\n########\n\n".join(
         [(await build_prompt(template, row))[0] for row in rows for template in (JUDGE_PROMPT, AUDIT_PROMPT)]
     )

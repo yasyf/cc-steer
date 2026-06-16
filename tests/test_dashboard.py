@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 from cc_transcript.context import ContextWindow, TurnRef
+from cc_transcript.ids import EventRef, EventUuid, SessionId
+from cc_transcript.mining import firm
+from cc_transcript.mining.confidence import to_payload
 
 from cc_pushback.dashboard import build_app
 from cc_pushback.enrich import CodeEvidence, EditSide
@@ -53,13 +57,12 @@ def prow(index: int, verbatim: str) -> RefinedPairRow:
 
 def preview_window(trigger: str | None) -> ContextWindow:
     return ContextWindow(
-        anchor=None,
+        anchor=EventRef(SessionId("s1"), EventUuid("u1")),
         before=(),
         trigger=None if trigger is None else TurnRef(role="assistant", refs=(), preview=trigger, tool_digests=()),
         after=(),
         fidelity="summary",
         preview_chars=200,
-        origin="migrated",
     )
 
 
@@ -75,6 +78,7 @@ def lineage(
         window=preview_window("I vendored the lib"),
         origin_path="/h-Code-proj/s.jsonl",
         session_id="s",
+        signal=firm("transcript_message"),
     )
     return Lineage(sample=sample, dedup_key="k1", verdicts=tuple(verdicts), pairs=tuple(pairs))
 
@@ -224,6 +228,7 @@ async def seed(store: FeedbackStore) -> None:
     conn = store.store.conn
     trigger = preview_window("I vendored it").to_json()
     empty = preview_window(None).to_json()
+    payload_json = json.dumps({"signal": to_payload(firm("transcript_message"))})
     rows = [
         ("k1", "no, dont vendor it; bake it in", trigger),
         ("k2", "run the tests not the build", empty),
@@ -235,7 +240,7 @@ async def seed(store: FeedbackStore) -> None:
             "occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (key, "transcript_message", "s", f"u{i}", f"2026-01-0{i + 1}T00:00:00",
-             text, "{}", ctx, "0.1", "2026-01-01T00:00:00", "/h-Code-proj/s.jsonl"),
+             text, payload_json, ctx, "0.1", "2026-01-01T00:00:00", "/h-Code-proj/s.jsonl"),
         )
 
     def verdict(category: str) -> Verdict:

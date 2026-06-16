@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from cc_transcript.context import ContextWindow, TurnRef
+from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import firm, noise, weak
+from cc_transcript.mining.confidence import to_payload
 
 from cc_pushback.report import (
     Sample,
@@ -25,13 +28,12 @@ OTHER = "/h/.claude/projects/-Users-y-projects-other/sess.jsonl"
 
 def preview_window(*previews: str) -> ContextWindow:
     return ContextWindow(
-        anchor=None,
+        anchor=EventRef(SessionId("s1"), EventUuid("u1")),
         before=tuple(TurnRef(role="user", refs=(), preview=preview, tool_digests=()) for preview in previews),
         trigger=None,
         after=(),
         fidelity="summary",
         preview_chars=200,
-        origin="migrated",
     )
 
 
@@ -44,7 +46,7 @@ def make_sample(
     occurred_at: str = "2026-05-01T12:00:00+00:00",
     session: str = "s1",
     origin: str = PROJ,
-    signal: CandidateSignal | None = None,
+    signal: CandidateSignal = firm("transcript_message"),
 ) -> Sample:
     return Sample(
         id=event_id,
@@ -65,10 +67,9 @@ def make_sample(
         pytest.param(noise("empty"), True, id="none-confidence-is-noise"),
         pytest.param(weak("bare_marker"), False, id="low-confidence-survives"),
         pytest.param(firm("transcript_message"), False, id="medium-confidence-survives"),
-        pytest.param(None, False, id="missing-signal-defaults-medium"),
     ],
 )
-def test_is_noise(signal: CandidateSignal | None, expected: bool) -> None:
+def test_is_noise(signal: CandidateSignal, expected: bool) -> None:
     assert is_noise(make_sample(1, "transcript_message", "any text", signal=signal)) is expected
 
 
@@ -175,12 +176,13 @@ def test_parse_summary_json(raw: str, ok: bool) -> None:
 
 def test_sample_from_row_round_trips() -> None:
     window = preview_window("hello there")
+    payload = {"detector": "plan_reentry", "signal": to_payload(firm("plan_reentry"))}
     row = {
         "id": 5,
         "source_kind": "plan_review",
         "occurred_at": "2026-05-01T00:00:00+00:00",
         "text": "do it differently",
-        "payload_json": '{"detector": "plan_reentry"}',
+        "payload_json": json.dumps(payload),
         "context_json": window.to_json(),
         "event_uuid": "u5",
         "origin_path": PROJ,
@@ -188,5 +190,6 @@ def test_sample_from_row_round_trips() -> None:
     }
     sample = Sample.from_row(row)
     assert sample.id == 5
-    assert sample.payload == {"detector": "plan_reentry"}
+    assert sample.payload == payload
     assert sample.window == window
+    assert sample.signal == firm("plan_reentry")

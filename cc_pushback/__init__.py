@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from cc_pushback.detectors import Detector, detect
-from cc_pushback.migrate import MigrationReport, migrate_corpus
 from cc_pushback.models import DedupKey, FeedbackCandidate, SourceKind, dedup_key
 from cc_pushback.scan import ScanReport, scan
 from cc_pushback.spec import PUSHBACK_SPEC
@@ -18,10 +17,8 @@ __all__ = [
     "Detector",
     "FeedbackCandidate",
     "FeedbackStore",
-    "MigrationReport",
     "ScanReport",
     "dedup_key",
     "detect",
-    "migrate_corpus",
     "scan",
 ]

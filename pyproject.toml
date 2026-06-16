@@ -1,6 +1,6 @@
 [project]
 name = "cc-pushback"
-version = "0.2.0"
+version = "0.3.0"
 description = "Learn your pushback style from past Claude Code feedback and code reviews, and replicate it with a language model."
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -18,7 +18,7 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "anyio>=4.4",
-    "cc-transcript>=2.0,<3",
+    "cc-transcript>=3.0,<4",
     "click>=8",
     "fastapi>=0.115",
     "pydantic>=2",
