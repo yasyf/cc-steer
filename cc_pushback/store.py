@@ -188,7 +188,7 @@ FROM refinement r
 JOIN gens ON gens.dedup_key = r.dedup_key AND gens.prompt_version = r.prompt_version
          AND gens.model = r.model AND gens.refined_at = r.refined_at AND gens.g = 1
 JOIN feedback_events e ON e.dedup_key = r.dedup_key
-LEFT JOIN accepted_pushback ap ON ap.dedup_key = r.dedup_key
+JOIN accepted_pushback ap ON ap.dedup_key = r.dedup_key
 {EVIDENCE_JOIN}
 ORDER BY e.id, r.pair_index;
 """

@@ -250,6 +250,9 @@ async def test_auditor_only_event_is_not_accepted_pushback(store: FeedbackStore)
 @pytest.mark.integration
 async def test_record_refinement_is_idempotent(store: FeedbackStore) -> None:
     key = (await seeded_keys(store))[0]
+    await store.record_verdict(
+        key, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
     await store.record_refinement(
         key, refinement("use a generator", "stop hardcoding"), prompt_version=1, model="sonnet"
     )
@@ -349,6 +352,21 @@ async def test_refined_pairs_latest_generation_wins(store: FeedbackStore) -> Non
     assert rows[0]["prompt_version"] == 2
     assert rows[0]["category"] == "wrong_approach"
     assert rows[0]["action"] == "ran a tool"
+
+
+@pytest.mark.integration
+async def test_refined_pairs_excludes_events_the_latest_judge_now_rejects(store: FeedbackStore) -> None:
+    key = (await seeded_keys(store))[0]
+    await store.record_verdict(
+        key, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
+    await store.record_refinement(key, refinement("a", "b"), prompt_version=1, model="sonnet")
+    assert len(await store.pairs()) == 2  # accepted at v1; its v1 refinement is part of the deliverable
+
+    await store.record_verdict(
+        key, verdict("status_update"), role=JUDGE, prompt_version=2, model="sonnet", fidelity="full"
+    )
+    assert await store.pairs() == []  # latest judge (v2) flipped it to noise; the stale v1 pairs drop out
 
 
 def code_evidence(note: str = "n") -> CodeEvidence:
