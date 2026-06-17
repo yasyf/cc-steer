@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cc-pushback dashboard</title>
+<link rel="stylesheet" href="/static/base.css">
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>cc-pushback — training pairs</h1>
+    <div class="sub">refined pairs &amp; their lineage</div>
+  </div>
+  <div class="head-right">
+    <span id="stat-strip"></span>
+    <button id="stats-toggle">stats ▾</button>
+  </div>
+</header>
+<section id="stats" class="hidden"></section>
+<div class="app">
+  <aside id="filters"></aside>
+  <main>
+    <div id="toolbar">
+      <div class="views">
+        <button class="view-btn active" data-view="pairs">refined pairs</button>
+        <button class="view-btn" data-view="candidates">all candidates</button>
+      </div>
+      <input id="search" type="search" placeholder="search…">
+      <span id="count"></span>
+    </div>
+    <div id="active"></div>
+    <div id="list"></div>
+  </main>
+</div>
+<div id="backdrop"></div>
+<aside id="detail">
+  <div id="detail-bar"><button id="detail-close">✕</button></div>
+  <div id="detail-body"><p class="muted">select a row to see its lineage</p></div>
+</aside>
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

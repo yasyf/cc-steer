@@ -1,10 +1,11 @@
-"""Decode the feedback corpus and render it for the dashboard.
+"""Decode the feedback corpus into the data model the dashboard serves.
 
 Holds the data model the dashboard serves — :class:`Sample`, :class:`VerdictRow`,
 :class:`RefinedPairRow` with its :class:`EvidenceRow`, and the :class:`Lineage` that
-stitches a candidate's whole pipeline trail together — plus the corpus :class:`Summary` (written by the ``claude``
-CLI when available, falling back to heuristics) and the HTML renderers for a
-candidate's five-stage lineage. The FastAPI surface lives in :mod:`cc_pushback.dashboard`.
+stitches a candidate's whole pipeline trail together — plus the corpus
+:class:`Summary` (written by the ``claude`` CLI when available, falling back to
+heuristics). The FastAPI surface and the JSON shapes it serves — including the
+client-rendered lineage — live in :mod:`cc_pushback.dashboard`.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from html import escape
 from itertools import zip_longest
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from typing import Any, Literal
 
-    from cc_transcript.context import TurnRef
     from cc_transcript.mining import CandidateSignal
 
     from cc_pushback.evaluate import GoldenRow
@@ -46,90 +45,6 @@ Return ONLY a JSON object, with no prose around it, of exactly this shape:
 {"narrative": "<2-4 sentences on the developer's pushback style and recurring themes>",
  "highlights": [{"id": <sample id>, "why": "<one short clause on why it is representative>"}]}
 Pick 8-12 highlights, only from the provided sample ids, favoring variety across feedback kinds.
-"""
-
-CSS = """
-:root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;--accent:#58a6ff}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
-h1,h2{font-weight:600}
-header.top{padding:24px;border-bottom:1px solid var(--border)}
-header.top .sub{color:var(--muted)}
-section{padding:16px 24px}
-.stat-cards{display:flex;gap:12px;flex-wrap:wrap}
-.stat{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px}
-.stat .n{font-size:20px;font-weight:600}
-.stat .l{color:var(--muted);font-size:12px}
-table.dist{border-collapse:collapse;margin-top:14px}
-table.dist td{padding:2px 10px 2px 0;white-space:nowrap}
-.bar{display:inline-block;height:10px;background:var(--accent);border-radius:3px;vertical-align:middle}
-.months{display:flex;gap:3px;align-items:flex-end;margin-top:14px}
-.mcol{display:flex;flex-direction:column;align-items:center;justify-content:flex-end}
-.mcol .m{width:22px;background:var(--accent);border-radius:3px 3px 0 0}
-.mcol span{font-size:9px;color:var(--muted);margin-top:3px}
-.narrative{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);
-border-radius:8px;padding:14px 18px;max-width:80ch;margin-top:14px}
-#controls{position:sticky;top:0;background:var(--bg);display:flex;gap:8px;align-items:center;
-flex-wrap:wrap;border-bottom:1px solid var(--border);z-index:2}
-.kind-btn{background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:14px;
-padding:4px 12px;cursor:pointer;font:inherit}
-.kind-btn.active{background:var(--accent);color:#0d1117;border-color:var(--accent)}
-#search{flex:1;min-width:200px;background:var(--panel);color:var(--fg);border:1px solid var(--border);
-border-radius:6px;padding:6px 10px;font:inherit}
-#count{color:var(--muted)}
-label.noise{color:var(--muted);display:flex;gap:4px;align-items:center;cursor:pointer}
-.card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin:12px 0}
-.card header{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
-.badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#21262d;border:1px solid var(--border)}
-.badge-transcript_message{color:#8b949e}.badge-review_comment{color:#7ee787}.badge-plan_review{color:#d2a8ff}
-.badge-interrupt_rejection{color:#ff7b72}.badge-superset_issue{color:#ffa657}
-time{color:var(--muted);font-size:12px}
-.chip{font-size:11px;color:var(--muted);background:#21262d;border-radius:6px;padding:1px 6px}
-.text pre{white-space:pre-wrap;word-break:break-word;margin:0;font:inherit}
-details.ctx{margin-top:10px}
-details.ctx summary{color:var(--accent);cursor:pointer}
-.turn{border-left:2px solid var(--border);padding:4px 0 4px 10px;margin:6px 0}
-.turn .role{font-size:10px;text-transform:uppercase;color:var(--muted)}
-.turn .tools{font-size:10px;color:var(--accent);margin-left:6px}
-.turn pre{white-space:pre-wrap;word-break:break-word;margin:2px 0 0;font:inherit;color:var(--muted)}
-.turn-user pre{color:var(--fg)}
-.turn-trigger{border-left-color:var(--accent)}
-.turn-trigger .role::after{content:" \\2190 pushed back on";color:var(--accent)}
-.why{color:var(--accent);font-style:italic;margin:0 0 6px}
-.highlight{margin:12px 0}
-.lineage{display:flex;flex-direction:column;gap:14px}
-.stage{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px}
-.stage h3{margin:0 0 10px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
-.stage-detector{border-left:3px solid var(--muted)}
-.stage-judge{border-left:3px solid var(--accent)}
-.stage-auditor{border-left:3px solid #d2a8ff}
-.stage-refiner{border-left:3px solid #7ee787}
-.stage-golden{border-left:3px solid #ffa657}
-.verdict,.pair{border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin:8px 0}
-.vhead{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
-.vsum,.vrat,.paction,.pcomplaint{white-space:pre-wrap;word-break:break-word;margin:2px 0;font:inherit}
-.vrat,.pcomplaint{color:var(--muted)}
-.pverbatim{border-left:2px solid #7ee787;margin:6px 0;padding:2px 0 2px 10px;color:var(--fg)}
-.orig pre{white-space:pre-wrap;word-break:break-word;margin:0 0 8px;color:var(--muted)}
-mark{background:#7ee78733;color:var(--fg);border-radius:3px}
-.evidence{margin-top:8px}
-.panes{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
-.pane{flex:1;min-width:220px;border:1px solid var(--border);border-radius:6px;padding:6px 8px}
-.pane .plabel{font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
-.pane .del,.pane .ins{white-space:pre-wrap;word-break:break-word;padding:0 4px;border-radius:3px}
-.pane .del{background:#ff7b7222}
-.pane .ins{background:#7ee78722}
-.pane .del::before{content:"- ";color:#ff7b72}
-.pane .ins::before{content:"+ ";color:#7ee787}
-.chip-git{color:#ffa657}
-.flip{font-size:11px;color:#ffa657}
-.agree{font-size:11px;color:#7ee787}
-.disagree{font-size:11px;color:#ff7b72}
-.muted{color:var(--muted)}
-.badge.pass{color:#7ee787}.badge.fail{color:#ff7b72}
-.cat-wrong_approach{color:#ff7b72}.cat-incorrect_change{color:#ffa657}.cat-unwanted_action{color:#f0883e}
-.cat-style_violation{color:#d2a8ff}.cat-premature{color:#79c0ff}
-.cat-operational_directive,.cat-status_update,.cat-new_task,.cat-question,.cat-other{color:#8b949e}
 """
 
 
@@ -613,132 +528,3 @@ async def build_summary(samples: Sequence[Sample], *, use_llm: bool, model: str)
 
 def truncate(text: str, limit: int = CONTEXT_TURN_LIMIT) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
-
-
-def render_turn(ref: TurnRef, *, is_trigger: bool = False) -> str:
-    cls = f"turn turn-{ref.role}" + (" turn-trigger" if is_trigger else "")
-    tools = f'<span class="tools">{len(ref.tool_digests)} tool calls</span>' if ref.tool_digests else ""
-    return (
-        f'<div class="{cls}"><span class="role">{escape(ref.role)}</span>{tools}'
-        f"<pre>{escape(truncate(ref.preview))}</pre></div>"
-    )
-
-
-def render_context(window: ContextWindow) -> str:
-    turns = [
-        *(render_turn(ref) for ref in window.before),
-        *(() if window.trigger is None else (render_turn(window.trigger, is_trigger=True),)),
-        *(render_turn(ref) for ref in window.after),
-    ]
-    if not turns:
-        return ""
-    return f'<details class="ctx"><summary>context ({len(turns)} turns)</summary>{"".join(turns)}</details>'
-
-
-def meta_chips(sample: Sample) -> str:
-    payload = sample.payload
-    chips = [str(payload[key]) for key in ("detector", "format", "tool", "severity", "track") if payload.get(key)]
-    if file := payload.get("file"):
-        line = payload.get("line_start") or payload.get("line")
-        chips.append(f"{file}:{line}" if line else str(file))
-    if sample.origin_path:
-        chips.append(project_label(sample.origin_path))
-    return "".join(f'<span class="chip">{escape(chip)}</span>' for chip in chips)
-
-
-def highlight_spans(text: str, spans: Sequence[str]) -> str:
-    escaped = escape(text)
-    for span in spans:
-        escaped = escaped.replace(escape(span), f"<mark>{escape(span)}</mark>")
-    return escaped
-
-
-def render_verdict_stage(verdict: VerdictRow, *, flipped: bool = False) -> str:
-    flag = '<span class="flip">flipped across versions</span>' if flipped else ""
-    return (
-        f'<div class="verdict stage-{escape(verdict.role)}"><div class="vhead">'
-        f'<span class="badge cat-{escape(verdict.category)}">{escape(verdict.category)}</span>'
-        f'<span class="chip">{escape(verdict.role)} v{verdict.prompt_version} · {escape(verdict.model)}</span>'
-        f'<span class="chip">conf {verdict.confidence:.2f}</span>'
-        f'<span class="chip">{golden_label(verdict.is_pushback)}</span>{flag}</div>'
-        f'<pre class="vsum">{escape(truncate(verdict.what_claude_did))}</pre>'
-        f'<pre class="vrat">{escape(truncate(verdict.rationale))}</pre></div>'
-    )
-
-
-def render_diff_pane(label: str, old: str, new: str) -> str:
-    lines = "".join(
-        f'<div class="{cls}">{escape(line)}</div>'
-        for cls, side in (("del", old), ("ins", new))
-        for line in side.split("\n")
-    )
-    return f'<div class="pane"><div class="plabel">{escape(label)}</div>{lines}</div>'
-
-
-def render_evidence(evidence: EvidenceRow) -> str:
-    git = '<span class="chip chip-git">git</span>' if evidence.source == "git" else ""
-    panes = "".join(
-        (
-            render_diff_pane("incorrect", *evidence.incorrect),
-            *(() if evidence.correct is None else (render_diff_pane("correct", *evidence.correct),)),
-        )
-    )
-    return (
-        f'<div class="evidence"><div class="vhead"><span class="chip">{escape(evidence.file_path)}</span>{git}</div>'
-        f'<div class="panes">{panes}</div><div class="muted">{escape(evidence.note)}</div></div>'
-    )
-
-
-def render_refiner_stage(pairs: Sequence[RefinedPairRow], original: str) -> str:
-    if not pairs:
-        return '<p class="muted">not yet refined</p>'
-    cards = "".join(
-        f'<div class="pair"><div class="vhead"><span class="chip">pair {pair.pair_index}</span>'
-        f'<span class="chip">v{pair.prompt_version} · {escape(pair.model)}</span></div>'
-        f'<pre class="paction">{escape(truncate(pair.action))}</pre>'
-        f'<blockquote class="pverbatim">{escape(pair.complaint_verbatim)}</blockquote>'
-        f'<pre class="pcomplaint">{escape(pair.complaint)}</pre>'
-        f"{'' if pair.evidence is None else render_evidence(pair.evidence)}</div>"
-        for pair in pairs
-    )
-    original_html = highlight_spans(original, [pair.complaint_verbatim for pair in pairs])
-    return f'<div class="orig"><pre>{original_html}</pre></div>{cards}'
-
-
-def render_lineage_detail(lineage: Lineage, golden_map: Mapping[str, GoldenRow]) -> str:
-    """Renders one candidate's full pipeline trail as a five-stage rail."""
-    sample = lineage.sample
-    judge_html = "".join(
-        render_verdict_stage(verdict, flipped=lineage.flipped) for verdict in lineage.judge_verdicts
-    )
-    match lineage.auditor_verdict:
-        case None:
-            auditor_html = '<p class="muted">not audited</p>'
-        case auditor:
-            agree = lineage.agreement
-            auditor_html = render_verdict_stage(auditor) + f'<span class="{agree}">{agree} with judge</span>'
-    match golden_status(lineage.dedup_key, lineage.final, golden_map):
-        case None:
-            golden_html = '<p class="muted">not in golden set</p>'
-        case verdict:
-            expected = golden_label(golden_map[lineage.dedup_key].expected)
-            golden_html = f'<span class="badge {verdict}">golden {verdict} · expected {escape(expected)}</span>'
-    return "".join(
-        [
-            '<div class="lineage">',
-            '<section class="stage stage-detector"><h3>1 · detector</h3>',
-            f'<header class="card-head"><span class="badge badge-{escape(sample.source_kind)}">'
-            f"{escape(sample.source_kind)}</span><time>{escape(sample.occurred_at[:19])}</time>"
-            f"{meta_chips(sample)}</header>",
-            f'<div class="text"><pre>{escape(sample.text)}</pre></div>{render_context(sample.window)}</section>',
-            '<section class="stage stage-judge"><h3>2 · judge</h3>',
-            judge_html or '<p class="muted">unjudged</p>',
-            "</section>",
-            f'<section class="stage stage-auditor"><h3>3 · auditor</h3>{auditor_html}</section>',
-            '<section class="stage stage-refiner"><h3>4 · refiner — atomic pairs</h3>',
-            render_refiner_stage(lineage.pairs, sample.text),
-            "</section>",
-            f'<section class="stage stage-golden"><h3>5 · golden gate</h3>{golden_html}</section>',
-            "</div>",
-        ]
-    )

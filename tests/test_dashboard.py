@@ -10,7 +10,7 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import firm
 from cc_transcript.mining.confidence import to_payload
 
-from cc_pushback.dashboard import build_app, language_of
+from cc_pushback.dashboard import build_app, language_of, serialize_lineage
 from cc_pushback.enrich import CodeEvidence, EditSide
 from cc_pushback.evaluate import GoldenRow
 from cc_pushback.refine import RefinedPair, Refinement
@@ -22,7 +22,6 @@ from cc_pushback.report import (
     VerdictRow,
     build_summary,
     golden_status,
-    render_lineage_detail,
 )
 from cc_pushback.triage import JUDGE, Verdict
 
@@ -195,7 +194,7 @@ def test_golden_status() -> None:
     assert golden_status("k1", None, golden_map) is None
 
 
-def test_render_lineage_detail_has_five_stages_and_escapes() -> None:
+def test_serialize_lineage_shapes_five_stages_and_keeps_raw_text() -> None:
     lin = lineage(
         [vrow(JUDGE, 1, "status_update", is_pushback=False), vrow(JUDGE, 2, "wrong_approach", is_pushback=True)],
         [prow(0, "dont vendor")],
@@ -203,20 +202,22 @@ def test_render_lineage_detail_has_five_stages_and_escapes() -> None:
     )
     auditor = lin.verdicts + (vrow("auditor", 2, "status_update", is_pushback=False),)
     lin = Lineage(sample=lin.sample, dedup_key=lin.dedup_key, verdicts=auditor, pairs=lin.pairs)
-    html = render_lineage_detail(lin, {})
+    data = serialize_lineage(lin, {})
 
-    for token in ("stage-detector", "stage-judge", "stage-auditor", "stage-refiner", "stage-golden"):
-        assert token in html
-    assert "flipped across versions" in html  # judge side changed v1 -> v2
-    assert "disagree with judge" in html  # auditor said noise, final judge pushback
-    assert "wrong_approach" in html
-    assert "<mark>dont vendor</mark>" in html  # complaint_verbatim highlighted in the original
-    assert "not in golden set" in html
-    assert "&lt;script&gt;alert(1)" in html and "<script>alert(1)" not in html
-    assert 'class="evidence"' not in html and 'class="pane"' not in html  # unenriched pair, no diff section
+    assert set(data) == {"detector", "judge", "auditor", "refiner", "golden"}
+    assert [verdict["prompt_version"] for verdict in data["judge"]] == [1, 2]
+    assert all(verdict["flipped"] for verdict in data["judge"])  # judge side changed v1 -> v2
+    assert data["judge"][-1]["category"] == "wrong_approach"
+    assert data["auditor"]["agreement"] == "disagree"  # auditor noise vs final pushback
+    assert data["refiner"]["spans"] == ["dont vendor"]  # the complaint the client highlights in the original
+    assert data["refiner"]["pairs"][0]["evidence"] is None  # unenriched pair, no diff
+    assert data["golden"] is None
+    assert data["detector"]["context"]["turns"][0]["is_trigger"] is True
+    # raw, un-escaped text — the browser escapes at render time, not the server
+    assert data["detector"]["text"] == "<script>alert(1)</script> dont vendor it"
 
 
-def test_render_lineage_detail_renders_the_full_untruncated_diff() -> None:
+def test_serialize_lineage_keeps_the_full_untruncated_diff() -> None:
     long_call = "danger(" + "x" * 900 + ")"
     pair = RefinedPairRow(
         pair_index=0, action="vendored the dep", complaint_verbatim="dont vendor", complaint="c0",
@@ -229,14 +230,13 @@ def test_render_lineage_detail_renders_the_full_untruncated_diff() -> None:
             source="git",
         ),
     )
-    html = render_lineage_detail(lineage([vrow(JUDGE, 1, "wrong_approach", is_pushback=True)], [pair]), {})
-    assert '<div class="del">if x &lt; 1:</div>' in html  # escaped, split per line
-    assert "x" * 900 in html  # full content, no truncation
-    assert html.count('class="pane"') == 2  # incorrect and correct panes
-    assert '<div class="plabel">incorrect</div>' in html and '<div class="plabel">correct</div>' in html
-    assert '<div class="ins">safer()</div>' in html
-    assert '<span class="chip">/repo/a.py</span>' in html
-    assert '<span class="chip chip-git">git</span>' in html
+    data = serialize_lineage(lineage([vrow(JUDGE, 1, "wrong_approach", is_pushback=True)], [pair]), {})
+    evidence = data["refiner"]["pairs"][0]["evidence"]
+    assert evidence["file_path"] == "/repo/a.py" and evidence["source"] == "git"
+    assert evidence["incorrect"]["old"] == f"if x < 1:\n    {long_call}"  # full, untruncated, unescaped
+    assert "x" * 900 in evidence["incorrect"]["old"]
+    assert evidence["correct"] == {"old": "safe()", "new": "safer()"}
+    assert evidence["note"] == "faults the danger call"
 
 
 async def seed(store: FeedbackStore) -> None:
@@ -370,11 +370,12 @@ async def test_api_lineage_shows_the_full_diff(store: FeedbackStore) -> None:
         source=None,
     )
     async with await client(store) as http:
-        html = (await http.get("/api/lineage/k1")).json()["detail_html"]
-    assert '<div class="del">bad &lt; worse</div><div class="del">still bad</div>' in html
-    assert "x" * 900 in html  # the full diff, untruncated
-    assert html.count('class="pane"') == 1  # no correction, incorrect pane only
-    assert "chip-git" not in html
+        data = (await http.get("/api/lineage/k1")).json()
+    evidence = data["refiner"]["pairs"][0]["evidence"]
+    assert evidence["incorrect"]["old"] == "bad < worse\nstill bad"  # raw, un-split; the client renders the diff
+    assert "x" * 900 in evidence["incorrect"]["new"]  # the full diff, untruncated
+    assert evidence["correct"] is None  # no correction
+    assert evidence["source"] is None  # not a git fix
 
 
 async def test_api_candidates_covers_every_status(store: FeedbackStore) -> None:
@@ -393,8 +394,10 @@ async def test_api_lineage_renders_detail_and_404s(store: FeedbackStore) -> None
         ok = await http.get("/api/lineage/k1")
         missing = await http.get("/api/lineage/nope")
     assert ok.status_code == 200
-    html = ok.json()["detail_html"]
-    assert "stage-refiner" in html and "turn-trigger" in html and "do not vendor" in html
+    data = ok.json()
+    assert data["detector"]["context"]["turns"][0]["is_trigger"] is True
+    assert data["refiner"]["pairs"][0]["complaint"] == "do not vendor"
+    assert data["judge"][0]["category"] == "wrong_approach"
     assert missing.status_code == 404
 
 
@@ -409,15 +412,25 @@ async def test_api_stats_shape(store: FeedbackStore) -> None:
     assert stats["corpus"]["total"] == 3
 
 
-async def test_root_serves_shell(store: FeedbackStore) -> None:
+async def test_root_serves_index_and_static_assets(store: FeedbackStore) -> None:
     await seed(store)
     async with await client(store) as http:
         page = await http.get("/")
+        main_js = await http.get("/static/js/main.js")
+        filters_js = await http.get("/static/js/filters.js")
+        cards_js = await http.get("/static/js/cards.js")
+        lineage_js = await http.get("/static/js/lineage.js")
+        base_css = await http.get("/static/base.css")
+        dash_css = await http.get("/static/dashboard.css")
     assert page.status_code == 200
     for node in ('id="filters"', 'id="list"', 'id="search"', 'id="active"', 'id="detail"',
                  'id="backdrop"', 'id="stats-toggle"'):
-        assert node in page.text
-    for token in ("GROUPS", "renderFacets", "chipsHtml", "matchRow", "'Language'", "has code"):
-        assert token in page.text  # faceted sidebar + contextual language/evidence facets
-    for token in ("evidenceHtml", "details.diff", "chip-git", ".pane .del", ".pane .ins"):
-        assert token in page.text  # evidence diff surfaces unchanged
+        assert node in page.text  # the static body skeleton
+    for ref in ('href="/static/base.css"', 'href="/static/dashboard.css"', 'src="/static/js/main.js"'):
+        assert ref in page.text  # the page links its assets rather than inlining them
+    assert main_js.status_code == 200 and "text/javascript" in main_js.headers["content-type"]
+    assert all(t in filters_js.text for t in ("GROUPS", "renderFacets", "matchRow", '"Language"', "has code"))
+    assert "evidenceHtml" in cards_js.text  # list-card evidence renderer
+    assert "lineageHtml" in lineage_js.text and "stage-detector" in lineage_js.text  # client lineage renderer
+    assert base_css.status_code == 200 and ".pane .del" in base_css.text and "chip-git" in base_css.text
+    assert dash_css.status_code == 200 and "#filters" in dash_css.text and "#detail" in dash_css.text
