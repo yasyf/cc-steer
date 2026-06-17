@@ -10,7 +10,7 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import firm
 from cc_transcript.mining.confidence import to_payload
 
-from cc_pushback.dashboard import build_app
+from cc_pushback.dashboard import build_app, language_of
 from cc_pushback.enrich import CodeEvidence, EditSide
 from cc_pushback.evaluate import GoldenRow
 from cc_pushback.refine import RefinedPair, Refinement
@@ -122,6 +122,21 @@ def test_refined_pair_row_decodes_code_evidence() -> None:
 
 def test_evidence_row_is_none_for_no_code() -> None:
     assert EvidenceRow.from_row(pair_row(evidence_kind="no_code", evidence_note="not about code")) is None
+
+
+@pytest.mark.parametrize(
+    ("path", "language"),
+    [
+        pytest.param("/repo/a.py", "py", id="py"),
+        pytest.param("/repo/src/UI.TSX", "tsx", id="uppercase-ext"),
+        pytest.param("/repo/main.rs", "rs", id="rs"),
+        pytest.param("/repo/Dockerfile", "dockerfile", id="extensionless"),
+        pytest.param(None, None, id="none"),
+        pytest.param("", None, id="empty"),
+    ],
+)
+def test_language_of(path: str | None, language: str | None) -> None:
+    assert language_of(path) == language
 
 
 @pytest.mark.parametrize(
@@ -289,6 +304,7 @@ async def test_api_pairs_returns_atomic_rows(store: FeedbackStore) -> None:
     assert pair["complaint"] == "do not vendor" and pair["project"] == "proj"
     assert pair["complaint_verbatim"] == "dont vendor it"
     assert pair["evidence"] is None  # unenriched pair, card unchanged
+    assert pair["language"] is None  # no evidence, no language facet value
 
 
 async def test_api_pairs_carries_code_evidence(store: FeedbackStore) -> None:
@@ -310,6 +326,7 @@ async def test_api_pairs_carries_code_evidence(store: FeedbackStore) -> None:
         "incorrect": {"old": "x = eval(s)", "new": "y = eval(t)"},
         "correct": {"old": "y = eval(t)", "new": "y = json.loads(t)"},
     }
+    assert pair["language"] == "py"  # derived from the evidence file extension
 
 
 async def test_api_pairs_clips_evidence_sides_for_the_list(store: FeedbackStore) -> None:
@@ -396,8 +413,11 @@ async def test_root_serves_shell(store: FeedbackStore) -> None:
     await seed(store)
     async with await client(store) as http:
         page = await http.get("/")
-    assert page.status_code == 200 and 'id="list"' in page.text and 'id="search"' in page.text
-    for facet in ('id="cat-filter"', 'id="kind-filter"', 'id="project-filter"', "data-project"):
-        assert facet in page.text
+    assert page.status_code == 200
+    for node in ('id="filters"', 'id="list"', 'id="search"', 'id="active"', 'id="detail"',
+                 'id="backdrop"', 'id="stats-toggle"'):
+        assert node in page.text
+    for token in ("GROUPS", "renderFacets", "chipsHtml", "matchRow", "'Language'", "has code"):
+        assert token in page.text  # faceted sidebar + contextual language/evidence facets
     for token in ("evidenceHtml", "details.diff", "chip-git", ".pane .del", ".pane .ins"):
-        assert token in page.text
+        assert token in page.text  # evidence diff surfaces unchanged
