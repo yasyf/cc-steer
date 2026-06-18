@@ -43,7 +43,7 @@ function evidenceHtml(ev) {
   const git = ev.source === "git" ? '<span class="chip chip-git">git</span>' : "";
   const correct = ev.correct ? diffPane("correct", ev.correct) : "";
   return `<div class="evidence"><div class="vhead"><span class="chip">${esc(ev.file_path)}</span>${git}</div>` +
-    `<div class="panes">${diffPane("incorrect", ev.incorrect)}${correct}</div><div class="muted">${esc(ev.note)}</div></div>`;
+    `<div class="panes">${diffPane("incorrect", ev.incorrect)}${correct}</div></div>`;
 }
 
 function highlightSpans(text, spans) {

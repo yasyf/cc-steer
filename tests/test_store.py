@@ -3,17 +3,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from cc_transcript.corrections import Correction, CorrectionLog
+from cc_transcript.ids import EventUuid, SessionId
 from cc_transcript.mining import FEEDBACK_DDL as BASE_FEEDBACK_DDL
 from cc_transcript.mining import DedupKey
 
 from cc_pushback.detectors import detect
-from cc_pushback.enrich import CodeEvidence, EditSide
 from cc_pushback.refine import RefinedPair, Refinement
 from cc_pushback.store import FEEDBACK_DDL, TRIAGE_DDL
 from cc_pushback.triage import JUDGE, Verdict
 from tests.builders import assistant_tool_use, denial_result, interrupt_result, parse, user_text
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cc_pushback.models import FeedbackCandidate
     from cc_pushback.store import FeedbackStore
 
@@ -369,16 +372,6 @@ async def test_refined_pairs_excludes_events_the_latest_judge_now_rejects(store:
     assert await store.pairs() == []  # latest judge (v2) flipped it to noise; the stale v1 pairs drop out
 
 
-def code_evidence(note: str = "n") -> CodeEvidence:
-    return CodeEvidence(
-        kind="code",
-        file_path="/a.py",
-        incorrect_edit=EditSide(old="bad", new="worse"),
-        correct_edit=EditSide(old="worse", new="good"),
-        note=note,
-    )
-
-
 async def seeded_refined_pair(store: FeedbackStore) -> DedupKey:
     key = (await seeded_keys(store))[0]
     await store.record_verdict(
@@ -390,61 +383,29 @@ async def seeded_refined_pair(store: FeedbackStore) -> DedupKey:
     return key
 
 
-async def record_evidence(
-    store: FeedbackStore, key: DedupKey, evidence: CodeEvidence, *, pair_index: int = 0, extractor_version: int = 1
-) -> None:
-    await store.record_evidence(
-        key,
-        evidence,
-        refine_version=1,
-        refine_model="sonnet",
-        pair_index=pair_index,
-        enrich_version=1,
-        enrich_model="haiku",
-        extractor_version=extractor_version,
-        source="session" if evidence.correct_edit else None,
+def correction_for(row: Mapping[str, object]) -> Correction:
+    return Correction(
+        ts_ms=1,
+        session_id=SessionId(str(row["session_id"])),
+        source="cc-pushback",
+        anchor_uuid=EventUuid(str(row["event_uuid"])),
+        incorrect_digest=None,
+        incorrect_file="/a.py",
+        incorrect_old="bad",
+        incorrect_new="worse",
+        correction_origin="session",
+        correction_old="worse",
+        correction_new="good",
+        overlap=1.0,
     )
 
 
 @pytest.mark.integration
-async def test_record_evidence_is_idempotent_and_round_trips(store: FeedbackStore) -> None:
-    key = await seeded_refined_pair(store)
-    await record_evidence(store, key, code_evidence())
-    await record_evidence(store, key, code_evidence(note="ignored duplicate"))
-    cur = await store.store.conn.execute("SELECT COUNT(*) AS n FROM pair_evidence")
-    assert [row["n"] async for row in cur] == [1]
-    by_index = {int(str(row["pair_index"])): row for row in await store.pairs()}
-    enriched = by_index[0]
-    assert (enriched["evidence_kind"], enriched["evidence_file_path"], enriched["evidence_note"]) == (
-        "code",
-        "/a.py",
-        "n",
-    )
-    assert (enriched["incorrect_old"], enriched["incorrect_new"]) == ("bad", "worse")
-    assert (enriched["correct_old"], enriched["correct_new"]) == ("worse", "good")
-    assert (enriched["evidence_source"], enriched["enrich_version"], enriched["extractor_version"]) == ("session", 1, 1)
-    assert by_index[1]["evidence_kind"] is None  # the sibling pair stays unenriched
-
-
-@pytest.mark.integration
-async def test_no_code_sentinel_covers_every_pair_and_settles_unenriched(store: FeedbackStore) -> None:
-    key = await seeded_refined_pair(store)
-    assert len(await store.unenriched(enrich_version=1, enrich_model="haiku", extractor_version=1)) == 2
-    await record_evidence(store, key, CodeEvidence(kind="no_code", note="nothing here"), pair_index=-1)
-    assert await store.unenriched(enrich_version=1, enrich_model="haiku", extractor_version=1) == []
-    assert [(row["pair_index"], row["evidence_kind"], row["evidence_note"]) for row in await store.pairs()] == [
-        (0, "no_code", "nothing here"),
-        (1, "no_code", "nothing here"),
-    ]
-
-
-@pytest.mark.integration
-async def test_unenriched_keys_on_the_full_enrich_generation(store: FeedbackStore) -> None:
-    key = await seeded_refined_pair(store)
-    await record_evidence(store, key, code_evidence())
-    remaining = await store.unenriched(enrich_version=1, enrich_model="haiku", extractor_version=1)
-    assert [int(str(row["pair_index"])) for row in remaining] == [1]
-    assert set(remaining[0]) == {
+async def test_unenriched_surfaces_refined_pairs_lacking_a_ledger_correction(store: FeedbackStore) -> None:
+    await seeded_refined_pair(store)
+    rows = await store.unenriched(CorrectionLog.open())
+    assert [int(str(row["pair_index"])) for row in rows] == [0, 1]
+    assert set(rows[0]) == {
         "dedup_key",
         "refine_version",
         "refine_model",
@@ -457,38 +418,26 @@ async def test_unenriched_keys_on_the_full_enrich_generation(store: FeedbackStor
         "event_uuid",
         "origin_path",
     }
-    assert len(await store.unenriched(enrich_version=2, enrich_model="haiku", extractor_version=1)) == 2
-    assert len(await store.unenriched(enrich_version=1, enrich_model="opus", extractor_version=1)) == 2
-    assert len(await store.unenriched(enrich_version=1, enrich_model="haiku", extractor_version=2)) == 2
-    assert len(await store.unenriched(enrich_version=1, enrich_model="haiku", extractor_version=1, limit=1)) == 1
+    assert len(await store.unenriched(CorrectionLog.open(), limit=1)) == 1
 
 
 @pytest.mark.integration
-async def test_pair_evidence_latest_prefers_the_newest_extractor_generation(store: FeedbackStore) -> None:
-    key = await seeded_refined_pair(store)
-    await record_evidence(store, key, code_evidence(note="old extraction"), extractor_version=1)
-    await record_evidence(store, key, code_evidence(note="new extraction"), extractor_version=2)
-    row = {int(str(r["pair_index"])): r for r in await store.pairs()}[0]
-    assert (row["evidence_note"], row["extractor_version"]) == ("new extraction", 2)
+async def test_a_ledger_correction_settles_every_pair_sharing_the_anchor(store: FeedbackStore) -> None:
+    await seeded_refined_pair(store)
+    log = CorrectionLog.open()
+    rows = await store.unenriched(log)
+    assert len(rows) == 2  # both pairs share one anchor
+
+    log.append(correction_for(rows[0]))
+    # The anchor now carries a correction, so both of its pairs settle together.
+    assert await store.unenriched(CorrectionLog.open()) == []
 
 
 @pytest.mark.integration
-async def test_exact_pair_evidence_beats_the_sentinel_within_a_generation(store: FeedbackStore) -> None:
+async def test_unenriched_excludes_anchorless_pairs(store: FeedbackStore) -> None:
     key = await seeded_refined_pair(store)
-    await record_evidence(store, key, code_evidence())
-    await record_evidence(store, key, CodeEvidence(kind="no_code", note="expired later"), pair_index=-1)
-    by_index = {int(str(row["pair_index"])): row for row in await store.pairs()}
-    assert by_index[0]["evidence_kind"] == "code"
-    assert (by_index[1]["evidence_kind"], by_index[1]["evidence_note"]) == ("no_code", "expired later")
-
-
-@pytest.mark.integration
-async def test_lineage_pairs_carry_evidence_columns(store: FeedbackStore) -> None:
-    key = await seeded_refined_pair(store)
-    await record_evidence(store, key, code_evidence())
-    pairs = (await store.lineage(key))["pairs"]
-    assert [(p["pair_index"], p["evidence_kind"]) for p in pairs] == [(0, "code"), (1, None)]
-    assert pairs[0]["evidence_source"] == "session"
+    await store.store.conn.execute("UPDATE feedback_events SET session_id = NULL WHERE dedup_key = ?", (key,))
+    assert await store.unenriched(CorrectionLog.open()) == []  # no anchor, nothing the extractor can ground
 
 
 @pytest.mark.integration

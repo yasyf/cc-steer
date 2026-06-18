@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import cc_transcript.corrections
 import cc_transcript.discovery
 import pytest
 
@@ -22,7 +23,15 @@ def projects_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "claude-projects"
     root.mkdir()
     monkeypatch.setattr(cc_transcript.discovery, "CLAUDE_PROJECTS_DIR", root)
-    monkeypatch.setenv("HOME", str(tmp_path))  # keep the shared ~/.cc-transcript corrections ledger hermetic
+    # Redirect the shared corrections ledger into the tmp dir so it stays hermetic,
+    # without overriding HOME (which would hide the LLM backend's CLI auth).
+    ledger = tmp_path / "corrections.db"
+    real_open = cc_transcript.corrections.CorrectionLog.open
+    monkeypatch.setattr(
+        cc_transcript.corrections.CorrectionLog,
+        "open",
+        classmethod(lambda cls, path=None: real_open.__func__(cls, path or ledger)),
+    )
     return root
 
 

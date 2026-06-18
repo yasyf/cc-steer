@@ -337,35 +337,31 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
 async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | None) -> None:
     """Ground every refined pair in the code it complains about.
 
-    Harvests candidate incorrect edits and their later corrections (from the
-    session, or from git history) around each pair's pushback anchor, then has an
-    LLM pick the one edit the complaint faults, copied verbatim. Expired
-    transcripts and editless windows persist free ``no_code`` rows with no LLM
-    call. Incremental and idempotent: evidence persists per pair as soon as each
-    row resolves, failed pairs stay pending and are retried on the next run, and
-    a refine re-run resurfaces its new pairs here automatically.
+    Hands each pair's pushback anchor and complaint to cc-transcript's shared
+    correction extractor, which harvests the candidate edits and their later
+    corrections (from the session, or from git history), picks the one the complaint
+    faults — an LLM call when a backend is ready, the best-overlap candidate
+    otherwise — and appends it to the shared ``corrections`` ledger. Anchors that
+    yield no correction (expired transcripts, editless windows) cost no LLM call.
+    Incremental and idempotent: a pair settles once its anchor carries a ledger row,
+    failed pairs stay pending and are retried on the next run, and a refine re-run
+    resurfaces its new pairs here automatically.
     """
-    from cc_transcript.evidence import EXTRACTOR_VERSION
-    from cc_transcript.judge import resolved_model
+    from cc_transcript.corrections import CorrectionLog
 
-    from cc_pushback.enrich import ENRICH_VERSION
     from cc_pushback.enrich import enrich as run_enrich
 
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        pending = len(
-            await store.unenriched(
-                enrich_version=ENRICH_VERSION, enrich_model=resolved_model(tier), extractor_version=EXTRACTOR_VERSION
-            )
-        )
+        pending = len(await store.unenriched(CorrectionLog.open()))
         if pending > PENDING_CAP:
             raise click.ClickException(f"{pending} pending pairs exceeds the {PENDING_CAP} safety cap — wrong DB?")
-        click.echo(f"pending: {pending} pairs at enrich v{ENRICH_VERSION} ({resolved_model(tier)})")
+        click.echo(f"pending: {pending} pairs")
         report = await run_enrich(store, tier=tier, limit=limit, concurrency=concurrency)
     click.echo(
-        f"enriched {report.enriched} pairs ({report.code} code, {report.no_code} no_code, "
-        f"{report.git} git-sourced, {report.failed} failed), {report.pending} pending"
+        f"enriched {report.enriched} pairs ({report.corrections} corrections, "
+        f"{report.skipped} skipped, {report.failed} failed), {report.pending} pending"
     )
     click.echo(f"recorded {report.corrections} corrections to the shared ledger (~/.cc-transcript/corrections.db)")
 

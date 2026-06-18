@@ -2,11 +2,11 @@
 
 The store mechanism lives in :mod:`cc_transcript.mining`; this module adds
 cc-pushback's default database location, the ``origin_path`` display-hint column,
-the ``triage`` verdict table, the ``refinement`` table, the ``pair_evidence``
-table (the enrich stage's generation-keyed code evidence), and three views:
-``accepted_pushback`` (judge-accepted candidates, the refine stage's input),
-``pair_evidence_latest`` (the newest evidence generation per refined pair), and
-``refined_pairs`` — the pipeline's final deliverable, evidence columns included.
+the ``triage`` verdict table, the ``refinement`` table, and two views:
+``accepted_pushback`` (judge-accepted candidates, the refine stage's input) and
+``refined_pairs`` — the pipeline's final deliverable. The enrich stage's code
+evidence no longer lives here: it lands in cc-transcript's shared ``corrections``
+ledger, keyed by the pushback anchor, and the dashboard reads it straight from there.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
+from cc_transcript.ids import EventUuid, SessionId
 from cc_transcript.judge import VerdictStoreMixin
 from cc_transcript.judge.verdicts import EVENT_COLUMNS
 from cc_transcript.mining import FEEDBACK_DDL as BASE_FEEDBACK_DDL
@@ -27,13 +28,12 @@ from cc_transcript.store import FileStateStore
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from cc_transcript.corrections import CorrectionLog
     from cc_transcript.mining import DedupKey, FeedbackCandidate
 
-    from cc_pushback.enrich import CodeEvidence, Source
     from cc_pushback.refine import Refinement
 
 __all__ = [
-    "ENRICH_DDL",
     "FEEDBACK_DDL",
     "REFINE_DDL",
     "TRIAGE_DDL",
@@ -79,73 +79,7 @@ JOIN latest t ON t.dedup_key = e.dedup_key AND t.rn = 1
 WHERE t.is_pushback = 1;
 """
 
-ENRICH_DDL = """
-CREATE TABLE IF NOT EXISTS pair_evidence (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
-  refine_version INTEGER NOT NULL,
-  refine_model TEXT NOT NULL,
-  pair_index INTEGER NOT NULL,
-  enrich_version INTEGER NOT NULL,
-  enrich_model TEXT NOT NULL,
-  extractor_version INTEGER NOT NULL,
-  evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('code','no_code')),
-  file_path TEXT,
-  incorrect_old TEXT,
-  incorrect_new TEXT,
-  correct_old TEXT,
-  correct_new TEXT,
-  note TEXT NOT NULL,
-  source TEXT CHECK(source IN ('session','git')),
-  enriched_at_ms INTEGER NOT NULL,
-  UNIQUE(dedup_key, refine_version, refine_model, pair_index, enrich_version, enrich_model, extractor_version)
-);
-CREATE INDEX IF NOT EXISTS idx_pair_evidence_dedup ON pair_evidence(dedup_key);
-DROP VIEW IF EXISTS pair_evidence_latest;
-CREATE VIEW pair_evidence_latest AS
-WITH gens AS (
-  SELECT dedup_key, refine_version, refine_model, enrich_version, enrich_model, extractor_version,
-    ROW_NUMBER() OVER (
-      PARTITION BY dedup_key, refine_version, refine_model
-      ORDER BY extractor_version DESC, enriched_at_ms DESC, id DESC
-    ) AS g
-  FROM pair_evidence
-)
-SELECT pe.*
-FROM pair_evidence pe
-JOIN gens ON gens.dedup_key = pe.dedup_key AND gens.refine_version = pe.refine_version
-  AND gens.refine_model = pe.refine_model AND gens.enrich_version = pe.enrich_version
-  AND gens.enrich_model = pe.enrich_model AND gens.extractor_version = pe.extractor_version
-  AND gens.g = 1;
-"""
-
-INSERT_EVIDENCE = """
-INSERT OR IGNORE INTO pair_evidence (
-  dedup_key, refine_version, refine_model, pair_index, enrich_version, enrich_model, extractor_version,
-  evidence_kind, file_path, incorrect_old, incorrect_new, correct_old, correct_new, note, source, enriched_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
-
-EVIDENCE_COLUMNS = """\
-  COALESCE(px.evidence_kind, ps.evidence_kind) AS evidence_kind,
-  COALESCE(px.file_path, ps.file_path) AS evidence_file_path,
-  COALESCE(px.incorrect_old, ps.incorrect_old) AS incorrect_old,
-  COALESCE(px.incorrect_new, ps.incorrect_new) AS incorrect_new,
-  COALESCE(px.correct_old, ps.correct_old) AS correct_old,
-  COALESCE(px.correct_new, ps.correct_new) AS correct_new,
-  COALESCE(px.note, ps.note) AS evidence_note,
-  COALESCE(px.source, ps.source) AS evidence_source,
-  COALESCE(px.enrich_version, ps.enrich_version) AS enrich_version,
-  COALESCE(px.enrich_model, ps.enrich_model) AS enrich_model,
-  COALESCE(px.extractor_version, ps.extractor_version) AS extractor_version"""
-
-EVIDENCE_JOIN = """\
-LEFT JOIN pair_evidence_latest px ON px.dedup_key = r.dedup_key AND px.refine_version = r.prompt_version
-  AND px.refine_model = r.model AND px.pair_index = r.pair_index
-LEFT JOIN pair_evidence_latest ps ON ps.dedup_key = r.dedup_key AND ps.refine_version = r.prompt_version
-  AND ps.refine_model = r.model AND ps.pair_index = -1"""
-
-REFINE_DDL = f"""
+REFINE_DDL = """
 CREATE TABLE IF NOT EXISTS refinement (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
@@ -179,17 +113,16 @@ SELECT
   ap.category,
   e.source_kind,
   e.session_id,
+  e.event_uuid,
   e.occurred_at,
   e.origin_path,
   r.prompt_version,
-  r.model,
-{EVIDENCE_COLUMNS}
+  r.model
 FROM refinement r
 JOIN gens ON gens.dedup_key = r.dedup_key AND gens.prompt_version = r.prompt_version
          AND gens.model = r.model AND gens.refined_at = r.refined_at AND gens.g = 1
 JOIN feedback_events e ON e.dedup_key = r.dedup_key
 JOIN accepted_pushback ap ON ap.dedup_key = r.dedup_key
-{EVIDENCE_JOIN}
 ORDER BY e.id, r.pair_index;
 """
 
@@ -249,9 +182,9 @@ LINEAGE_VERDICTS_QUERY = (
     "confidence, rationale, judged_at FROM triage WHERE dedup_key = ? ORDER BY role, prompt_version, id"
 )
 
-LINEAGE_PAIRS_QUERY = f"""
+LINEAGE_PAIRS_QUERY = """
 SELECT r.pair_index, r.action, r.complaint_verbatim, r.complaint, r.prompt_version, r.model,
-{EVIDENCE_COLUMNS}
+  e.session_id, e.event_uuid
 FROM refinement r
 JOIN (
   SELECT prompt_version, model, refined_at, ROW_NUMBER() OVER (
@@ -259,28 +192,16 @@ JOIN (
   ) AS gen
   FROM (SELECT DISTINCT prompt_version, model, refined_at FROM refinement WHERE dedup_key = ?)
 ) g ON g.prompt_version = r.prompt_version AND g.model = r.model AND g.refined_at = r.refined_at AND g.gen = 1
-{EVIDENCE_JOIN}
+JOIN feedback_events e ON e.dedup_key = r.dedup_key
 WHERE r.dedup_key = ?
 ORDER BY r.pair_index
 """
 
-UNENRICHED_QUERY = """
-SELECT rp.dedup_key, rp.prompt_version AS refine_version, rp.model AS refine_model, rp.pair_index,
-  rp.action, rp.complaint, rp.complaint_verbatim, rp.source_kind, rp.session_id, e.event_uuid, e.origin_path
-FROM refined_pairs rp
-JOIN feedback_events e ON e.dedup_key = rp.dedup_key
-LEFT JOIN pair_evidence px ON px.dedup_key = rp.dedup_key AND px.refine_version = rp.prompt_version
-  AND px.refine_model = rp.model AND px.pair_index = rp.pair_index
-  AND px.enrich_version = ? AND px.enrich_model = ? AND px.extractor_version = ?
-LEFT JOIN pair_evidence ps ON ps.dedup_key = rp.dedup_key AND ps.refine_version = rp.prompt_version
-  AND ps.refine_model = rp.model AND ps.pair_index = -1
-  AND ps.enrich_version = ? AND ps.enrich_model = ? AND ps.extractor_version = ?
-WHERE px.id IS NULL AND ps.id IS NULL
-ORDER BY rp.event_id, rp.pair_index"""
-
-
-def now_ms() -> int:
-    return int(datetime.now(UTC).timestamp() * 1000)
+REFINED_PAIRS_QUERY = """
+SELECT dedup_key, prompt_version AS refine_version, model AS refine_model, pair_index,
+  action, complaint, complaint_verbatim, source_kind, session_id, event_uuid, origin_path
+FROM refined_pairs
+ORDER BY event_id, pair_index"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,10 +227,11 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     Layers the ``feedback_events`` table (extended with the ``origin_path``
     display-hint column) onto cc-transcript's file-mtime ledger and adds the
     ``triage`` verdict table (the judge package's verdict mechanism pinned to
-    cc-pushback's column names), the ``refinement`` table, the ``pair_evidence``
-    table, and the ``accepted_pushback``, ``pair_evidence_latest``, and
-    ``refined_pairs`` views. Verdicts, refinements, and evidence key on the
-    content-derived dedup key, so they survive a database rebuild.
+    cc-pushback's column names), the ``refinement`` table, and the
+    ``accepted_pushback`` and ``refined_pairs`` views. Verdicts and refinements key
+    on the content-derived dedup key, so they survive a database rebuild; the enrich
+    stage's code evidence lives in cc-transcript's shared ``corrections`` ledger,
+    keyed by the pushback anchor.
 
     Example:
         >>> async with await FeedbackStore.open(FeedbackStore.default_path()) as store:
@@ -328,7 +250,7 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     @classmethod
     async def open(cls, path: Path) -> Self:
         """Opens (creating if needed) the feedback database at ``path``."""
-        return cls(await FileStateStore.open(path, extra_schema=FEEDBACK_DDL + TRIAGE_DDL + ENRICH_DDL + REFINE_DDL))
+        return cls(await FileStateStore.open(path, extra_schema=FEEDBACK_DDL + TRIAGE_DDL + REFINE_DDL))
 
     async def record_file_scan(self, path: str, mtime: float, candidates: Sequence[FeedbackCandidate]) -> int:
         """Records a scanned file and its candidates in one transaction.
@@ -416,88 +338,34 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
                 ],
             )
 
-    async def unenriched(
-        self, *, enrich_version: int, enrich_model: str, extractor_version: int, limit: int | None = None
-    ) -> list[dict[str, object]]:
-        """Returns refined pairs lacking code evidence at the given enrich generation.
+    async def unenriched(self, log: CorrectionLog, *, limit: int | None = None) -> list[dict[str, object]]:
+        """Returns refined pairs whose pushback anchor carries no shared-ledger correction.
 
-        A pair counts as enriched when it carries its own ``pair_evidence`` row at
-        exactly ``(enrich_version, enrich_model, extractor_version)`` or its refine
-        generation carries the ``pair_index=-1`` no-code sentinel there. Pairs come
-        from the latest refine generation only, so a refine re-run resurfaces its
-        new pairs here automatically — and so does bumping any version in the key.
+        A pair settles once its ``(session_id, event_uuid)`` anchor has a row in the
+        shared ``corrections`` ledger — the single source of truth for "done". Since
+        the extractor is idempotent per anchor, every pair sharing one anchor settles
+        together the moment any of them writes its row. Pairs come from the latest
+        refine generation only, so a refine re-run resurfaces its new pairs here
+        automatically. Anchors that legitimately yield no correction (expired,
+        editless, or no faulted edit) never settle, but resolving them costs no LLM
+        call.
 
         Args:
-            enrich_version: The enrich prompt version the evidence must carry.
-            enrich_model: The resolved model name the evidence must carry.
-            extractor_version: The platform's deterministic-extraction version.
+            log: The shared correction ledger to check each anchor against.
             limit: When set, the maximum number of rows to return.
 
         Returns:
-            One dict per unenriched pair with the columns the enrich prompt and
-            anchor resolution need, oldest event first.
+            One dict per unenriched pair with the columns the extractor and anchor
+            resolution need, oldest event first.
         """
-        query = UNENRICHED_QUERY
-        params: tuple[object, ...] = (enrich_version, enrich_model, extractor_version) * 2
-        if limit is not None:
-            query += " LIMIT ?"
-            params = (*params, limit)
-        cur = await self.store.conn.execute(query, params)
-        return [dict(row) async for row in cur]
-
-    async def record_evidence(
-        self,
-        key: DedupKey,
-        evidence: CodeEvidence,
-        *,
-        refine_version: int,
-        refine_model: str,
-        pair_index: int,
-        enrich_version: int,
-        enrich_model: str,
-        extractor_version: int,
-        source: Source | None,
-    ) -> None:
-        """Records one pair's code evidence, idempotently, under the full generation key.
-
-        Keyed by ``(dedup_key, refine_version, refine_model, pair_index,
-        enrich_version, enrich_model, extractor_version)`` with ``INSERT OR
-        IGNORE``, so re-running over an enriched corpus is a no-op and bumping any
-        version in the key re-derives. ``pair_index=-1`` encodes the no-code
-        sentinel covering every pair of the refine generation.
-
-        Args:
-            key: The enriched event's dedup key.
-            evidence: The code evidence to persist.
-            refine_version: The refine prompt version of the annotated pair.
-            refine_model: The resolved refine model of the annotated pair.
-            pair_index: The annotated pair's index, or ``-1`` for the sentinel.
-            enrich_version: The enrich prompt version that produced the evidence.
-            enrich_model: The resolved model name that produced it.
-            extractor_version: The platform's deterministic-extraction version.
-            source: Where the correction came from, or None when there is none.
-        """
-        await self.store.conn.execute(
-            INSERT_EVIDENCE,
-            (
-                key,
-                refine_version,
-                refine_model,
-                pair_index,
-                enrich_version,
-                enrich_model,
-                extractor_version,
-                evidence.kind,
-                evidence.file_path,
-                evidence.incorrect_edit.old if evidence.incorrect_edit else None,
-                evidence.incorrect_edit.new if evidence.incorrect_edit else None,
-                evidence.correct_edit.old if evidence.correct_edit else None,
-                evidence.correct_edit.new if evidence.correct_edit else None,
-                evidence.note,
-                source,
-                now_ms(),
-            ),
-        )
+        cur = await self.store.conn.execute(REFINED_PAIRS_QUERY)
+        unenriched = [
+            row
+            async for raw in cur
+            if (row := dict(raw))["session_id"] and row["event_uuid"]
+            if not log.for_anchor(SessionId(str(row["session_id"])), EventUuid(str(row["event_uuid"])))
+        ]
+        return unenriched if limit is None else unenriched[:limit]
 
     async def pairs(self) -> list[dict[str, object]]:
         """Returns every row of the ``refined_pairs`` view, the pipeline's deliverable."""

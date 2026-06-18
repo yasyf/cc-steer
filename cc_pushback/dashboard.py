@@ -12,15 +12,18 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cc_transcript.corrections import CorrectionLog
+from cc_transcript.ids import EventUuid, SessionId
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from cc_pushback import report
+from cc_pushback.enrich import SOURCE
 from cc_pushback.evaluate import load_golden
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from cc_transcript.context import ContextWindow, TurnRef
 
@@ -46,8 +49,29 @@ def edit_json(old: str, new: str) -> dict[str, str]:
     return {"old": report.truncate(old, LIST_TEXT_LIMIT), "new": report.truncate(new, LIST_TEXT_LIMIT)}
 
 
-def serialize_evidence(row: Mapping[str, object]) -> dict[str, object] | None:
-    if (evidence := report.EvidenceRow.from_row(row)) is None:
+def evidence_resolver(log: CorrectionLog) -> Callable[[Mapping[str, object]], EvidenceRow | None]:
+    """Resolves a refined-pair row's grounding evidence from the shared ledger by anchor.
+
+    A pair's pushback anchor is its event's ``(session_id, event_uuid)``; the enrich
+    stage writes at most one ``cc-pushback`` correction per anchor, so the dashboard
+    shows that row's edit. Returns None when the anchor carries no cc-pushback
+    correction.
+    """
+
+    def resolve(row: Mapping[str, object]) -> EvidenceRow | None:
+        if not (row["session_id"] and row["event_uuid"]):
+            return None
+        anchor = log.for_anchor(SessionId(str(row["session_id"])), EventUuid(str(row["event_uuid"])))
+        return next(
+            (report.EvidenceRow.from_correction(c) for c in anchor if c.source == SOURCE),
+            None,
+        )
+
+    return resolve
+
+
+def serialize_evidence(evidence: EvidenceRow | None) -> dict[str, object] | None:
+    if evidence is None:
         return None
     return {
         "file_path": evidence.file_path,
@@ -57,8 +81,7 @@ def serialize_evidence(row: Mapping[str, object]) -> dict[str, object] | None:
     }
 
 
-def serialize_pair(row: Mapping[str, object]) -> dict[str, object]:
-    evidence = serialize_evidence(row)
+def serialize_pair(row: Mapping[str, object], evidence: EvidenceRow | None) -> dict[str, object]:
     return {
         "dedup_key": row["dedup_key"],
         "pair_index": row["pair_index"],
@@ -69,8 +92,8 @@ def serialize_pair(row: Mapping[str, object]) -> dict[str, object]:
         "source_kind": row["source_kind"],
         "project": project_of(row["origin_path"]),
         "occurred_at": str(row["occurred_at"])[:19],
-        "evidence": evidence,
-        "language": language_of(str(evidence["file_path"])) if evidence else None,
+        "evidence": serialize_evidence(evidence),
+        "language": language_of(evidence.file_path) if evidence else None,
     }
 
 
@@ -145,7 +168,6 @@ def serialize_evidence_detail(evidence: EvidenceRow) -> dict[str, object]:
         "source": evidence.source,
         "incorrect": {"old": evidence.incorrect[0], "new": evidence.incorrect[1]},
         "correct": None if evidence.correct is None else {"old": evidence.correct[0], "new": evidence.correct[1]},
-        "note": evidence.note,
     }
 
 
@@ -204,6 +226,7 @@ def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
         The configured :class:`fastapi.FastAPI` application.
     """
     golden_map = {row.dedup_key: row for row in load_golden()}
+    evidence_of = evidence_resolver(CorrectionLog.open())
     app = FastAPI(title="cc-pushback")
     app.mount("/static", StaticFiles(directory=ASSETS), name="static")
 
@@ -213,7 +236,7 @@ def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
 
     @app.get("/api/pairs")
     async def api_pairs() -> dict[str, object]:
-        return {"pairs": [serialize_pair(row) for row in await store.pairs()]}
+        return {"pairs": [serialize_pair(row, evidence_of(row)) for row in await store.pairs()]}
 
     @app.get("/api/candidates")
     async def api_candidates() -> dict[str, object]:
@@ -223,7 +246,7 @@ def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
     async def api_lineage(dedup_key: str) -> dict[str, object]:
         if not (data := await store.lineage(dedup_key)):
             raise HTTPException(status_code=404, detail="unknown dedup_key")
-        return serialize_lineage(report.Lineage.from_lineage(data), golden_map)
+        return serialize_lineage(report.Lineage.from_lineage(data, evidence_of=evidence_of), golden_map)
 
     @app.get("/api/stats")
     async def api_stats() -> dict[str, object]:

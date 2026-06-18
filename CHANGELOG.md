@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Requires cc-transcript `>=4,<5` and spawnllm `>=0.2.0`. The `enrich` stage now
+  delegates to cc-transcript's shared correction extractor
+  (`cc_transcript.extract.extract_correction`): per refined pair it harvests the
+  candidate edits around the pushback anchor, picks the one the complaint faults —
+  an LLM call when a backend is ready (`usable_backend()`), the best-overlap
+  candidate otherwise — and appends it to the shared `corrections` ledger. The
+  extractor is idempotent per anchor, so pairs sharing one anchor produce a single
+  row.
+
+### Removed
+- The local `pair_evidence` table, `pair_evidence_latest` view, and the evidence
+  columns on the `refined_pairs` view, along with `FeedbackStore.record_evidence`
+  and the `EXTRACTOR_VERSION`/`ENRICH_VERSION`-keyed evidence generation. Code
+  evidence now lives only in the shared ledger; the dashboard reads it by anchor
+  via `CorrectionLog.for_anchor`. `FeedbackStore.unenriched` now takes a
+  `CorrectionLog` and returns refined pairs whose anchor carries no ledger row.
+  `EvidenceRow` is built from a ledger `Correction` and no longer carries a `note`.
+
 ## [0.3.0]
 
 ### Changed

@@ -1,11 +1,12 @@
 """Decode the feedback corpus into the data model the dashboard serves.
 
 Holds the data model the dashboard serves — :class:`Sample`, :class:`VerdictRow`,
-:class:`RefinedPairRow` with its :class:`EvidenceRow`, and the :class:`Lineage` that
-stitches a candidate's whole pipeline trail together — plus the corpus
-:class:`Summary` (written by the ``claude`` CLI when available, falling back to
-heuristics). The FastAPI surface and the JSON shapes it serves — including the
-client-rendered lineage — live in :mod:`cc_pushback.dashboard`.
+:class:`RefinedPairRow` with its :class:`EvidenceRow` (read from the shared
+correction ledger), and the :class:`Lineage` that stitches a candidate's whole
+pipeline trail together — plus the corpus :class:`Summary` (written by the
+``claude`` CLI when available, falling back to heuristics). The FastAPI surface and
+the JSON shapes it serves — including the client-rendered lineage — live in
+:mod:`cc_pushback.dashboard`.
 """
 
 from __future__ import annotations
@@ -26,9 +27,10 @@ from cc_transcript.mining.confidence import from_payload
 from cc_pushback.claude import claude_available, run_claude
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from typing import Any, Literal
 
+    from cc_transcript.corrections import Correction
     from cc_transcript.mining import CandidateSignal
 
     from cc_pushback.evaluate import GoldenRow
@@ -135,33 +137,30 @@ class VerdictRow:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceRow:
-    """One refined pair's grounding code evidence, distilled by the enrich stage.
+    """One refined pair's grounding code evidence, read from the shared ledger.
 
     Attributes:
         file_path: The file the incorrect edit touched.
         incorrect: The incorrect edit's verbatim ``(old, new)`` content.
         correct: The correction's verbatim ``(old, new)`` content, when one exists.
-        note: The linker's one-clause explanation of the call.
         source: Where the correction came from — ``session`` or ``git`` — when one exists.
     """
 
     file_path: str
     incorrect: tuple[str, str]
     correct: tuple[str, str] | None
-    note: str
     source: str | None
 
     @classmethod
-    def from_row(cls, row: Mapping[str, object]) -> EvidenceRow | None:
-        """Decodes a pair row's evidence columns, or ``None`` when no code evidence exists."""
-        if row["evidence_kind"] != "code":
-            return None
+    def from_correction(cls, correction: Correction) -> EvidenceRow:
+        """Decodes a shared-ledger :class:`~cc_transcript.corrections.Correction` row."""
         return cls(
-            file_path=str(row["evidence_file_path"]),
-            incorrect=(str(row["incorrect_old"]), str(row["incorrect_new"])),
-            correct=None if row["correct_old"] is None else (str(row["correct_old"]), str(row["correct_new"])),
-            note=str(row["evidence_note"]),
-            source=str(row["evidence_source"]) if row["evidence_source"] else None,
+            file_path=correction.incorrect_file,
+            incorrect=(correction.incorrect_old, correction.incorrect_new),
+            correct=None
+            if correction.correction_origin is None
+            else (str(correction.correction_old), str(correction.correction_new)),
+            source=correction.correction_origin,
         )
 
 
@@ -176,7 +175,8 @@ class RefinedPairRow:
         complaint: The one-sentence distillation of the objection.
         prompt_version: The refine prompt version that produced it.
         model: The resolved model name that produced it.
-        evidence: The enrich stage's code evidence, when it grounded the pair.
+        evidence: The enrich stage's code evidence from the shared ledger, when the
+            pair's anchor carries a correction.
     """
 
     pair_index: int
@@ -188,8 +188,12 @@ class RefinedPairRow:
     evidence: EvidenceRow | None = None
 
     @classmethod
-    def from_row(cls, row: Mapping[str, object]) -> RefinedPairRow:
-        """Decodes a :meth:`FeedbackStore.lineage` pair row into a :class:`RefinedPairRow`."""
+    def from_row(cls, row: Mapping[str, object], *, evidence: EvidenceRow | None = None) -> RefinedPairRow:
+        """Decodes a :meth:`FeedbackStore.lineage` pair row into a :class:`RefinedPairRow`.
+
+        The pair's grounding ``evidence`` comes from the shared ledger, resolved by
+        the caller from the pair's pushback anchor.
+        """
         return cls(
             pair_index=int(str(row["pair_index"])),
             action=str(row["action"]),
@@ -197,7 +201,7 @@ class RefinedPairRow:
             complaint=str(row["complaint"]),
             prompt_version=int(str(row["prompt_version"])),
             model=str(row["model"]),
-            evidence=EvidenceRow.from_row(row),
+            evidence=evidence,
         )
 
 
@@ -218,13 +222,19 @@ class Lineage:
     pairs: tuple[RefinedPairRow, ...]
 
     @classmethod
-    def from_lineage(cls, data: Mapping[str, Any]) -> Lineage:
-        """Builds a :class:`Lineage` from a :meth:`FeedbackStore.lineage` result."""
+    def from_lineage(
+        cls, data: Mapping[str, Any], *, evidence_of: Callable[[Mapping[str, object]], EvidenceRow | None]
+    ) -> Lineage:
+        """Builds a :class:`Lineage` from a :meth:`FeedbackStore.lineage` result.
+
+        Each pair's grounding evidence comes from ``evidence_of``, which resolves the
+        pair's pushback anchor against the shared correction ledger.
+        """
         return cls(
             sample=Sample.from_row(data),
             dedup_key=str(data["dedup_key"]),
             verdicts=tuple(VerdictRow.from_row(row) for row in data["verdicts"]),
-            pairs=tuple(RefinedPairRow.from_row(row) for row in data["pairs"]),
+            pairs=tuple(RefinedPairRow.from_row(row, evidence=evidence_of(row)) for row in data["pairs"]),
         )
 
     @property

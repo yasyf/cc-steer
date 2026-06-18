@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 from cc_transcript.context import ContextWindow, TurnRef
+from cc_transcript.corrections import Correction, CorrectionLog, Origin
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import firm
 from cc_transcript.mining.confidence import to_payload
 
 from cc_pushback.dashboard import build_app, language_of, serialize_lineage
-from cc_pushback.enrich import CodeEvidence, EditSide
 from cc_pushback.evaluate import GoldenRow
 from cc_pushback.refine import RefinedPair, Refinement
 from cc_pushback.report import (
@@ -95,32 +95,42 @@ def test_verdict_row_from_row_coerces_pushback_to_bool() -> None:
 def pair_row(**overrides: object) -> dict[str, object]:
     return {
         "pair_index": 1, "action": "a", "complaint_verbatim": "v", "complaint": "c",
-        "prompt_version": 1, "model": "sonnet",
-        "evidence_kind": None, "evidence_file_path": None, "incorrect_old": None, "incorrect_new": None,
-        "correct_old": None, "correct_new": None, "evidence_note": None, "evidence_source": None,
+        "prompt_version": 1, "model": "sonnet", "session_id": "s", "event_uuid": "u1",
     } | overrides
 
 
-def test_refined_pair_row_from_row() -> None:
+def git_correction(*, correction_origin: Origin | None = "git") -> Correction:
+    has_fix = correction_origin is not None
+    return Correction(
+        ts_ms=1, session_id=SessionId("s"), source="cc-pushback", anchor_uuid=EventUuid("u1"),
+        incorrect_digest=None, incorrect_file="/repo/a.py", incorrect_old="bad", incorrect_new="worse",
+        correction_origin=correction_origin,
+        correction_old="worse" if has_fix else None,
+        correction_new="good" if has_fix else None,
+    )
+
+
+def test_refined_pair_row_from_row_carries_no_evidence_by_default() -> None:
     pair = RefinedPairRow.from_row(pair_row())
     assert pair.pair_index == 1 and pair.complaint_verbatim == "v"
     assert pair.evidence is None
 
 
-def test_refined_pair_row_decodes_code_evidence() -> None:
-    pair = RefinedPairRow.from_row(pair_row(
-        evidence_kind="code", evidence_file_path="/repo/a.py",
-        incorrect_old="bad", incorrect_new="worse", correct_old="worse", correct_new="good",
-        evidence_note="faults the edit", evidence_source="git",
-    ))
-    assert pair.evidence == EvidenceRow(
-        file_path="/repo/a.py", incorrect=("bad", "worse"), correct=("worse", "good"),
-        note="faults the edit", source="git",
+def test_refined_pair_row_attaches_resolved_evidence() -> None:
+    evidence = EvidenceRow.from_correction(git_correction())
+    pair = RefinedPairRow.from_row(pair_row(), evidence=evidence)
+    assert pair.evidence == evidence
+
+
+def test_evidence_row_from_correction_decodes_a_git_fix() -> None:
+    assert EvidenceRow.from_correction(git_correction()) == EvidenceRow(
+        file_path="/repo/a.py", incorrect=("bad", "worse"), correct=("worse", "good"), source="git",
     )
 
 
-def test_evidence_row_is_none_for_no_code() -> None:
-    assert EvidenceRow.from_row(pair_row(evidence_kind="no_code", evidence_note="not about code")) is None
+def test_evidence_row_from_correction_has_no_correct_side_when_origin_is_none() -> None:
+    evidence = EvidenceRow.from_correction(git_correction(correction_origin=None))
+    assert evidence.correct is None and evidence.source is None
 
 
 @pytest.mark.parametrize(
@@ -226,7 +236,6 @@ def test_serialize_lineage_keeps_the_full_untruncated_diff() -> None:
             file_path="/repo/a.py",
             incorrect=(f"if x < 1:\n    {long_call}", "safe()"),
             correct=("safe()", "safer()"),
-            note="faults the danger call",
             source="git",
         ),
     )
@@ -236,7 +245,6 @@ def test_serialize_lineage_keeps_the_full_untruncated_diff() -> None:
     assert evidence["incorrect"]["old"] == f"if x < 1:\n    {long_call}"  # full, untruncated, unescaped
     assert "x" * 900 in evidence["incorrect"]["old"]
     assert evidence["correct"] == {"old": "safe()", "new": "safer()"}
-    assert evidence["note"] == "faults the danger call"
 
 
 async def seed(store: FeedbackStore) -> None:
@@ -279,13 +287,25 @@ async def seed(store: FeedbackStore) -> None:
     await store.record_refinement("k1", Refinement(pairs=[pair]), prompt_version=1, model="sonnet")
 
 
-async def enrich_k1(
-    store: FeedbackStore, evidence: CodeEvidence, *, pair_index: int = 0, source: str | None = "git"
-) -> None:
-    await store.record_evidence(
-        "k1", evidence, refine_version=1, refine_model="sonnet", pair_index=pair_index,
-        enrich_version=1, enrich_model="haiku", extractor_version=1, source=source,
+def k1_correction(
+    *,
+    incorrect: tuple[str, str],
+    correct: tuple[str, str] | None,
+    file: str = "/repo/a.py",
+    source: Origin | None = "git",
+) -> Correction:
+    return Correction(
+        ts_ms=1, session_id=SessionId("s"), source="cc-pushback", anchor_uuid=EventUuid("u0"),
+        incorrect_digest=None, incorrect_file=file, incorrect_old=incorrect[0], incorrect_new=incorrect[1],
+        correction_origin=source,
+        correction_old=None if correct is None else correct[0],
+        correction_new=None if correct is None else correct[1],
     )
+
+
+def enrich_k1(correction: Correction) -> None:
+    """Grounds k1's pushback anchor (session ``s``, uuid ``u0``) in the shared ledger."""
+    CorrectionLog.open().append(correction)
 
 
 async def client(store: FeedbackStore) -> httpx.AsyncClient:
@@ -309,15 +329,7 @@ async def test_api_pairs_returns_atomic_rows(store: FeedbackStore) -> None:
 
 async def test_api_pairs_carries_code_evidence(store: FeedbackStore) -> None:
     await seed(store)
-    await enrich_k1(
-        store,
-        CodeEvidence(
-            kind="code", file_path="/repo/a.py",
-            incorrect_edit=EditSide(old="x = eval(s)", new="y = eval(t)"),
-            correct_edit=EditSide(old="y = eval(t)", new="y = json.loads(t)"),
-            note="faults the eval",
-        ),
-    )
+    enrich_k1(k1_correction(incorrect=("x = eval(s)", "y = eval(t)"), correct=("y = eval(t)", "y = json.loads(t)")))
     async with await client(store) as http:
         pair = (await http.get("/api/pairs")).json()["pairs"][0]
     assert pair["evidence"] == {
@@ -331,25 +343,15 @@ async def test_api_pairs_carries_code_evidence(store: FeedbackStore) -> None:
 
 async def test_api_pairs_clips_evidence_sides_for_the_list(store: FeedbackStore) -> None:
     await seed(store)
-    await enrich_k1(
-        store,
-        CodeEvidence(
-            kind="code", file_path="/repo/a.py",
-            incorrect_edit=EditSide(old="a" * 400, new="b"),
-            correct_edit=None,
-            note="long edit",
-        ),
-        source=None,
-    )
+    enrich_k1(k1_correction(incorrect=("a" * 400, "b"), correct=None, source=None))
     async with await client(store) as http:
         evidence = (await http.get("/api/pairs")).json()["pairs"][0]["evidence"]
     assert evidence["incorrect"]["old"] == "a" * 280 + "…"
     assert evidence["correct"] is None and evidence["source"] is None
 
 
-async def test_api_pairs_no_code_sentinel_keeps_evidence_none(store: FeedbackStore) -> None:
-    await seed(store)
-    await enrich_k1(store, CodeEvidence(kind="no_code", note="not about code"), pair_index=-1, source=None)
+async def test_api_pairs_no_ledger_correction_keeps_evidence_none(store: FeedbackStore) -> None:
+    await seed(store)  # k1's anchor carries no correction
     async with await client(store) as http:
         pair = (await http.get("/api/pairs")).json()["pairs"][0]
     assert pair["evidence"] is None
@@ -359,16 +361,7 @@ async def test_api_pairs_no_code_sentinel_keeps_evidence_none(store: FeedbackSto
 async def test_api_lineage_shows_the_full_diff(store: FeedbackStore) -> None:
     await seed(store)
     long_new = "json.loads(" + "x" * 900 + ")"
-    await enrich_k1(
-        store,
-        CodeEvidence(
-            kind="code", file_path="/repo/a.py",
-            incorrect_edit=EditSide(old="bad < worse\nstill bad", new=long_new),
-            correct_edit=None,
-            note="grounds the complaint",
-        ),
-        source=None,
-    )
+    enrich_k1(k1_correction(incorrect=("bad < worse\nstill bad", long_new), correct=None, source=None))
     async with await client(store) as http:
         data = (await http.get("/api/lineage/k1")).json()
     evidence = data["refiner"]["pairs"][0]["evidence"]
