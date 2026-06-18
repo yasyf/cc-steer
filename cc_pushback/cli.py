@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
 SOURCE_KINDS = [*PUSHBACK_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
-PENDING_CAP = 1200
 
 
 def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:
@@ -165,8 +164,6 @@ async def triage(tier: TModel, limit: int | None, concurrency: int, refresh_summ
                 role=JUDGE, prompt_version=PROMPT_VERSION, model=resolved_model(tier), refresh_summary=refresh_summary
             )
         )
-        if pending > PENDING_CAP:
-            raise click.ClickException(f"{pending} pending rows exceeds the {PENDING_CAP} safety cap — wrong DB?")
         click.echo(f"pending: {pending} rows at prompt v{PROMPT_VERSION} ({resolved_model(tier)})")
         report = await run_triage(
             store, tier=tier, limit=limit, concurrency=concurrency, refresh_summary=refresh_summary
@@ -312,8 +309,6 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         pending = len(await store.unrefined(prompt_version=REFINE_VERSION, model=resolved_model(tier)))
-        if pending > PENDING_CAP:
-            raise click.ClickException(f"{pending} pending events exceeds the {PENDING_CAP} safety cap — wrong DB?")
         click.echo(f"pending: {pending} events at refine v{REFINE_VERSION} ({resolved_model(tier)})")
         report = await run_refine(store, tier=tier, limit=limit, concurrency=concurrency)
     click.echo(
@@ -355,8 +350,6 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         pending = len(await store.unenriched(CorrectionLog.open()))
-        if pending > PENDING_CAP:
-            raise click.ClickException(f"{pending} pending pairs exceeds the {PENDING_CAP} safety cap — wrong DB?")
         click.echo(f"pending: {pending} pairs")
         report = await run_enrich(store, tier=tier, limit=limit, concurrency=concurrency)
     click.echo(
