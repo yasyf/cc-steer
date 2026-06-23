@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from cc_pushback.store import FeedbackStore
 
-PROMPT_VERSION = 4
+PROMPT_VERSION = 5
 AUDIT_VERSION = 3
 JUDGE = "judge"
 AUDITOR = "auditor"
@@ -91,19 +91,35 @@ category of the corrective part. Corrective content is often implicit in a direc
 shallow look, "not just X — give me Y" faults an insufficient answer, praise followed
 by a redirect ("its good that you did X, but the more important thing is Y") faults the
 scope, and exasperation ("stop wasting time", "fucking hell just commit") faults the
-behavior, even when phrased as the next step.
+behavior, even when phrased as the next step. Ordering the removal or reversal of
+something the assistant just produced ("get rid of the MAX_SEQ_LEN and the trt shapes",
+"remove that", "take it back out", "we dont want the shim") faults that work as
+unwanted, even with no other criticism. And a clause noting the work still contains or
+uses something it should not ("we arent supposed to be using litellm anymore", "why is
+X still here", "thats not how we do it") is corrective even when the lead clause is a
+forward directive.
 An implicit fault only counts when the faulted thing exists in the assistant's prior
 work: "set the right headers" while assigning fresh config work is a plain directive;
-"use the right template" after the assistant used the wrong one is a correction. And
-when the user corrects their own earlier instruction ("ah sorry, my bad — we treat it
-as native"), that is a spec clarification, not pushback on the assistant.
+"use the right template" after the assistant used the wrong one is a correction;
+"get rid of X" where X is pre-existing state the assistant did not create (clearing
+local state, deleting an old branch) is a plain directive, not pushback. And when the
+user corrects their own earlier instruction ("ah sorry, my bad — we treat it as
+native"), that is a spec clarification, not pushback on the assistant.
+A leading "no" or "nope" is not automatically rejection. When it answers a yes/no
+question the assistant asked or declines an option the assistant offered, and the rest
+is a plain forward directive with no fault of completed work ("nope just push the
+resolved branch", "nope this is good, commit and push"), it is an answer — noise. It is
+pushback only when the "no" countermands or rejects work the assistant actually did or
+proposed ("no we dont want to vendor it", "no, that's the wrong file").
 The assistant action being corrected may predate the context shown: when the message
 critiques files or output the assistant produced earlier in the session, it is pushback
 on that work even if the immediately preceding action is unrelated.
 When the source is review_comment, the message is an inline code-review comment on code
 the assistant wrote: terse imperatives there ("inline", "remove this one", "maybe make
 this _safe?") are corrections — usually style_violation, incorrect_change, or
-wrong_approach — not operational directives.
+wrong_approach — not operational directives. A bare prohibition or convention naming a
+rule for that line ("no comments", "no globals", "it is required", "always use X") is a
+style_violation correction, not other or noise — even with no verb.
 
 what_claude_did: ONE neutral sentence naming the assistant action the message responds
 to (e.g. "Force-pushed to the shared branch with git push --force"). Write it even when
