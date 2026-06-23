@@ -1,19 +1,18 @@
 """A thin shell-out to the ``claude`` CLI for a single headless text completion.
 
-Argv construction and envelope parsing come from the shared ``spawnllm`` library;
-the spawn stays local (``anyio.run_process``). It uses the user's existing Claude
-Code auth (no API key), so the package stays offline unless ``claude`` is
-actually on the path. The structured path lives in
+The run is driven by the shared ``spawnllm`` library: :func:`spawnllm.run`
+spawns ``claude``, retries transient envelopes, and returns captured output, and
+:func:`spawnllm.parse_result_envelope` unwraps the ``{is_error, result}`` JSON.
+It uses the user's existing Claude Code auth (no API key), so the package stays
+offline unless ``claude`` is actually on the path. The structured path lives in
 :mod:`cc_transcript.judge` (``run_structured``/``structured_judge``).
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 
-import anyio
-from spawnllm import ClaudeCliBackend, parse_result_envelope
+from spawnllm import ClaudeConfig, RunSpec, parse_result_envelope, run
 
 CLAUDE_TIMEOUT = 180
 
@@ -38,10 +37,20 @@ async def run_claude(prompt: str, *, system: str, model: str) -> str:
         subprocess.SubprocessError: If ``claude`` exits non-zero, times out, or
             reports an error in its JSON envelope.
     """
-    argv = ClaudeCliBackend.cc_sentiment(system_prompt=system).build_argv(prompt, model=model)
-    try:
-        with anyio.fail_after(CLAUDE_TIMEOUT):
-            result = await anyio.run_process(argv, check=True)
-    except TimeoutError as exc:
-        raise subprocess.TimeoutExpired(argv, CLAUDE_TIMEOUT) from exc
-    return parse_result_envelope(result.stdout, argv=argv, stderr=result.stderr)
+    rr = await run(
+        RunSpec(
+            prompt=prompt,
+            model=model,
+            timeout=CLAUDE_TIMEOUT,
+            provider_configs={
+                "claude": ClaudeConfig(
+                    system_prompt=system,
+                    max_turns=1,
+                    tools="",
+                    disable_slash_commands=True,
+                    output_format="json",
+                )
+            },
+        )
+    )
+    return parse_result_envelope(rr.stdout.encode(), argv=[], stderr=rr.stderr.encode())
