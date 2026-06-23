@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.anyio
 
 FILE = "/repo/projects/session.jsonl"
-MODEL = resolved_model("medium")
 
 
 def verdict() -> Verdict:
@@ -61,7 +60,7 @@ async def seed_accepted(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: fake_judge)
     await triage(store)
-    return len(await store.unrefined(prompt_version=PROMPT_VERSION, model=MODEL))
+    return len(await store.unrefined(prompt_version=PROMPT_VERSION, model=resolved_model("medium")))
 
 
 @pytest.mark.unit

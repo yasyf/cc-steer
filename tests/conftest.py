@@ -5,17 +5,26 @@ from typing import TYPE_CHECKING
 import cc_transcript.corrections
 import cc_transcript.discovery
 import pytest
+from spawnllm.backends.base import BackendUnavailable
 
 from cc_pushback.store import FeedbackStore
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
 
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call() -> Iterator[None]:
+    try:
+        yield
+    except BackendUnavailable as exc:
+        pytest.skip(f"no LLM backend: {exc}")
 
 
 @pytest.fixture(autouse=True)
