@@ -27,7 +27,7 @@ from cc_transcript.mining import (
     iter_user_message_signals,
 )
 
-from cc_pushback.formats import formats
+from cc_pushback.formats import formats, structured_formats
 from cc_pushback.spec import PUSHBACK_SPEC
 
 if TYPE_CHECKING:
@@ -39,14 +39,27 @@ if TYPE_CHECKING:
 
 type Detector = Callable[[Sequence[TranscriptEvent]], list[FeedbackCandidate]]
 
-SPEC_DETECTORS = frozenset({"transcript_message", "plan_reentry", "review_comment"})
 DEFAULT_BEFORE = 6
 
 
+def human_authored(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool:
+    match sig.evidence["provenance"]:
+        case "typed":
+            return keep(events[sig.event_index], PUSHBACK_SPEC)
+        case "surfaced":
+            return True
+
+
 def survives(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool:
-    if sig.detector in SPEC_DETECTORS and not keep(events[sig.event_index], PUSHBACK_SPEC):
-        return False
-    return not (sig.detector == "transcript_message" and sig.trigger_index is None)
+    match sig.detector:
+        case "review_comment":
+            return human_authored(events, sig)
+        case "transcript_message":
+            return keep(events[sig.event_index], PUSHBACK_SPEC) and sig.trigger_index is not None
+        case "plan_reentry":
+            return keep(events[sig.event_index], PUSHBACK_SPEC)
+        case _:
+            return True
 
 
 def parts(sig: MiningSignal) -> tuple[str, ...]:
@@ -80,7 +93,7 @@ def payload_of(sig: MiningSignal) -> Mapping[str, Any] | None:
         case "denial":
             return dict(sig.evidence) or None
         case "review_comment":
-            return {key: sig.evidence[key] for key in ("format", "file", "line_start", "line_end")}
+            return {key: sig.evidence[key] for key in ("format", "file", "line_start", "line_end", "provenance")}
     raise AssertionError(sig.detector)
 
 
@@ -149,5 +162,10 @@ def detect(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
         iter_plan_reentry_signals(events),
         iter_tool_denial_signals(events),
         iter_interrupt_marker_signals(events),
-        iter_review_comment_signals(events, formats()),
+        iter_review_comment_signals(
+            events,
+            formats(),
+            surfaces=frozenset({"typed", "surfaced"}),
+            structured_formats=structured_formats(),
+        ),
     )

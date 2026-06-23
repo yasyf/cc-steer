@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from cc_transcript.mining import ReviewComment, ReviewFormat
+from cc_transcript.mining import ReviewComment, ReviewFormat, StructuredFormat
 from cc_transcript.mining import extract_all as platform_extract_all
 
 if TYPE_CHECKING:
@@ -75,6 +75,19 @@ def extract_conductor_workstream(text: str) -> tuple[ReviewComment, ...]:
             [*(h.start() for h in headers[1:]), len(text)],
             strict=True,
         )
+    )
+
+
+def structured_formats() -> tuple[StructuredFormat, ...]:
+    return (
+        StructuredFormat(
+            name="workflow-finding",
+            file_keys=("file", "path", "file_path", "location"),
+            line_keys=("line", "line_start", "lines"),
+            comment_keys=("comment", "message", "description", "evidence", "detail", "problem", "why", "issue"),
+            fix_keys=("suggested_fix", "suggestion", "fix"),
+            finding_keys=("confirmedHigh", "confirmedCritical"),
+        ),
     )
 
 

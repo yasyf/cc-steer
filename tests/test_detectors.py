@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from cc_transcript import keep
 
@@ -233,6 +235,69 @@ def test_review_comment_explodes_one_row_per_inline_cite() -> None:
     assert [c.text for c in candidates] == ["this is wrong", "fix this too"]
     assert [c.payload["file"] for c in candidates if c.payload] == ["src/foo.py", "src/bar.py"]
     assert [c.payload["line_start"] for c in candidates if c.payload] == [10, 5]
+    assert all(c.payload["provenance"] == "typed" for c in candidates if c.payload)
+
+
+@pytest.mark.unit
+def test_surfaced_workflow_result_yields_review_comments_past_the_gate() -> None:
+    finding = {"file": "src/a.py", "line": "24-51", "description": "guard against None", "suggested_fix": "return"}
+    payload = json.dumps({"findings": [finding]})
+    events = parse(
+        [
+            assistant_text("ran the verifier"),
+            assistant_tool_use("w1", "Bash", {"command": "verify.sh"}),
+            tool_result("w1", payload),
+        ]
+    )
+    [candidate] = [c for c in detect(events) if c.source_kind == "review_comment"]
+    assert candidate.text == "guard against None return"
+    assert candidate.payload == {
+        "format": "workflow-finding",
+        "file": "src/a.py",
+        "line_start": 24,
+        "line_end": 51,
+        "provenance": "surfaced",
+    }
+
+
+@pytest.mark.unit
+def test_surfaced_carrier_with_empty_text_survives_the_spec() -> None:
+    payload = json.dumps({"bugs": [{"location": "x.py", "line": 9, "problem": "off by one"}]})
+    events = parse(
+        [
+            assistant_tool_use("w2", "Bash", {"command": "audit.sh"}),
+            tool_result("w2", payload),
+        ]
+    )
+    [carrier] = [e for e in events if type(e).__name__ == "UserEvent"]
+    assert keep(carrier, PUSHBACK_SPEC) is False  # the carrier alone would be dropped
+    [candidate] = [c for c in detect(events) if c.source_kind == "review_comment"]
+    assert candidate.text == "off by one"
+    assert candidate.payload and candidate.payload["provenance"] == "surfaced"
+
+
+@pytest.mark.unit
+def test_typed_inline_cites_still_captured() -> None:
+    body = "In src/foo.py:L10-12: this is wrong"
+    [candidate] = [c for c in detect(parse([user_text(body)])) if c.source_kind == "review_comment"]
+    assert candidate.text == "this is wrong"
+    assert candidate.payload and candidate.payload["provenance"] == "typed"
+
+
+@pytest.mark.unit
+def test_subagent_review_output_never_surfaces_as_claude() -> None:
+    payload = json.dumps({"findings": [{"file": "z.py", "line": 1, "comment": "rename"}]})
+    events = parse(
+        [
+            assistant_tool_use("s1", "Agent", {"prompt": "review the diff"}),
+            tool_result("s1", payload),
+        ]
+    )
+    candidates = detect(events)
+    assert all(
+        (c.payload or {}).get("provenance") != "claude" for c in candidates
+    )
+    assert [c for c in candidates if c.source_kind == "review_comment"] == []
 
 
 @pytest.mark.unit

@@ -56,6 +56,13 @@ def main() -> None:
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Transcript directories to scan. Defaults to ~/.claude/projects.",
 )
+@click.option(
+    "--findings",
+    "findings",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Directories to search for superset issues.jsonl findings files. May be repeated.",
+)
 @click.option("--full", is_flag=True, help="Re-scan every transcript, ignoring recorded mtimes.")
 @click.option(
     "--db",
@@ -64,17 +71,19 @@ def main() -> None:
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
 @coro
-async def scan(transcripts: tuple[Path, ...], full: bool, db: Path | None) -> None:
+async def scan(transcripts: tuple[Path, ...], findings: tuple[Path, ...], full: bool, db: Path | None) -> None:
     """Scan transcripts for feedback, incrementally.
 
     Each transcript is parsed only when new or modified since the last scan, and
     every candidate is inserted with ``INSERT OR IGNORE`` keyed by a content
     digest, so re-running ``scan`` over unchanged inputs is a no-op. Recording a
-    file and inserting its candidates commit in one transaction.
+    file and inserting its candidates commit in one transaction. With ``--findings``,
+    superset ``issues.jsonl`` files under the given directories are anchored to the
+    closest session and recorded through the same idempotent insert.
     """
     roots = transcripts or (CLAUDE_PROJECTS_DIR,)
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        report = await run_scan(store, roots, full=full)
+        report = await run_scan(store, roots, findings_dirs=findings, full=full)
     click.echo(f"scanned {report.scanned} files, {report.inserted} new rows")
 
 

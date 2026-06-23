@@ -6,9 +6,6 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 
-[options]
-exclude-newer = "2030-01-02T07:00:00Z"
-
 [[package]]
 name = "aiosqlite"
 version = "0.22.1"
@@ -228,7 +225,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.4" },
-    { name = "cc-transcript", specifier = ">=4,<5" },
+    { name = "cc-transcript", specifier = ">=5,<6" },
     { name = "click", specifier = ">=8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
@@ -246,7 +243,7 @@ docs = [{ name = "great-docs", specifier = ">=0.13,<0.14" }]
 
 [[package]]
 name = "cc-transcript"
-version = "4.0.0"
+version = "5.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -254,12 +251,12 @@ dependencies = [
     { name = "click" },
     { name = "orjson" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dc/26/58b55c4708f299c1c41937041e713c5a7f8840bf6ffff437a08117722102/cc_transcript-4.0.0.tar.gz", hash = "sha256:4f9f852b10f92d50038f855280c755dade622afbd692f4abc5b127e838f1bc98", size = 125083, upload-time = "2026-06-18T10:43:48.406Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/1f/6dd2ae7edc13d802a9eabc400f38889a6945fb4ea8a3bfb8eeb46d5ab018/cc_transcript-5.0.0.tar.gz", hash = "sha256:d0ceaf9e1d35905c6c56d349d94164c0048b05954cfccab996d70d339b1ddf35", size = 132191, upload-time = "2026-06-23T06:13:39.485Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a0/a7/5b67f414697dff0678aba635f476c2cfb7cfe4fccf0270d12fe88cbbb8c8/cc_transcript-4.0.0-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:47e8b14520455a3a1924a1e47d82a85d2b77ca43ad29f8f0d7460e6dd42e22a2", size = 2154110, upload-time = "2026-06-18T10:43:42.058Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/e6/898adeec36741df9674ae059656d81983c299362e624480c2e480fbd186f/cc_transcript-4.0.0-cp313-abi3-macosx_11_0_x86_64.whl", hash = "sha256:0d2e5608062b88cd80d4a3cc93c2fffe03184058c6d49f014849326f67440402", size = 2297651, upload-time = "2026-06-18T10:43:43.887Z" },
-    { url = "https://files.pythonhosted.org/packages/c3/42/3ca8e2c7692d4f44d999c0a1fe724f7a1625ec33b996671cfe79b2e9d87d/cc_transcript-4.0.0-cp313-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:689a975d9de96dd9319e563c32bccec1e1311a2cbcf15d7ffee48d9653aa9ba7", size = 2306043, upload-time = "2026-06-18T10:43:45.404Z" },
-    { url = "https://files.pythonhosted.org/packages/76/77/1628807d9bd92f09187cadf29a8b7056b917fe7cdbe8f82599e871d51b28/cc_transcript-4.0.0-cp313-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:ae69021198c414aefdb2d11a5968d2149ccc279218999589d3459a3cee72d479", size = 2435406, upload-time = "2026-06-18T10:43:46.903Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/e9/0c6c4ad3e10a70c1d80900c08f7e7a3e61fd881a7d498ca37541ea66049f/cc_transcript-5.0.0-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:3e96418accffb4afbdab65da70e0558859e6ae9ec64a9d958a87025a14f860a2", size = 2176324, upload-time = "2026-06-23T06:13:33.59Z" },
+    { url = "https://files.pythonhosted.org/packages/40/a2/672cc02e935ea7fc143ee56732aa6416b0c6cc54b64929a2c02221377d20/cc_transcript-5.0.0-cp313-abi3-macosx_11_0_x86_64.whl", hash = "sha256:f486e9190da892a3532412ccf35a3e83c990cffc0ac917f257efe1141360bb92", size = 2320873, upload-time = "2026-06-23T06:13:35.136Z" },
+    { url = "https://files.pythonhosted.org/packages/06/fd/3b2e013800a56e5500505725675da78fc962f32a8fcad3b070d05d7cb240/cc_transcript-5.0.0-cp313-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:1ef13163935dedab7bae423cdae3654391e28c29534d016668b2a2159bc0823e", size = 2325180, upload-time = "2026-06-23T06:13:36.519Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/40/0d24343964b1cb698d0aeaa75a28f9328f3b7263b12111f0dcac0a207146/cc_transcript-5.0.0-cp313-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:d524d8ff6fdb9bd349fcbe128db7ccec0dae5ab3f2b9ba1262dac90d4edac665", size = 2458558, upload-time = "2026-06-23T06:13:38.146Z" },
 ]
 
 [[package]]
