@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0]
+
+### Added
+- Capture human-surfaced code-review findings. The review-comment detector now
+  scans `typed` + `surfaced` provenances (human-typed inline cites plus findings
+  surfaced via tool-result output), gated to exclude Claude-authored (`claude`)
+  self/subagent reviews, and extracts structured `StructuredOutput`-style payloads
+  via a field-map.
+- A `--findings <dir>` source ingests superset `.context/cleanup/*issues.jsonl`
+  findings, anchoring each to the closest session by timestamp.
+
+### Changed
+- Requires cc-transcript `>=5,<6` (the 5.0.0 review-scan API: required
+  `surfaces`/`structured_formats`).
+
 ## [0.4.0]
 
 ### Changed
