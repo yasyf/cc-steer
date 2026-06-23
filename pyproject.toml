@@ -1,6 +1,7 @@
 [project]
 name = "cc-pushback"
-version = "0.3.0"
+# Inert sentinel — the real version is set from the release tag (uv version --frozen); never read this value.
+version = "0.0.0"
 description = "Learn your pushback style from past Claude Code feedback and code reviews, and replicate it with a language model."
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"
