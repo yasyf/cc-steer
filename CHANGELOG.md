@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0]
+
+### Changed
+- Requires cc-transcript `>=6,<7`, adopting its declarative mining API. The six
+  `iter_*_signals` detector entrypoints and `extract_all` are replaced by a single
+  spec-driven `mine(events, spec)` over a `MiningSpec`. cc-pushback's review policy
+  is now a `ReviewSpec` carrying its formats and `surfaces={"typed","surfaced"}`,
+  and `detect` runs every detector through one `mine` pass. Mined output (confidence
+  and reason tuples) is byte-identical — the spec defaults reproduce the historical
+  scoring.
+
+### Removed
+- The `extract_all` extraction wrapper and the dedicated `extract_conductor_finding`
+  callable. The `conductor-finding` format is now a portable `RegexReviewFormat`
+  whose comment-join the platform's `regex_review_comments` performs;
+  `superset-inline` and `conductor-workstream` remain `CallableReviewFormat`s
+  (lookahead / multi-pass), keeping the review detector in Python by design.
+
 ## [0.5.0]
 
 ### Added

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from cc_transcript.mining.spec import regex_review_comments
 
-from cc_pushback.formats import extract_all, extract_superset_inline
+from cc_pushback.formats import CONDUCTOR_FINDING_FMT, extract_superset_inline
 
 
 @pytest.mark.unit
@@ -23,19 +24,13 @@ def test_superset_inline_single_line_has_no_end() -> None:
 @pytest.mark.unit
 def test_conductor_finding_joins_claim_and_suggestion() -> None:
     text = "- file: pkg/mod.py:42\n- theme: correctness\n- claim: leaks a handle\n- suggestion: close it"
-    [(fmt, comment)] = list(extract_all(text))
-    assert fmt.name == "conductor-finding"
+    [comment] = regex_review_comments(CONDUCTOR_FINDING_FMT, text)
     assert comment.file == "pkg/mod.py"
     assert comment.line_start == 42
     assert comment.comment == "leaks a handle close it"
 
 
 @pytest.mark.unit
-def test_extract_all_yields_one_pair_per_comment() -> None:
-    text = "In x/y.py:L1: a\nIn x/z.py:L2: b"
-    assert [comment.comment for _, comment in extract_all(text)] == ["a", "b"]
-
-
-@pytest.mark.unit
-def test_extract_all_empty_when_no_format_matches() -> None:
-    assert list(extract_all("just a normal sentence with no cites")) == []
+def test_conductor_finding_drops_missing_claim_or_suggestion() -> None:
+    [comment] = regex_review_comments(CONDUCTOR_FINDING_FMT, "- file: a.py:7\n- suggestion: extract a helper")
+    assert comment.comment == "extract a helper"

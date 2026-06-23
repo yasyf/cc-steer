@@ -1,37 +1,54 @@
-"""cc-pushback's concrete code-review formats over the platform's parser infra.
+"""cc-pushback's concrete code-review formats over the platform's mining policy.
 
-The generic :class:`ReviewComment`/:class:`ReviewFormat` types and the
+The generic :class:`ReviewComment`/:class:`StructuredFormat` types and the
 format-dispatch live in :mod:`cc_transcript.mining`; this module supplies
-cc-pushback's policy — the three review formats it recognizes — and injects them
-into the platform's :func:`extract_all`.
+cc-pushback's policy — the three review formats it recognizes and the structured
+finding formats it lifts — assembled into a :class:`ReviewSpec` for the
+review-comment detector. ``conductor-finding`` is a portable
+:class:`RegexReviewFormat`; ``superset-inline`` (lookahead) and
+``conductor-workstream`` (multi-pass) are :class:`CallableReviewFormat` escape
+hatches that run in Python.
 """
 
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
 
-from cc_transcript.mining import ReviewComment, ReviewFormat, StructuredFormat
-from cc_transcript.mining import extract_all as platform_extract_all
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+from cc_transcript.mining import (
+    CallableReviewFormat,
+    RegexReviewFormat,
+    ReviewComment,
+    ReviewSpec,
+    StructuredFormat,
+)
 
 SUPERSET_INLINE_RE = re.compile(
     r"^In ((?=\S*[./]|\S+?:L)\S+?)(?::L(\d+)(?:-(\d+))?)?: (.+)$", re.MULTILINE
-)
-CONDUCTOR_FINDING_RE = re.compile(
-    r"^- file: (?P<file>\S+?):(?P<line>\d+)\s*$"
-    r"(?:\n- theme: .+$)?"
-    r"(?:\n- claim: (?P<claim>.+)$)?"
-    r"(?:\n- suggestion: (?P<suggestion>.+)$)?",
-    re.MULTILINE,
 )
 CONDUCTOR_WORKSTREAM_HEADER_RE = re.compile(
     r"^### (?P<id>[A-Z][\w-]*\d*)\s*\[(?P<kind>[A-Z]+)\]\s*—\s*(?P<title>.+)$",
     re.MULTILINE,
 )
 WORKSTREAM_BODY_RE = re.compile(r"^(?:FIX|Tests): .+$", re.MULTILINE)
+CONDUCTOR_FINDING_FMT = RegexReviewFormat(
+    name="conductor-finding",
+    groups=(
+        (
+            "conductor-finding",
+            r"^- file: (\S+?):(\d+)\s*$"
+            r"(?:\n- theme: .+$)?"
+            r"(?:\n- claim: (.+)$)?"
+            r"(?:\n- suggestion: (.+)$)?",
+        ),
+    ),
+    file_group=1,
+    line_start_group=2,
+    line_end_group=None,
+    comment_groups=(3, 4),
+    join=" ",
+    multiline=True,
+    ignore_case=False,
+)
 
 
 def extract_superset_inline(text: str) -> tuple[ReviewComment, ...]:
@@ -43,18 +60,6 @@ def extract_superset_inline(text: str) -> tuple[ReviewComment, ...]:
             comment=match.group(4).strip(),
         )
         for match in SUPERSET_INLINE_RE.finditer(text)
-    )
-
-
-def extract_conductor_finding(text: str) -> tuple[ReviewComment, ...]:
-    return tuple(
-        ReviewComment(
-            file=match.group("file"),
-            line_start=int(match.group("line")),
-            line_end=None,
-            comment=" ".join(part.strip() for part in (match.group("claim"), match.group("suggestion")) if part),
-        )
-        for match in CONDUCTOR_FINDING_RE.finditer(text)
     )
 
 
@@ -91,21 +96,13 @@ def structured_formats() -> tuple[StructuredFormat, ...]:
     )
 
 
-def formats() -> tuple[ReviewFormat, ...]:
-    return (
-        ReviewFormat("superset-inline", SUPERSET_INLINE_RE, extract_superset_inline),
-        ReviewFormat("conductor-finding", CONDUCTOR_FINDING_RE, extract_conductor_finding),
-        ReviewFormat("conductor-workstream", CONDUCTOR_WORKSTREAM_HEADER_RE, extract_conductor_workstream),
+def review_spec() -> ReviewSpec:
+    return ReviewSpec(
+        regex_formats=(CONDUCTOR_FINDING_FMT,),
+        callable_formats=(
+            CallableReviewFormat("superset-inline", SUPERSET_INLINE_RE, extract_superset_inline),
+            CallableReviewFormat("conductor-workstream", CONDUCTOR_WORKSTREAM_HEADER_RE, extract_conductor_workstream),
+        ),
+        structured_formats=structured_formats(),
+        surfaces=frozenset({"typed", "surfaced"}),
     )
-
-
-def extract_all(text: str) -> Iterator[tuple[ReviewFormat, ReviewComment]]:
-    """Yields every ``(format, comment)`` extracted by any of cc-pushback's formats.
-
-    Args:
-        text: The raw review message text.
-
-    Yields:
-        One pair per extracted comment, across all formats whose pattern matches.
-    """
-    return platform_extract_all(text, formats())

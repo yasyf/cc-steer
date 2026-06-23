@@ -2,8 +2,10 @@
 
 The fact-recognition mechanism lives in :mod:`cc_transcript.mining`; this module
 injects cc-pushback's policy — its filter spec, its trigger-absence
-disqualification, and its review formats — and maps each surviving
-:class:`MiningSignal` to a :class:`FeedbackCandidate` whose durable
+disqualification, and its review formats (carried by :data:`PUSHBACK_MINING_SPEC`'s
+:class:`~cc_transcript.mining.ReviewSpec`) — and maps each surviving
+:class:`MiningSignal` from a single :func:`~cc_transcript.mining.mine` pass to a
+:class:`FeedbackCandidate` whose durable
 :class:`~cc_transcript.context.ContextWindow` is captured over the lifted
 :class:`~cc_transcript.activity.SessionActivity`.
 """
@@ -16,22 +18,13 @@ from cc_transcript import keep
 from cc_transcript.activity import SessionActivity, meta_of
 from cc_transcript.context import capture_window
 from cc_transcript.ids import EventRef
-from cc_transcript.mining import (
-    FeedbackCandidate,
-    dedup_key,
-    iter_interrupt_marker_signals,
-    iter_plan_reentry_signals,
-    iter_plan_rejection_signals,
-    iter_review_comment_signals,
-    iter_tool_denial_signals,
-    iter_user_message_signals,
-)
+from cc_transcript.mining import FeedbackCandidate, MiningSpec, dedup_key, mine
 
-from cc_pushback.formats import formats, structured_formats
+from cc_pushback.formats import review_spec
 from cc_pushback.spec import PUSHBACK_SPEC
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from typing import Any
 
     from cc_transcript.mining import MiningSignal
@@ -40,6 +33,7 @@ if TYPE_CHECKING:
 type Detector = Callable[[Sequence[TranscriptEvent]], list[FeedbackCandidate]]
 
 DEFAULT_BEFORE = 6
+PUSHBACK_MINING_SPEC = MiningSpec(review=review_spec())
 
 
 def human_authored(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool:
@@ -126,24 +120,28 @@ def to_candidate(activity: SessionActivity, events: Sequence[TranscriptEvent], s
     )
 
 
-def candidates_from(events: Sequence[TranscriptEvent], *streams: Iterator[MiningSignal]) -> list[FeedbackCandidate]:
-    signals = [sig for stream in streams for sig in stream if survives(events, sig)]
-    if not signals:
+def candidates_from(events: Sequence[TranscriptEvent], signals: Iterable[MiningSignal]) -> list[FeedbackCandidate]:
+    surviving = [sig for sig in signals if survives(events, sig)]
+    if not surviving:
         return []
-    activity = SessionActivity.from_events(signals[0].session_id, events)
-    return [to_candidate(activity, events, sig) for sig in signals]
+    activity = SessionActivity.from_events(surviving[0].session_id, events)
+    return [to_candidate(activity, events, sig) for sig in surviving]
+
+
+def for_detectors(events: Sequence[TranscriptEvent], detectors: frozenset[str]) -> list[FeedbackCandidate]:
+    return candidates_from(events, (sig for sig in mine(events, PUSHBACK_MINING_SPEC) if sig.detector in detectors))
 
 
 def transcript_messages(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
-    return candidates_from(events, iter_user_message_signals(events))
+    return for_detectors(events, frozenset({"transcript_message"}))
 
 
 def plan_reviews(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
-    return candidates_from(events, iter_plan_rejection_signals(events), iter_plan_reentry_signals(events))
+    return for_detectors(events, frozenset({"exit_plan_rejection", "plan_reentry"}))
 
 
 def interrupt_rejections(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
-    return candidates_from(events, iter_tool_denial_signals(events), iter_interrupt_marker_signals(events))
+    return for_detectors(events, frozenset({"denial", "interrupt"}))
 
 
 def detect(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
@@ -155,17 +153,4 @@ def detect(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
     Returns:
         Every feedback candidate the detectors found, in detector order.
     """
-    return candidates_from(
-        events,
-        iter_user_message_signals(events),
-        iter_plan_rejection_signals(events),
-        iter_plan_reentry_signals(events),
-        iter_tool_denial_signals(events),
-        iter_interrupt_marker_signals(events),
-        iter_review_comment_signals(
-            events,
-            formats(),
-            surfaces=frozenset({"typed", "surfaced"}),
-            structured_formats=structured_formats(),
-        ),
-    )
+    return candidates_from(events, mine(events, PUSHBACK_MINING_SPEC))
