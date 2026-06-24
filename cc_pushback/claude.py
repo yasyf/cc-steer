@@ -1,18 +1,20 @@
 """A thin shell-out to the ``claude`` CLI for a single headless text completion.
 
 The run is driven by the shared ``spawnllm`` library: :func:`spawnllm.run`
-spawns ``claude``, retries transient envelopes, and returns captured output, and
-:func:`spawnllm.parse_result_envelope` unwraps the ``{is_error, result}`` JSON.
-It uses the user's existing Claude Code auth (no API key), so the package stays
-offline unless ``claude`` is actually on the path. The structured path lives in
+spawns ``claude``, retries transient envelopes, and returns a
+:class:`spawnllm.Response` whose ``result`` is the unwrapped ``{is_error,
+result}`` JSON text and whose ``error`` carries any provider failure. It uses the
+user's existing Claude Code auth (no API key), so the package stays offline unless
+``claude`` is actually on the path. The structured path lives in
 :mod:`cc_transcript.judge` (``run_structured``/``structured_judge``).
 """
 
 from __future__ import annotations
 
 import shutil
+import subprocess
 
-from spawnllm import ClaudeConfig, RunSpec, parse_result_envelope, run
+from spawnllm import ClaudeConfig, RunSpec, run
 
 CLAUDE_TIMEOUT = 180
 
@@ -37,20 +39,24 @@ async def run_claude(prompt: str, *, system: str, model: str) -> str:
         subprocess.SubprocessError: If ``claude`` exits non-zero, times out, or
             reports an error in its JSON envelope.
     """
-    rr = await run(
-        RunSpec(
-            prompt=prompt,
-            model=model,
-            timeout=CLAUDE_TIMEOUT,
-            provider_configs={
-                "claude": ClaudeConfig(
-                    system_prompt=system,
-                    max_turns=1,
-                    tools="",
-                    disable_slash_commands=True,
-                    output_format="json",
-                )
-            },
-        )
+    spec = RunSpec(
+        prompt=prompt,
+        model=model,
+        timeout=CLAUDE_TIMEOUT,
+        provider_configs={
+            "claude": ClaudeConfig(
+                system_prompt=system,
+                max_turns=1,
+                tools="",
+                disable_slash_commands=True,
+                output_format="json",
+            )
+        },
     )
-    return parse_result_envelope(rr.stdout.encode(), argv=[], stderr=rr.stderr.encode())
+    try:
+        resp = await run(spec)
+    except TimeoutError as exc:
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=CLAUDE_TIMEOUT) from exc
+    if resp.error is not None:
+        raise subprocess.SubprocessError(resp.error)
+    return resp.result
