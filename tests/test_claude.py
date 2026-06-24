@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 
 import pytest
-from spawnllm import Response, RunSpec
+from spawnllm import BackendCallError, Error, Output, Response, Result, RunSpec
 
 from cc_pushback.claude import claude_available, run_claude
 
@@ -21,7 +21,7 @@ async def test_run_claude_builds_spec_and_returns_result(monkeypatch: pytest.Mon
 
     async def fake_run(spec: RunSpec, **_: object) -> Response:
         captured["spec"] = spec
-        return Response(error=None, result="hello")
+        return Response(spec=spec, output=Output(raw="hello"), result=Result(raw="hello"))
 
     monkeypatch.setattr("cc_pushback.claude.run", fake_run)
     assert await run_claude("PROMPT", system="SYS", model="claude-x") == "hello"
@@ -38,19 +38,27 @@ async def test_run_claude_builds_spec_and_returns_result(monkeypatch: pytest.Mon
 
 @pytest.mark.anyio
 async def test_run_claude_raises_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run(_spec: RunSpec, **_: object) -> Response:
-        return Response(error="claude reported an error", result=None)
+    async def fake_run(spec: RunSpec, **_: object) -> Response:
+        return Response(
+            spec=spec,
+            output=Output(raw=""),
+            error=Error(msg="claude reported an error", ex=BackendCallError("claude reported an error")),
+        )
 
     monkeypatch.setattr("cc_pushback.claude.run", fake_run)
-    with pytest.raises(subprocess.SubprocessError):
+    with pytest.raises(subprocess.SubprocessError, match="claude reported an error"):
         await run_claude("p", system="s", model="m")
 
 
 @pytest.mark.anyio
-async def test_run_claude_propagates_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run(_spec: RunSpec, **_: object) -> Response:
-        raise TimeoutError
+async def test_run_claude_surfaces_timeout_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run(spec: RunSpec, **_: object) -> Response:
+        return Response(
+            spec=spec,
+            output=Output(raw=""),
+            error=Error(msg="claude timed out after 180s", ex=TimeoutError()),
+        )
 
     monkeypatch.setattr("cc_pushback.claude.run", fake_run)
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(subprocess.SubprocessError, match="timed out"):
         await run_claude("p", system="s", model="m")

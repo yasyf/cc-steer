@@ -2,11 +2,13 @@
 
 The run is driven by the shared ``spawnllm`` library: :func:`spawnllm.run`
 spawns ``claude``, retries transient envelopes, and returns a
-:class:`spawnllm.Response` whose ``result`` is the unwrapped ``{is_error,
-result}`` JSON text and whose ``error`` carries any provider failure. It uses the
-user's existing Claude Code auth (no API key), so the package stays offline unless
-``claude`` is actually on the path. The structured path lives in
-:mod:`cc_transcript.judge` (``run_structured``/``structured_judge``).
+:class:`spawnllm.Response` that carries the spec, the raw output, and exactly one
+of ``result``/``error``. On success ``resp.result.raw`` is the unwrapped
+``{is_error, result}`` JSON text; on any failure — nonzero exit, error envelope,
+or timeout — ``resp.error`` carries the message and underlying exception, and
+:func:`spawnllm.run` never raises. It uses the user's existing Claude Code auth
+(no API key), so the package stays offline unless ``claude`` is actually on the
+path.
 """
 
 from __future__ import annotations
@@ -53,10 +55,7 @@ async def run_claude(prompt: str, *, system: str, model: str) -> str:
             )
         },
     )
-    try:
-        resp = await run(spec)
-    except TimeoutError as exc:
-        raise subprocess.TimeoutExpired(cmd="claude", timeout=CLAUDE_TIMEOUT) from exc
+    resp = await run(spec)
     if resp.error is not None:
-        raise subprocess.SubprocessError(resp.error)
-    return resp.result
+        raise subprocess.SubprocessError(resp.error.msg)
+    return resp.result.raw

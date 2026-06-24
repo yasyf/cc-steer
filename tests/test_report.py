@@ -153,7 +153,7 @@ async def test_build_summary_falls_back_when_claude_errors(monkeypatch: pytest.M
     monkeypatch.setattr("cc_pushback.report.claude_available", lambda: True)
 
     async def boom(*_: object, **__: object) -> str:
-        raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
+        raise subprocess.SubprocessError("claude timed out after 1s")
 
     monkeypatch.setattr("cc_pushback.report.run_claude", boom)
     summary = await build_summary(corpus(), use_llm=True, model="m")
