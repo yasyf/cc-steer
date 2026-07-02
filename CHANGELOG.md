@@ -96,43 +96,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `iter_*_signals` detector entrypoints and `extract_all` are replaced by a single
   spec-driven `mine(events, spec)` over a `MiningSpec`. cc-pushback's review policy
   is now a `ReviewSpec` carrying its formats and `surfaces={"typed","surfaced"}`,
-  and `detect` runs every detector through one `mine` pass. Mined output (confidence
-  and reason tuples) is byte-identical — the spec defaults reproduce the historical
-  scoring.
+  and `detect` runs every detector through one `mine` pass. The mined confidence
+  and reason tuples are byte-identical. The spec defaults reproduce the
+  historical scoring.
 
 ### Removed
 - The `extract_all` extraction wrapper and the dedicated `extract_conductor_finding`
   callable. The `conductor-finding` format is now a portable `RegexReviewFormat`
   whose comment-join the platform's `regex_review_comments` performs;
-  `superset-inline` and `conductor-workstream` remain `CallableReviewFormat`s
-  (lookahead / multi-pass), keeping the review detector in Python by design.
+  `superset-inline` and `conductor-workstream` remain `CallableReviewFormat`s,
+  their lookahead and multi-pass logic keeping the review detector in Python
+  by design.
 
 ## [0.5.0]
 
 ### Added
 - Capture human-surfaced code-review findings. The review-comment detector now
-  scans `typed` + `surfaced` provenances (human-typed inline cites plus findings
-  surfaced via tool-result output), gated to exclude Claude-authored (`claude`)
-  self/subagent reviews, and extracts structured `StructuredOutput`-style payloads
-  via a field-map.
+  scans `typed` + `surfaced` provenances, covering human-typed inline cites
+  plus findings surfaced via tool-result output. It is gated to exclude
+  Claude-authored (`claude`) self/subagent reviews and extracts structured
+  `StructuredOutput`-style payloads via a field-map.
 - A `--findings <dir>` source ingests superset `.context/cleanup/*issues.jsonl`
   findings, anchoring each to the closest session by timestamp.
 
 ### Changed
-- Requires cc-transcript `>=5,<6` (the 5.0.0 review-scan API: required
-  `surfaces`/`structured_formats`).
+- Requires cc-transcript `>=5,<6`, whose 5.0.0 review-scan API makes
+  `surfaces` and `structured_formats` required.
 
 ## [0.4.0]
 
 ### Changed
 - Requires cc-transcript `>=4,<5` and spawnllm `>=0.2.0`. The `enrich` stage now
-  delegates to cc-transcript's shared correction extractor
-  (`cc_transcript.extract.extract_correction`): per refined pair it harvests the
-  candidate edits around the pushback anchor, picks the one the complaint faults —
-  an LLM call when a backend is ready (`usable_backend()`), the best-overlap
-  candidate otherwise — and appends it to the shared `corrections` ledger. The
-  extractor is idempotent per anchor, so pairs sharing one anchor produce a single
-  row.
+  delegates to cc-transcript's shared correction extractor,
+  `cc_transcript.extract.extract_correction`. Per refined pair it harvests the
+  candidate edits around the pushback anchor, picks the one the complaint
+  faults, and appends it to the shared `corrections` ledger. The pick is an LLM
+  call when a backend is ready (`usable_backend()`) and the best-overlap
+  candidate otherwise. The extractor is idempotent per anchor, so pairs sharing
+  one anchor produce a single row.
 
 ### Removed
 - The local `pair_evidence` table, `pair_evidence_latest` view, and the evidence
@@ -146,70 +147,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0]
 
 ### Changed
-- Requires cc-transcript `>=3.0,<4`; a candidate's de-noising signal is always
-  present (`Sample.signal` is required).
+- Requires cc-transcript `>=3.0,<4`; `Sample.signal` is required, so a
+  candidate's de-noising signal is always present.
 
 ## [0.2.0]
 
 ### Changed
-- Rebuilt on the cc-transcript 2.0 platform (`cc_transcript.mining` / `judge` /
-  `context`): candidates now persist durable `cc-transcript.context/1` windows
-  (refs plus labeled previews) captured over `SessionActivity`, instead of
-  bake-truncated `ContextSnapshot` prose. Triage/audit/refine prompts hydrate
-  each window and render at full fidelity while the transcript lives (a generous
-  trigger-turn budget, so e.g. a >1500-char edit is no longer truncated), and
-  fall back to the labeled summary previews once it expires; every verdict
-  records the fidelity it was judged at. Prompt versions bumped: triage v4,
-  audit v3, refine v2.
-- `feedback_events.origin_path` is now a display hint only (the dashboard's
-  project labels); transcript resolution goes through cc-transcript discovery by
-  session UUID. The legacy `origin_uuid` column is replaced by the platform's
-  `event_uuid`.
+- Rebuilt on the cc-transcript 2.0 platform of `cc_transcript.mining`,
+  `cc_transcript.judge`, and `cc_transcript.context`. Candidates now persist
+  durable `cc-transcript.context/1` windows of refs plus labeled previews,
+  captured over `SessionActivity`, instead of bake-truncated `ContextSnapshot`
+  prose. Triage/audit/refine prompts hydrate each window and render at full
+  fidelity while the transcript lives, under a generous trigger-turn budget
+  that no longer truncates e.g. a >1500-char edit, and fall back to the labeled
+  summary previews once it expires; every verdict records the fidelity it was
+  judged at. Prompt versions bumped to triage v4, audit v3, and refine v2.
+- `feedback_events.origin_path` is now a display hint only, feeding the
+  dashboard's project labels; transcript resolution goes through cc-transcript
+  discovery by session UUID. The legacy `origin_uuid` column is replaced by the
+  platform's `event_uuid`.
 - Removed the `cc_pushback.context` / `nav` / `markers` / shim modules; their
   contents live in `cc_transcript.mining` and `cc_transcript.context`.
 
 ### Added
-- `enrich` command — the pipeline's new final stage (scan → triage → audit →
-  refine → enrich): grounds each refined pair in the code it complains about.
-  Candidate incorrect edits and the corrections that later overwrote them are
-  harvested deterministically around the pushback anchor
-  (`cc_transcript.evidence`: session corrections ranked by hunk overlap, with a
-  read-only git-pickaxe fallback), and an LLM picks the one edit per complaint,
-  copied verbatim. Expired transcripts and editless lookback windows persist
-  free `no_code` sentinel rows (`pair_index=-1`) with no LLM call. Evidence
-  lands in the `pair_evidence` table keyed to the refine generation it
-  annotates — `UNIQUE(dedup_key, refine_version, refine_model, pair_index,
-  enrich_version, enrich_model, extractor_version)` — so a refine re-run or an
+- `enrich` command, the new final stage of the scan -> triage -> audit ->
+  refine -> enrich pipeline. It grounds each refined pair in the code it
+  complains about. Candidate incorrect edits and the corrections that later
+  overwrote them are harvested deterministically around the pushback anchor by
+  `cc_transcript.evidence`, which ranks session corrections by hunk overlap
+  with a read-only git-pickaxe fallback, and an LLM picks the one edit per
+  complaint, copied verbatim. Expired transcripts and editless lookback windows
+  persist free `no_code` sentinel rows (`pair_index=-1`) with no LLM call.
+  Evidence lands in the `pair_evidence` table keyed to the refine generation it
+  annotates, `UNIQUE(dedup_key, refine_version, refine_model, pair_index,
+  enrich_version, enrich_model, extractor_version)`, so a refine re-run or an
   `EXTRACTOR_VERSION` bump re-derives automatically; the `refined_pairs` view
   and the lineage detail carry each pair's latest evidence.
-- Evidence surfaces in the UI: dashboard pair cards gain a collapsible
-  before/after diff for evidence-grounded pairs — compact incorrect/correct
-  panes (old lines `del`-tinted, new lines `ins`-tinted), a file chip, and a
-  `git` chip when the correction came from git history — omitted entirely for
-  pairs without code evidence. The lineage detail's refiner stage renders the
-  same panes with the full, untruncated diff.
-- `migrate-corpus` command: one-time, idempotent conversion of a pre-2.0
-  database — legacy `context_json` snapshots become `cc-transcript.context/1`
-  documents (previews only, summary fidelity, `origin='migrated'`), and the
-  `event_uuid` / `triage.fidelity` columns are added.
-- `triage --refresh-summary`: re-judges rows whose verdict was recorded at
+- Evidence surfaces in the UI. Dashboard pair cards gain a collapsible
+  before/after diff for evidence-grounded pairs, with compact incorrect/correct
+  panes that tint old lines `del` and new lines `ins`, a file chip, and a `git`
+  chip when the correction came from git history; all of it is omitted entirely
+  for pairs without code evidence. The lineage detail's refiner stage renders
+  the same panes with the full, untruncated diff.
+- `migrate-corpus` command for one-time, idempotent conversion of a pre-2.0
+  database. Legacy `context_json` snapshots become `cc-transcript.context/1`
+  documents carrying previews only, summary fidelity, and `origin='migrated'`,
+  and the `event_uuid` / `triage.fidelity` columns are added.
+- `triage --refresh-summary` re-judges rows whose verdict was recorded at
   summary fidelity; a full-fidelity verdict replaces the summary one once the
   row's window hydrates again.
-- `scan` command: idempotent, incremental collection of developer pushback into a
-  local SQLite feedback DB (`~/.cc-pushback/feedback.db`) from existing Claude Code
-  transcripts. Four detectors — transcript messages, plan reviews (rejected
-  `ExitPlanMode` plans and post-edit plan re-entries), interrupts and permission
-  denials, and review-format comments (superset inline cites, conductor findings
-  and workstreams) — each row capturing the surrounding conversational window.
-  Multiple `--transcripts` roots (including rsync mirrors of remote corpora) and a
-  `--full` re-mine are supported.
+- `scan` command for idempotent, incremental collection of developer pushback
+  into a local SQLite feedback DB at `~/.cc-pushback/feedback.db` from existing
+  Claude Code transcripts. Four detectors cover transcript messages; plan
+  reviews, both rejected `ExitPlanMode` plans and post-edit plan re-entries;
+  interrupts and permission denials; and review-format comments spanning
+  superset inline cites, conductor findings, and workstreams. Each row captures
+  the surrounding conversational window. Multiple `--transcripts` roots,
+  including rsync mirrors of remote corpora, and a `--full` re-mine are
+  supported.
 - `stats` and `list` inspection commands, plus `view-samples`, which renders the
-  whole corpus into one HTML page (with an optional `claude`-CLI narrative) and
+  whole corpus into one HTML page with an optional `claude`-CLI narrative and
   serves it over a transient local `aiohttp` server.
 - Built on `cc-transcript` 0.5 for transcript discovery, parsing, the declarative
   noise-filter spec, and the file-state store.
-- Async-native throughout: the store (`aiosqlite`), discovery, transcript parsing,
-  and the `claude` shell-out all run on `anyio`; Click commands bridge to the async
-  core via `anyio.run`.
+- Async-native throughout. The store (`aiosqlite`), discovery, transcript
+  parsing, and the `claude` shell-out all run on `anyio`; Click commands bridge
+  to the async core via `anyio.run`.
 
 [Unreleased]: https://github.com/yasyf/cc-pushback/commits/main
