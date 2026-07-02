@@ -105,7 +105,7 @@ async def test_enrich_appends_one_correction_to_the_shared_ledger(
     await seed_refined(store, monkeypatch, entries)
 
     report = await enrich(store)
-    assert (report.enriched, report.corrections, report.skipped, report.failed, report.pending) == (1, 1, 0, 0, 0)
+    assert (report.enriched, report.corrections, report.skipped, report.pending) == (1, 1, 0, 0)
 
     edit_input = {"file_path": "/repo/app.py", "old_string": INCORRECT_OLD, "new_string": INCORRECT_NEW}
     (row,) = CorrectionLog.open().by_digest(SessionId(SESSION), incorrect_digest=tool_digest("Edit", edit_input))
@@ -167,7 +167,7 @@ async def test_expired_transcript_skips_without_a_correction(
 
     report = await enrich(store)
     # No anchor row lands, so the pair cannot settle; it is skipped, not corrected.
-    assert (report.enriched, report.corrections, report.skipped, report.failed) == (1, 0, 1, 0)
+    assert (report.enriched, report.corrections, report.skipped) == (1, 0, 1)
     assert report.pending == 1
     assert CorrectionLog.open().for_session(SessionId(SESSION)) == ()
 
@@ -188,6 +188,18 @@ async def test_editless_window_skips_without_an_llm_call(
     report = await enrich(store)
     assert (report.corrections, report.skipped, report.pending) == (0, 1, 1)
     assert CorrectionLog.open().for_session(SessionId(SESSION)) == ()
+
+
+@pytest.mark.integration
+async def test_enrich_propagates_worker_failures(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    await seed_refined(store, monkeypatch, coding_entries())
+
+    async def broken(*_: object, **__: object) -> bool:
+        raise RuntimeError("corrupt transcript")
+
+    monkeypatch.setattr("cc_pushback.enrich.resolve_pair", broken)
+    with pytest.raises(ExceptionGroup):
+        await enrich(store)
 
 
 @pytest.mark.integration

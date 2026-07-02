@@ -42,19 +42,20 @@ class EnrichReport:
     """The outcome of one enrich pass.
 
     Attributes:
-        enriched: How many pairs resolved this pass (a correction or a clean skip).
         corrections: How many corrections landed in the shared ``corrections`` ledger.
         skipped: How many pairs resolved without a correction (no anchor, expired
             transcript, compacted anchor, editless window, or no faulted edit).
-        failed: How many pairs failed (timeout, parse error) and stay pending.
         pending: How many refined pairs remain without a ledger correction.
+        enriched: How many pairs resolved this pass, derived as ``corrections + skipped``.
     """
 
-    enriched: int
     corrections: int
     skipped: int
-    failed: int
     pending: int
+
+    @property
+    def enriched(self) -> int:
+        return self.corrections + self.skipped
 
 
 def repo_of(turn: Turn, anchor: EventRef) -> Path | None:
@@ -122,21 +123,18 @@ async def run_enrichments(
     concurrency: int,
     log: CorrectionLog,
     backend: LlmBackend | None,
-) -> tuple[int, int, int]:
-    counts = {"corrections": 0, "skipped": 0, "failed": 0}
+) -> tuple[int, int]:
+    counts = {"corrections": 0, "skipped": 0}
     limiter = anyio.CapacityLimiter(concurrency)
 
     async def worker(row: Mapping[str, object]) -> None:
         async with limiter:
-            try:
-                counts["corrections" if await resolve_pair(row, log, tier=tier, backend=backend) else "skipped"] += 1
-            except Exception:
-                counts["failed"] += 1
+            counts["corrections" if await resolve_pair(row, log, tier=tier, backend=backend) else "skipped"] += 1
 
     async with anyio.create_task_group() as tg:
         for row in rows:
             tg.start_soon(worker, row)
-    return counts["corrections"], counts["skipped"], counts["failed"]
+    return counts["corrections"], counts["skipped"]
 
 
 async def enrich(
@@ -152,7 +150,8 @@ async def enrich(
     carries a row, the extractor never duplicates a shared anchor, and a refine
     re-run resurfaces its new pairs here automatically. Pairs that resolve to no
     correction (no anchor, expired transcript, editless window, or no faulted edit)
-    cost no LLM call.
+    cost no LLM call. A failing pair aborts the pass loudly; corrections already
+    appended to the ledger persist, so a re-run resumes idempotently.
 
     Args:
         store: The open feedback store.
@@ -161,18 +160,11 @@ async def enrich(
         concurrency: The maximum number of concurrent extractions.
 
     Returns:
-        The pass's enriched/corrections/skipped/failed/pending counts.
+        The pass's corrections/skipped/pending counts.
     """
     log = CorrectionLog.open()
     rows = await store.unenriched(log, limit=limit)
-    corrections, skipped, failed = await run_enrichments(
+    corrections, skipped = await run_enrichments(
         rows, tier=tier, concurrency=concurrency, log=log, backend=usable_backend()
     )
-    pending = len(await store.unenriched(log))
-    return EnrichReport(
-        enriched=corrections + skipped,
-        corrections=corrections,
-        skipped=skipped,
-        failed=failed,
-        pending=pending,
-    )
+    return EnrichReport(corrections=corrections, skipped=skipped, pending=len(await store.unenriched(log)))
