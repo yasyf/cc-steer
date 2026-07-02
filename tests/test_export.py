@@ -401,7 +401,18 @@ async def test_dataset_card_documents_configs_categories_and_splits(out: Path) -
     assert "int(sha256(session_id), 16) % 10 == 0" in card
     assert "3 train / 1 test" in card
     assert f"judge v{PROMPT_VERSION}" in card and f"auditor v{AUDIT_VERSION}" in card
-    assert "2 pushback vs 2 noise" in card
+    assert "2 pushback vs 2 noise (50% pushback)" in card
+
+
+async def test_export_survives_a_corpus_with_zero_judged_events(store: FeedbackStore, tmp_path: Path) -> None:
+    report = await export(store, out=tmp_path / "dataset")
+    assert report.counts == {config: {"train": 0, "test": 0} for config in ("traces", "sft", "dpo", "kto")}
+    assert report.pushed is False
+    for config in ("traces", "sft", "dpo", "kto"):
+        assert rows(report.out, config, "train") == [] and rows(report.out, config, "test") == []
+    card = (report.out / "README.md").read_text()
+    assert "0 train / 0 test" in card
+    assert "0 pushback vs 0 noise at" in card
 
 
 async def test_export_push_uploads_every_config_and_the_card(

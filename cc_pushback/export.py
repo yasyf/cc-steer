@@ -146,7 +146,7 @@ straddle the split. `traces` lands at {train_count} train / {test_count} test.
 
 ## Class balance
 
-{pushback_count} pushback vs {noise_count} noise ({pushback_share:.0%} pushback) at
+{pushback_count} pushback vs {noise_count} noise{pushback_share} at
 judge v{judge_version}. The natural imbalance is preserved; balance at train time
 (e.g. KTO's `desirable_weight`), not in the data. `sft` keeps only the pushback rows;
 `dpo` keeps one row per fully-grounded ledger correction, deduplicated across
@@ -404,7 +404,7 @@ def dataset_card(counts: Mapping[str, Mapping[str, int]], *, pushback_count: int
         test_count=counts["traces"]["test"],
         pushback_count=pushback_count,
         noise_count=noise_count,
-        pushback_share=pushback_count / (pushback_count + noise_count),
+        pushback_share=f" ({pushback_count / judged:.0%} pushback)" if (judged := pushback_count + noise_count) else "",
         judge_version=PROMPT_VERSION,
         audit_version=AUDIT_VERSION,
         refine_version=REFINE_VERSION,
