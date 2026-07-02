@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 from cc_transcript import keep
+from cc_transcript.mining import mine
 
 from cc_pushback.detectors import (
+    PUSHBACK_MINING_SPEC,
     detect,
     interrupt_rejections,
     plan_reviews,
+    survives,
     transcript_messages,
 )
 from cc_pushback.spec import PUSHBACK_SPEC
@@ -298,6 +302,22 @@ def test_subagent_review_output_never_surfaces_as_claude() -> None:
         (c.payload or {}).get("provenance") != "claude" for c in candidates
     )
     assert [c for c in candidates if c.source_kind == "review_comment"] == []
+
+
+@pytest.mark.unit
+def test_claude_review_provenance_crashes_the_survival_gate() -> None:
+    payload = json.dumps({"findings": [{"file": "z.py", "line": 1, "comment": "rename"}]})
+    events = parse(
+        [
+            assistant_tool_use("s2", "Agent", {"prompt": "review the diff"}),
+            tool_result("s2", payload),
+        ]
+    )
+    spec = replace(PUSHBACK_MINING_SPEC, review=replace(PUSHBACK_MINING_SPEC.review, surfaces=frozenset({"claude"})))
+    [sig] = [s for s in mine(events, spec) if s.detector == "review_comment"]
+    assert sig.evidence["provenance"] == "claude"
+    with pytest.raises(AssertionError, match="claude"):
+        survives(events, sig)
 
 
 @pytest.mark.unit

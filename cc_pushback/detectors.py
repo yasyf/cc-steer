@@ -42,6 +42,7 @@ def human_authored(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool
             return keep(events[sig.event_index], PUSHBACK_SPEC)
         case "surfaced":
             return True
+    raise AssertionError(sig.evidence["provenance"])
 
 
 def survives(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool:
