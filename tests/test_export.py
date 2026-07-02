@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import datasets
+import huggingface_hub
 import pytest
 from cc_transcript.context import ContextWindow, TurnRef
 from cc_transcript.corrections import Correction, CorrectionLog
@@ -400,3 +402,46 @@ async def test_dataset_card_documents_configs_categories_and_splits(out: Path) -
     assert "3 train / 1 test" in card
     assert f"judge v{PROMPT_VERSION}" in card and f"auditor v{AUDIT_VERSION}" in card
     assert "2 pushback vs 2 noise" in card
+
+
+async def test_export_push_uploads_every_config_and_the_card(
+    store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pushes: list[dict[str, object]] = []
+    uploads: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        datasets.DatasetDict,
+        "push_to_hub",
+        lambda self, repo_id, **kwargs: pushes.append({"repo_id": repo_id} | kwargs),
+    )
+    monkeypatch.setattr(huggingface_hub.HfApi, "upload_file", lambda self, **kwargs: uploads.append(kwargs))
+    await seed(store)
+    report = await export(store, out=tmp_path / "dataset", repo_id="u/r", push=True)
+    assert report.pushed is True
+    assert len(pushes) == 4
+    assert {push["config_name"] for push in pushes} == {"traces", "sft", "dpo", "kto"}
+    assert all(push["repo_id"] == "u/r" and push["private"] is True for push in pushes)
+    assert uploads == [
+        {
+            "path_or_fileobj": report.out / "README.md",
+            "path_in_repo": "README.md",
+            "repo_id": "u/r",
+            "repo_type": "dataset",
+        }
+    ]
+
+
+async def test_export_push_failure_propagates_after_local_write(
+    store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def down(*_: object, **__: object) -> None:
+        raise RuntimeError("hub is down")
+
+    monkeypatch.setattr(datasets.DatasetDict, "push_to_hub", down)
+    await seed(store)
+    dataset_dir = tmp_path / "dataset"
+    with pytest.raises(RuntimeError, match="hub is down"):
+        await export(store, out=dataset_dir, repo_id="u/r", push=True)
+    for config in ("traces", "sft", "dpo", "kto"):
+        assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
+    assert (dataset_dir / "README.md").is_file()
