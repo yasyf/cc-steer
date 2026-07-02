@@ -261,18 +261,6 @@ class Lineage:
             case (judge, auditor):
                 return "agree" if judge.is_pushback == auditor.is_pushback else "disagree"
 
-    @property
-    def status(self) -> Literal["refined", "accepted", "noise", "unjudged"]:
-        if self.pairs:
-            return "refined"
-        match self.final:
-            case None:
-                return "unjudged"
-            case verdict if verdict.is_pushback:
-                return "accepted"
-            case _:
-                return "noise"
-
 
 @dataclass(frozen=True, slots=True)
 class CorpusStats:

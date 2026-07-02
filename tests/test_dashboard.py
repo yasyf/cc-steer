@@ -149,26 +149,19 @@ def test_language_of(path: str | None, language: str | None) -> None:
 
 
 @pytest.mark.parametrize(
-    ("verdicts", "pairs", "status", "flipped"),
+    ("verdicts", "flipped"),
     [
-        pytest.param([], [], "unjudged", False, id="no-judge"),
-        pytest.param([vrow(JUDGE, 1, "status_update", is_pushback=False)], [], "noise", False, id="noise"),
-        pytest.param([vrow(JUDGE, 1, "wrong_approach", is_pushback=True)], [], "accepted", False, id="accepted"),
+        pytest.param([], False, id="no-judge"),
+        pytest.param([vrow(JUDGE, 1, "status_update", is_pushback=False)], False, id="single-judge"),
         pytest.param(
             [vrow(JUDGE, 1, "status_update", is_pushback=False), vrow(JUDGE, 2, "wrong_approach", is_pushback=True)],
-            [prow(0, "dont")],
-            "refined",
             True,
-            id="refined-and-flipped",
+            id="side-change-across-versions",
         ),
     ],
 )
-def test_lineage_status_and_flipped(
-    verdicts: list[VerdictRow], pairs: list[RefinedPairRow], status: str, flipped: bool
-) -> None:
-    lin = lineage(verdicts, pairs)
-    assert lin.status == status
-    assert lin.flipped is flipped
+def test_lineage_flipped(verdicts: list[VerdictRow], flipped: bool) -> None:
+    assert lineage(verdicts).flipped is flipped
 
 
 def test_lineage_final_is_latest_judge_version() -> None:
