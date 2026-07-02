@@ -62,7 +62,7 @@ async def sync_dataset(store: FeedbackStore) -> None:
     from cc_pushback.export import export as run_export
 
     click.echo(f"syncing dataset to {(repo_id := hf_repo_id())}")
-    report = await run_export(store, out=DATASET_DIR, repo_id=repo_id, push=True)
+    report = await run_export(store, out=DATASET_DIR, push_to=repo_id)
     click.echo("synced " + "  ".join(f"{config} {sum(splits.values())}" for config, splits in report.counts.items()))
 
 
@@ -457,13 +457,12 @@ async def export(out: Path, repo_id: str | None, push: bool, db: Path | None) ->
     """
     from cc_pushback.export import export as run_export
 
-    if push:
-        repo_id = repo_id or hf_repo_id()
+    push_to = (repo_id or hf_repo_id()) if push else None
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        report = await run_export(store, out=out, repo_id=repo_id, push=push)
+        report = await run_export(store, out=out, push_to=push_to)
     for config, splits in report.counts.items():
         click.echo(f"{config}: " + "  ".join(f"{split} {count}" for split, count in splits.items()))
-    click.echo(f"wrote {report.out}" + (f", pushed to {repo_id}" if report.pushed else ""))
+    click.echo(f"wrote {report.out}" + (f", pushed to {push_to}" if report.pushed else ""))
 
 
 @main.command()

@@ -17,7 +17,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from cc_transcript.context import ContextWindow
 from cc_transcript.corrections import CorrectionLog
@@ -33,6 +33,7 @@ from cc_pushback.triage import AUDIT_VERSION, PROMPT_VERSION, PUSHBACK_CATEGORIE
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from aiosqlite import Row
     from cc_transcript.context import TurnRef
     from cc_transcript.corrections import Correction
 
@@ -174,6 +175,80 @@ CONFIG_USES = {
 }
 
 
+class Message(TypedDict):
+    role: str
+    content: str
+
+
+class Pair(TypedDict):
+    pair_index: int
+    action: str
+    complaint_verbatim: str
+    complaint: str
+
+
+class Evidence(TypedDict):
+    digest: str | None
+    file: str
+    faulted_old: str
+    faulted_new: str
+    origin: str | None
+    correction_file: str | None
+    correcting_old: str | None
+    correcting_new: str | None
+    commit: str | None
+    overlap: float
+
+
+class Trace(TypedDict):
+    id: str
+    session_id: str
+    event_uuid: str
+    project: str
+    occurred_at: str
+    cc_version: str
+    source_kind: str
+    context: list[Message]
+    agent_action: str | None
+    what_claude_did: str
+    user_message: str
+    aftermath: list[Message]
+    is_pushback: bool
+    category: str
+    confidence: float
+    judge_rationale: str
+    judge_model: str
+    fidelity: str
+    auditor_category: str | None
+    pairs: list[Pair]
+    evidence: list[Evidence]
+    split: str
+    meta: str
+
+
+class SftRow(TypedDict):
+    prompt: list[Message]
+    completion: list[Message]
+    id: str
+    category: str
+
+
+class DpoRow(TypedDict):
+    prompt: list[Message]
+    chosen: list[Message]
+    rejected: list[Message]
+    id: str
+    category: str
+
+
+class KtoRow(TypedDict):
+    prompt: list[Message]
+    completion: list[Message]
+    label: bool
+    id: str
+    category: str
+
+
 @dataclass(frozen=True, slots=True)
 class ExportReport:
     """The outcome of one export pass.
@@ -193,11 +268,11 @@ def split_of(session_id: str) -> str:
     return "test" if int(hashlib.sha256(session_id.encode()).hexdigest(), 16) % 10 == 0 else "train"
 
 
-def messages(turns: Sequence[TurnRef]) -> list[dict[str, str]]:
+def messages(turns: Sequence[TurnRef]) -> list[Message]:
     return [{"role": turn.role, "content": turn.preview} for turn in turns]
 
 
-def assistant_message(content: str) -> list[dict[str, str]]:
+def assistant_message(content: str) -> list[Message]:
     return [{"role": "assistant", "content": content}]
 
 
@@ -209,7 +284,7 @@ def render_edit(file: str, old: str, new: str) -> str:
     return f"{file}\n```old\n{old}\n```\n```new\n{new}\n```"
 
 
-def evidence_entry(correction: Correction) -> dict[str, object]:
+def evidence_entry(correction: Correction) -> Evidence:
     return {
         "digest": correction.incorrect_digest,
         "file": correction.incorrect_file,
@@ -224,7 +299,7 @@ def evidence_entry(correction: Correction) -> dict[str, object]:
     }
 
 
-def trace_meta(row: Mapping[str, object]) -> str:
+def trace_meta(row: Row) -> str:
     payload = json.loads(str(row["payload_json"]))
     return json.dumps(
         {"signal": payload["signal"]}
@@ -237,7 +312,7 @@ def trace_meta(row: Mapping[str, object]) -> str:
     )
 
 
-def trace_row(row: Mapping[str, object], pairs: list[dict[str, object]], log: CorrectionLog) -> dict[str, object]:
+def trace_row(row: Row, pairs: list[Pair], log: CorrectionLog) -> Trace:
     window = ContextWindow.from_json(str(row["context_json"]))
     session_id = str(row["session_id"])
     is_pushback = bool(row["is_pushback"])
@@ -272,51 +347,49 @@ def trace_row(row: Mapping[str, object], pairs: list[dict[str, object]], log: Co
     }
 
 
-def sft_row(trace: Mapping[str, object]) -> dict[str, object]:
+def sft_row(trace: Trace) -> SftRow:
     return {
-        "prompt": [*trace["context"], *assistant_message(str(trace["agent_action"] or trace["what_claude_did"]))],
-        "completion": assistant_message(str(trace["user_message"])),
+        "prompt": [*trace["context"], *assistant_message(trace["agent_action"] or trace["what_claude_did"])],
+        "completion": assistant_message(trace["user_message"]),
         "id": trace["id"],
         "category": trace["category"],
     }
 
 
-def kto_row(trace: Mapping[str, object]) -> dict[str, object]:
+def kto_row(trace: Trace) -> KtoRow:
     return {
         "prompt": trace["context"],
-        "completion": assistant_message(str(trace["agent_action"] or trace["what_claude_did"])),
+        "completion": assistant_message(trace["agent_action"] or trace["what_claude_did"]),
         "label": not trace["is_pushback"],
         "id": trace["id"],
         "category": trace["category"],
     }
 
 
-def dpo_row(trace: Mapping[str, object], entry: Mapping[str, object]) -> dict[str, object]:
+def dpo_row(trace: Trace, entry: Evidence) -> DpoRow:
     return {
         "prompt": trace["context"],
         "chosen": assistant_message(
             render_edit(str(entry["correction_file"]), str(entry["correcting_old"]), str(entry["correcting_new"]))
         ),
-        "rejected": assistant_message(
-            render_edit(str(entry["file"]), str(entry["faulted_old"]), str(entry["faulted_new"]))
-        ),
+        "rejected": assistant_message(render_edit(entry["file"], entry["faulted_old"], entry["faulted_new"])),
         "id": trace["id"],
         "category": trace["category"],
     }
 
 
-def dpo_split(traces: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+def dpo_split(traces: Sequence[Trace]) -> list[DpoRow]:
     return list(
         {
             (trace["session_id"], trace["event_uuid"], entry["digest"]): dpo_row(trace, entry)
-            for trace in sorted(traces, key=lambda trace: bool(trace["is_pushback"]))
+            for trace in sorted(traces, key=lambda trace: trace["is_pushback"])
             for entry in trace["evidence"]
             if all(entry[side] is not None for side in DPO_SIDES)
         }.values()
     )
 
 
-def config_rows(traces: list[dict[str, object]]) -> dict[str, dict[str, list[dict[str, object]]]]:
+def config_rows(traces: list[Trace]) -> dict[str, Mapping[str, Sequence[Mapping[str, object]]]]:
     by_split = {split: [trace for trace in traces if trace["split"] == split] for split in SPLITS}
     return {
         "traces": by_split,
@@ -411,19 +484,24 @@ def dataset_card(counts: Mapping[str, Mapping[str, int]], *, pushback_count: int
     )
 
 
-async def load_traces(store: FeedbackStore) -> list[dict[str, object]]:
+async def load_traces(store: FeedbackStore) -> list[Trace]:
     log = CorrectionLog.open()
     pair_cur = await store.store.conn.execute(LATEST_PAIRS_QUERY)
-    pairs_by_key: dict[str, list[dict[str, object]]] = {}
+    pairs_by_key: dict[str, list[Pair]] = {}
     async for pair in pair_cur:
         pairs_by_key.setdefault(str(pair["dedup_key"]), []).append(
-            {key: pair[key] for key in ("pair_index", "action", "complaint_verbatim", "complaint")}
+            Pair(
+                pair_index=pair["pair_index"],
+                action=pair["action"],
+                complaint_verbatim=pair["complaint_verbatim"],
+                complaint=pair["complaint"],
+            )
         )
     cur = await store.store.conn.execute(TRACES_QUERY, (PROMPT_VERSION, AUDIT_VERSION))
     return [trace_row(row, pairs_by_key.get(str(row["dedup_key"]), []), log) async for row in cur]
 
 
-async def export(store: FeedbackStore, *, out: Path, repo_id: str | None = None, push: bool = False) -> ExportReport:
+async def export(store: FeedbackStore, *, out: Path, push_to: str | None = None) -> ExportReport:
     """Exports the judged corpus as a HuggingFace dataset: ``traces`` plus TRL views.
 
     Reads the feedback store and the shared ``corrections`` ledger (both read-only)
@@ -431,32 +509,35 @@ async def export(store: FeedbackStore, *, out: Path, repo_id: str | None = None,
     canonical ``traces`` config — then projects the TRL-ready ``sft``, ``dpo``, and
     ``kto`` configs from the same rows. Every config is written as per-split parquet
     under ``out/<config>/<split>.parquet`` next to a generated dataset card at
-    ``out/README.md``; with ``push``, every config is also pushed to the private
-    HuggingFace repo ``repo_id`` and the card uploaded. Splits are a deterministic
-    group split on the session hash, computed once on ``traces`` and inherited by
-    every derived row.
+    ``out/README.md``; with ``push_to``, every config is also pushed to that private
+    HuggingFace repo and the card uploaded. Splits are a deterministic group split
+    on the session hash, computed once on ``traces`` and inherited by every derived
+    row.
 
     Args:
         store: The open feedback store.
         out: The directory to write the parquet files and dataset card into.
-        repo_id: The HuggingFace dataset repo to push to; required when ``push``.
-        push: When True, push every config to ``repo_id`` as a private dataset.
+        push_to: The HuggingFace dataset repo to push every config to as a
+            private dataset; None skips the push.
 
     Returns:
         The export's per-config, per-split row counts.
     """
     traces = await load_traces(store)
     features = config_features()
+    by_config = config_rows(traces)
     built = {
-        config: {
-            split: Dataset.from_dict(
-                {name: [row[name] for row in rows] for name in features[config]}, features=features[config]
-            )
-            for split, rows in splits.items()
-        }
-        for config, splits in config_rows(traces).items()
+        config: DatasetDict(
+            {
+                split: Dataset.from_dict(
+                    {name: [row[name] for row in rows] for name in features[config]}, features=features[config]
+                )
+                for split, rows in splits.items()
+            }
+        )
+        for config, splits in by_config.items()
     }
-    counts = {config: {split: len(rows) for split, rows in splits.items()} for config, splits in built.items()}
+    counts = {config: {split: len(rows) for split, rows in splits.items()} for config, splits in by_config.items()}
     for config, splits in built.items():
         (out / config).mkdir(parents=True, exist_ok=True)
         for split, dataset in splits.items():
@@ -465,12 +546,12 @@ async def export(store: FeedbackStore, *, out: Path, repo_id: str | None = None,
     card.write_text(
         dataset_card(
             counts,
-            pushback_count=sum(trace["is_pushback"] is True for trace in traces),
-            noise_count=sum(trace["is_pushback"] is False for trace in traces),
+            pushback_count=sum(trace["is_pushback"] for trace in traces),
+            noise_count=sum(not trace["is_pushback"] for trace in traces),
         )
     )
-    if push:
+    if push_to is not None:
         for config, splits in built.items():
-            DatasetDict(splits).push_to_hub(repo_id, config_name=config, private=True)
-        HfApi().upload_file(path_or_fileobj=card, path_in_repo="README.md", repo_id=repo_id, repo_type="dataset")
-    return ExportReport(counts=counts, out=out, pushed=push)
+            splits.push_to_hub(push_to, config_name=config, private=True)
+        HfApi().upload_file(path_or_fileobj=card, path_in_repo="README.md", repo_id=push_to, repo_type="dataset")
+    return ExportReport(counts=counts, out=out, pushed=push_to is not None)

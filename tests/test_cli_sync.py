@@ -32,8 +32,7 @@ pytestmark = pytest.mark.integration
 
 class ExportCall(NamedTuple):
     out: Path
-    repo_id: str | None
-    push: bool
+    push_to: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +80,9 @@ STAGES = (
 def export_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[ExportCall]:
     calls: list[ExportCall] = []
 
-    async def record(store: FeedbackStore, *, out: Path, repo_id: str | None, push: bool) -> ExportReport:
-        calls.append(ExportCall(out, repo_id, push))
-        return ExportReport(counts={"traces": {"train": 2, "test": 1}}, out=out, pushed=push)
+    async def record(store: FeedbackStore, *, out: Path, push_to: str | None = None) -> ExportReport:
+        calls.append(ExportCall(out, push_to))
+        return ExportReport(counts={"traces": {"train": 2, "test": 1}}, out=out, pushed=push_to is not None)
 
     monkeypatch.setattr(cc_pushback.export, "export", record)
     monkeypatch.setattr(cc_pushback.cli, "DATASET_DIR", tmp_path)
@@ -118,7 +117,7 @@ def test_scan_syncs_after_inserting_rows(
 ) -> None:
     result = runner.invoke(main, ["scan", "--transcripts", str(transcripts), "--db", str(db)])
     assert result.exit_code == 0, result.output
-    assert export_calls == [ExportCall(tmp_path, HF_REPO_ID, True)]
+    assert export_calls == [ExportCall(tmp_path, HF_REPO_ID)]
     assert f"syncing dataset to {HF_REPO_ID}" in result.output
 
 
@@ -165,7 +164,7 @@ def test_stage_sync_fires_only_when_the_pass_changed_data(
     monkeypatch.setattr(case.module, case.attribute, stage)
     result = runner.invoke(main, [case.command, "--db", str(db)])
     assert result.exit_code == 0, result.output
-    assert export_calls == ([ExportCall(tmp_path, HF_REPO_ID, True)] if changed else [])
+    assert export_calls == ([ExportCall(tmp_path, HF_REPO_ID)] if changed else [])
     assert ("syncing dataset to" in result.output) is changed
 
 
@@ -174,7 +173,7 @@ def test_export_push_resolves_the_repo_from_the_hf_user(
 ) -> None:
     result = runner.invoke(main, ["export", "--db", str(db), "--out", str(tmp_path / "ds"), "--push"])
     assert result.exit_code == 0, result.output
-    assert export_calls == [ExportCall(tmp_path / "ds", HF_REPO_ID, True)]
+    assert export_calls == [ExportCall(tmp_path / "ds", HF_REPO_ID)]
     assert f"pushed to {HF_REPO_ID}" in result.output
 
 
@@ -187,13 +186,13 @@ def test_export_without_push_never_resolves_the_hf_user(
     monkeypatch.setattr(cc_pushback.cli, "hf_repo_id", offline)
     result = runner.invoke(main, ["export", "--db", str(db), "--out", str(tmp_path / "ds")])
     assert result.exit_code == 0, result.output
-    assert export_calls == [ExportCall(tmp_path / "ds", None, False)]
+    assert export_calls == [ExportCall(tmp_path / "ds", None)]
 
 
 def test_push_failure_exits_nonzero(
     runner: CliRunner, transcripts: Path, db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def explode(store: FeedbackStore, *, out: Path, repo_id: str, push: bool) -> ExportReport:
+    async def explode(store: FeedbackStore, *, out: Path, push_to: str | None = None) -> ExportReport:
         raise RuntimeError("hub push failed")
 
     monkeypatch.setattr(cc_pushback.export, "export", explode)

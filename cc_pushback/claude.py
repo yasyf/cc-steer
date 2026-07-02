@@ -16,7 +16,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-from spawnllm import ClaudeConfig, RunSpec, run
+from spawnllm import ClaudeConfig, Error, Response, Result, RunSpec, run
 
 CLAUDE_TIMEOUT = 180
 
@@ -55,7 +55,10 @@ async def run_claude(prompt: str, *, system: str, model: str) -> str:
             )
         },
     )
-    resp = await run(spec)
-    if resp.error is not None:
-        raise subprocess.SubprocessError(resp.error.msg)
-    return resp.result.raw
+    match resp := await run(spec):
+        case Response(error=Error(msg=msg)):
+            raise subprocess.SubprocessError(msg)
+        case Response(result=Result(raw=raw)):
+            return raw
+        case _:
+            raise AssertionError(resp)

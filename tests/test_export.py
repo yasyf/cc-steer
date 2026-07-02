@@ -427,7 +427,7 @@ async def test_export_push_uploads_every_config_and_the_card(
     )
     monkeypatch.setattr(huggingface_hub.HfApi, "upload_file", lambda self, **kwargs: uploads.append(kwargs))
     await seed(store)
-    report = await export(store, out=tmp_path / "dataset", repo_id="u/r", push=True)
+    report = await export(store, out=tmp_path / "dataset", push_to="u/r")
     assert report.pushed is True
     assert len(pushes) == 4
     assert {push["config_name"] for push in pushes} == {"traces", "sft", "dpo", "kto"}
@@ -452,7 +452,7 @@ async def test_export_push_failure_propagates_after_local_write(
     await seed(store)
     dataset_dir = tmp_path / "dataset"
     with pytest.raises(RuntimeError, match="hub is down"):
-        await export(store, out=dataset_dir, repo_id="u/r", push=True)
+        await export(store, out=dataset_dir, push_to="u/r")
     for config in ("traces", "sft", "dpo", "kto"):
         assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
     assert (dataset_dir / "README.md").is_file()
