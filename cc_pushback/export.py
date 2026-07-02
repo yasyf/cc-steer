@@ -70,18 +70,9 @@ ORDER BY e.id
 """
 
 LATEST_PAIRS_QUERY = """
-WITH gens AS (
-  SELECT dedup_key, prompt_version, model, refined_at,
-    ROW_NUMBER() OVER (
-      PARTITION BY dedup_key ORDER BY prompt_version DESC, refined_at DESC
-    ) AS g
-  FROM (SELECT DISTINCT dedup_key, prompt_version, model, refined_at FROM refinement)
-)
-SELECT r.dedup_key, r.pair_index, r.action, r.complaint_verbatim, r.complaint
-FROM refinement r
-JOIN gens ON gens.dedup_key = r.dedup_key AND gens.prompt_version = r.prompt_version
-         AND gens.model = r.model AND gens.refined_at = r.refined_at AND gens.g = 1
-ORDER BY r.dedup_key, r.pair_index
+SELECT dedup_key, pair_index, action, complaint_verbatim, complaint
+FROM latest_refinement
+ORDER BY dedup_key, pair_index
 """
 
 CATEGORIES = {

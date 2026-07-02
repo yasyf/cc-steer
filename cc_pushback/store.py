@@ -56,15 +56,26 @@ INSERT OR IGNORE INTO feedback_events (
 """
 
 TRIAGE_VIEWS_DDL = """DROP VIEW IF EXISTS training_pairs;
-DROP VIEW IF EXISTS accepted_pushback;
-CREATE VIEW accepted_pushback AS
-WITH latest AS (
+DROP VIEW IF EXISTS latest_judge;
+CREATE VIEW latest_judge AS
+SELECT * FROM (
   SELECT t.*, ROW_NUMBER() OVER (
     PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
   ) AS rn
   FROM triage t
   WHERE t.role = 'judge'
-)
+) WHERE rn = 1;
+DROP VIEW IF EXISTS latest_auditor;
+CREATE VIEW latest_auditor AS
+SELECT * FROM (
+  SELECT t.*, ROW_NUMBER() OVER (
+    PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
+  ) AS rn
+  FROM triage t
+  WHERE t.role = 'auditor'
+) WHERE rn = 1;
+DROP VIEW IF EXISTS accepted_pushback;
+CREATE VIEW accepted_pushback AS
 SELECT
   e.id AS event_id,
   e.dedup_key,
@@ -75,7 +86,7 @@ SELECT
   t.what_claude_did,
   e.origin_path
 FROM feedback_events e
-JOIN latest t ON t.dedup_key = e.dedup_key AND t.rn = 1
+JOIN latest_judge t ON t.dedup_key = e.dedup_key
 WHERE t.is_pushback = 1;
 """
 
@@ -93,8 +104,8 @@ CREATE TABLE IF NOT EXISTS refinement (
   UNIQUE(dedup_key, prompt_version, model, pair_index)
 );
 CREATE INDEX IF NOT EXISTS idx_refinement_dedup ON refinement(dedup_key);
-DROP VIEW IF EXISTS refined_pairs;
-CREATE VIEW refined_pairs AS
+DROP VIEW IF EXISTS latest_refinement;
+CREATE VIEW latest_refinement AS
 WITH gens AS (
   SELECT dedup_key, prompt_version, model, refined_at,
     ROW_NUMBER() OVER (
@@ -102,6 +113,12 @@ WITH gens AS (
     ) AS g
   FROM (SELECT DISTINCT dedup_key, prompt_version, model, refined_at FROM refinement)
 )
+SELECT r.*
+FROM refinement r
+JOIN gens ON gens.dedup_key = r.dedup_key AND gens.prompt_version = r.prompt_version
+         AND gens.model = r.model AND gens.refined_at = r.refined_at AND gens.g = 1;
+DROP VIEW IF EXISTS refined_pairs;
+CREATE VIEW refined_pairs AS
 SELECT
   e.id AS event_id,
   r.dedup_key,
@@ -118,9 +135,7 @@ SELECT
   e.origin_path,
   r.prompt_version,
   r.model
-FROM refinement r
-JOIN gens ON gens.dedup_key = r.dedup_key AND gens.prompt_version = r.prompt_version
-         AND gens.model = r.model AND gens.refined_at = r.refined_at AND gens.g = 1
+FROM latest_refinement r
 JOIN feedback_events e ON e.dedup_key = r.dedup_key
 JOIN accepted_pushback ap ON ap.dedup_key = r.dedup_key
 ORDER BY e.id, r.pair_index;
@@ -133,35 +148,14 @@ INSERT OR IGNORE INTO refinement (
 """
 
 CANDIDATES_QUERY = f"""
-WITH latest_judge AS (
-  SELECT t.*, ROW_NUMBER() OVER (
-    PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
-  ) AS rn
-  FROM triage t
-  WHERE t.role = 'judge'
-),
-latest_auditor AS (
-  SELECT t.dedup_key, t.is_pushback, ROW_NUMBER() OVER (
-    PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
-  ) AS rn
-  FROM triage t
-  WHERE t.role = 'auditor'
-),
-judge_flip AS (
+WITH judge_flip AS (
   SELECT dedup_key, COUNT(DISTINCT is_pushback) > 1 AS flipped
   FROM triage WHERE role = 'judge' GROUP BY dedup_key
 ),
 refine_summary AS (
-  SELECT r.dedup_key, COUNT(*) AS pair_count, g.prompt_version AS refine_version, g.model AS refine_model
-  FROM refinement r
-  JOIN (
-    SELECT dedup_key, prompt_version, model, refined_at, ROW_NUMBER() OVER (
-      PARTITION BY dedup_key ORDER BY prompt_version DESC, refined_at DESC
-    ) AS gen
-    FROM (SELECT DISTINCT dedup_key, prompt_version, model, refined_at FROM refinement)
-  ) g ON g.dedup_key = r.dedup_key AND g.prompt_version = r.prompt_version
-     AND g.model = r.model AND g.refined_at = r.refined_at AND g.gen = 1
-  GROUP BY r.dedup_key
+  SELECT dedup_key, COUNT(*) AS pair_count,
+    MAX(prompt_version) AS refine_version, MAX(model) AS refine_model
+  FROM latest_refinement GROUP BY dedup_key
 )
 SELECT {EVENT_COLUMNS}, e.origin_path,
   j.category, j.is_pushback, j.confidence, j.prompt_version AS judge_version,
@@ -170,8 +164,8 @@ SELECT {EVENT_COLUMNS}, e.origin_path,
   COALESCE(f.flipped, 0) AS flipped,
   rs.pair_count, rs.refine_version, rs.refine_model
 FROM feedback_events e
-LEFT JOIN latest_judge j ON j.dedup_key = e.dedup_key AND j.rn = 1
-LEFT JOIN latest_auditor a ON a.dedup_key = e.dedup_key AND a.rn = 1
+LEFT JOIN latest_judge j ON j.dedup_key = e.dedup_key
+LEFT JOIN latest_auditor a ON a.dedup_key = e.dedup_key
 LEFT JOIN judge_flip f ON f.dedup_key = e.dedup_key
 LEFT JOIN refine_summary rs ON rs.dedup_key = e.dedup_key
 ORDER BY e.id
@@ -185,13 +179,7 @@ LINEAGE_VERDICTS_QUERY = (
 LINEAGE_PAIRS_QUERY = """
 SELECT r.pair_index, r.action, r.complaint_verbatim, r.complaint, r.prompt_version, r.model,
   e.session_id, e.event_uuid
-FROM refinement r
-JOIN (
-  SELECT prompt_version, model, refined_at, ROW_NUMBER() OVER (
-    ORDER BY prompt_version DESC, refined_at DESC
-  ) AS gen
-  FROM (SELECT DISTINCT prompt_version, model, refined_at FROM refinement WHERE dedup_key = ?)
-) g ON g.prompt_version = r.prompt_version AND g.model = r.model AND g.refined_at = r.refined_at AND g.gen = 1
+FROM latest_refinement r
 JOIN feedback_events e ON e.dedup_key = r.dedup_key
 WHERE r.dedup_key = ?
 ORDER BY r.pair_index
@@ -392,9 +380,9 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     async def lineage(self, dedup_key: str) -> dict[str, object]:
         """Returns one event with all its triage verdicts and latest refined pairs.
 
-        Reads ``feedback_events``, ``triage``, and ``refinement`` directly — the
-        views drop the auditor, the older judge versions, and the payload the
-        lineage needs.
+        Reads ``feedback_events``, ``triage``, and ``latest_refinement`` directly —
+        the deliverable views drop the auditor, the older judge versions, and the
+        payload the lineage needs.
 
         Args:
             dedup_key: The event's content-derived key.
@@ -413,7 +401,7 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             return {}
         verdict_cur = await conn.execute(LINEAGE_VERDICTS_QUERY, (dedup_key,))
         verdicts = [dict(row) async for row in verdict_cur]
-        pair_cur = await conn.execute(LINEAGE_PAIRS_QUERY, (dedup_key, dedup_key))
+        pair_cur = await conn.execute(LINEAGE_PAIRS_QUERY, (dedup_key,))
         pairs = [dict(row) async for row in pair_cur]
         return {**events[0], "verdicts": verdicts, "pairs": pairs}
 

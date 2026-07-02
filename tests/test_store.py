@@ -46,15 +46,26 @@ CREATE TABLE IF NOT EXISTS triage (
 );
 CREATE INDEX IF NOT EXISTS idx_triage_dedup ON triage(dedup_key);
 DROP VIEW IF EXISTS training_pairs;
-DROP VIEW IF EXISTS accepted_pushback;
-CREATE VIEW accepted_pushback AS
-WITH latest AS (
+DROP VIEW IF EXISTS latest_judge;
+CREATE VIEW latest_judge AS
+SELECT * FROM (
   SELECT t.*, ROW_NUMBER() OVER (
     PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
   ) AS rn
   FROM triage t
   WHERE t.role = 'judge'
-)
+) WHERE rn = 1;
+DROP VIEW IF EXISTS latest_auditor;
+CREATE VIEW latest_auditor AS
+SELECT * FROM (
+  SELECT t.*, ROW_NUMBER() OVER (
+    PARTITION BY t.dedup_key ORDER BY t.prompt_version DESC, t.judged_at DESC, t.id DESC
+  ) AS rn
+  FROM triage t
+  WHERE t.role = 'auditor'
+) WHERE rn = 1;
+DROP VIEW IF EXISTS accepted_pushback;
+CREATE VIEW accepted_pushback AS
 SELECT
   e.id AS event_id,
   e.dedup_key,
@@ -65,7 +76,7 @@ SELECT
   t.what_claude_did,
   e.origin_path
 FROM feedback_events e
-JOIN latest t ON t.dedup_key = e.dedup_key AND t.rn = 1
+JOIN latest_judge t ON t.dedup_key = e.dedup_key
 WHERE t.is_pushback = 1;
 """
 
