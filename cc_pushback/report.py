@@ -4,19 +4,16 @@ Holds the data model the dashboard serves — :class:`Sample`, :class:`VerdictRo
 :class:`RefinedPairRow` with its :class:`EvidenceRow` (read from the shared
 correction ledger), and the :class:`Lineage` that stitches a candidate's whole
 pipeline trail together — plus the corpus :class:`Summary` (written by the
-``claude`` CLI when available, falling back to heuristics). The FastAPI surface and
-the JSON shapes it serves — including the client-rendered lineage — live in
-:mod:`cc_pushback.dashboard`.
+``claude`` CLI). The FastAPI surface and the JSON shapes it serves — including
+the client-rendered lineage — live in :mod:`cc_pushback.dashboard`.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from itertools import zip_longest
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,7 +21,7 @@ from cc_transcript.context import ContextWindow
 from cc_transcript.mining import NOISE_FLOOR
 from cc_transcript.mining.confidence import from_payload
 
-from cc_pushback.claude import claude_available, run_claude
+from cc_pushback.claude import run_claude
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -38,7 +35,6 @@ if TYPE_CHECKING:
 CONTEXT_TURN_LIMIT = 700
 SAMPLE_TEXT_LIMIT = 400
 HIGHLIGHT_POOL_PER_KIND = 8
-HEURISTIC_HIGHLIGHTS = 12
 
 SUMMARY_SYSTEM = """\
 You analyze a developer's "pushback" — the corrective feedback they give an AI coding assistant.
@@ -348,13 +344,13 @@ class Summary:
     Attributes:
         stats: The aggregate corpus counts.
         highlights: The standout samples chosen for the summary.
-        narrative: A prose description of the developer's pushback style, when the
-            ``claude`` CLI produced one.
+        narrative: The prose description of the developer's pushback style,
+            written by the ``claude`` CLI.
     """
 
     stats: CorpusStats
     highlights: tuple[Highlight, ...]
-    narrative: str | None
+    narrative: str
 
 
 def is_noise(sample: Sample) -> bool:
@@ -453,11 +449,6 @@ def candidate_pool(samples: Sequence[Sample]) -> dict[str, list[Sample]]:
     }
 
 
-def heuristic_highlight_ids(pool: Mapping[str, Sequence[Sample]]) -> list[int]:
-    rows = [s for group in zip_longest(*pool.values()) for s in group if s is not None]
-    return [s.id for s in rows[:HEURISTIC_HIGHLIGHTS]]
-
-
 def summary_prompt(pool: Mapping[str, Sequence[Sample]], stats: CorpusStats) -> str:
     return "\n".join(
         [
@@ -474,54 +465,37 @@ def summary_prompt(pool: Mapping[str, Sequence[Sample]], stats: CorpusStats) -> 
     )
 
 
-def parse_summary_json(raw: str) -> tuple[str, list[dict[str, Any]]] | None:
+def parse_summary_json(raw: str) -> tuple[str, list[dict[str, Any]]]:
     if not (match := re.search(r"\{.*\}", raw, re.DOTALL)):
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    narrative, picks = data.get("narrative"), data.get("highlights")
-    if not isinstance(narrative, str) or not isinstance(picks, list):
-        return None
-    return narrative, [p for p in picks if isinstance(p, dict) and isinstance(p.get("id"), int)]
+        raise ValueError(f"no JSON object in summary output: {raw[:200]}")
+    match json.loads(match.group(0)):
+        case {"narrative": str(narrative), "highlights": list(picks)}:
+            return narrative, [p for p in picks if isinstance(p, dict) and isinstance(p.get("id"), int)]
+        case data:
+            raise ValueError(f"summary JSON missing narrative/highlights: {data}")
 
 
-async def llm_summary(
-    pool: Mapping[str, Sequence[Sample]], stats: CorpusStats, model: str
-) -> tuple[str, tuple[Highlight, ...]] | None:
-    try:
-        raw = await run_claude(summary_prompt(pool, stats), system=SUMMARY_SYSTEM, model=model)
-    except subprocess.SubprocessError:
-        return None
-    if (parsed := parse_summary_json(raw)) is None:
-        return None
-    narrative, picks = parsed
-    valid = {s.id for group in pool.values() for s in group}
-    highlights = tuple(Highlight(pick["id"], pick.get("why")) for pick in picks if pick["id"] in valid)
-    return (narrative, highlights) if highlights else None
+async def build_summary(samples: Sequence[Sample], *, model: str) -> Summary:
+    """Builds the corpus :class:`Summary` via the ``claude`` CLI.
 
-
-async def build_summary(samples: Sequence[Sample], *, use_llm: bool, model: str) -> Summary:
-    """Builds the corpus :class:`Summary`, using the ``claude`` CLI when allowed.
-
-    When ``use_llm`` is set and ``claude`` is on the path, the narrative and
-    highlights come from the model; on any failure to produce or parse a result the
-    summary falls back to deterministic heuristics, so the export never depends on
-    the model succeeding.
+    The narrative and highlights come from the model; any subprocess or parse
+    failure raises.
 
     Args:
         samples: The full corpus to summarize.
-        use_llm: Whether to consult the ``claude`` CLI for the narrative.
-        model: The model to run when consulting ``claude``.
+        model: The model to run.
 
     Returns:
         The assembled :class:`Summary`.
     """
     stats, pool = corpus_stats(samples), candidate_pool(samples)
-    if use_llm and claude_available() and (result := await llm_summary(pool, stats, model)) is not None:
-        return Summary(stats=stats, highlights=result[1], narrative=result[0])
-    return Summary(stats=stats, highlights=tuple(map(Highlight, heuristic_highlight_ids(pool))), narrative=None)
+    narrative, picks = parse_summary_json(
+        await run_claude(summary_prompt(pool, stats), system=SUMMARY_SYSTEM, model=model)
+    )
+    valid = {s.id for group in pool.values() for s in group}
+    if not (highlights := tuple(Highlight(pick["id"], pick.get("why")) for pick in picks if pick["id"] in valid)):
+        raise ValueError("summary returned no valid highlight ids")
+    return Summary(stats=stats, highlights=highlights, narrative=narrative)
 
 
 def truncate(text: str, limit: int = CONTEXT_TURN_LIMIT) -> str:

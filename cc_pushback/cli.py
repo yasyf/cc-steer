@@ -442,17 +442,11 @@ async def pairs(jsonl: bool, db: Path | None) -> None:
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
-@click.option(
-    "--llm/--no-llm",
-    default=True,
-    show_default=True,
-    help="Summarize with the claude CLI when it is on PATH, else use heuristics.",
-)
 @click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model for the claude CLI summary.")
 @click.option("--port", type=int, default=0, show_default=True, help="Port to serve on; 0 picks a free one.")
 @click.option("--open", "open_", is_flag=True, help="Open the dashboard in a browser once serving.")
 @coro
-async def view_samples(db: Path | None, llm: bool, model: str, port: int, open_: bool) -> None:
+async def view_samples(db: Path | None, model: str, port: int, open_: bool) -> None:
     """Serve the training-pairs dashboard: refined pairs and their full lineage.
 
     Opens an interactive dashboard listing the refined pairs (the pipeline's
@@ -460,10 +454,11 @@ async def view_samples(db: Path | None, llm: bool, model: str, port: int, open_:
     candidate's lineage — detector hit, judge verdicts across versions, the auditor's
     agreement, the refiner's atomic split, and the golden gate. It is served over a
     transient HTTP server whose URL is printed; press Ctrl-C to stop. The corpus
-    narrative is written by the ``claude`` CLI when ``--llm`` is set and ``claude`` is
-    installed, falling back to deterministic heuristics.
+    narrative is written by the ``claude`` CLI.
     """
+    if not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         samples = [Sample.from_row(row) for row in await store.candidates()]
-        summary = await build_summary(samples, use_llm=llm, model=model)
+        summary = await build_summary(samples, model=model)
         await serve(build_app(store, summary=summary), port=port, open_browser=open_)

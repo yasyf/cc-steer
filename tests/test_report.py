@@ -126,52 +126,57 @@ def test_candidate_pool_excludes_noise_and_caps() -> None:
 
 
 @pytest.mark.anyio
-async def test_build_summary_heuristic_has_no_narrative() -> None:
-    summary = await build_summary(corpus(), use_llm=False, model="m")
-    assert summary.narrative is None
-    assert summary.highlights
-    assert {h.event_id for h in summary.highlights} <= {1, 3}
-
-
-@pytest.mark.anyio
 async def test_build_summary_uses_claude(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cc_pushback.report.claude_available", lambda: True)
-
     async def fake_run(*_: object, **__: object) -> str:
         return '{"narrative": "Terse and direct.", "highlights": [{"id": 1, "why": "cites a file"}]}'
 
     monkeypatch.setattr("cc_pushback.report.run_claude", fake_run)
-    summary = await build_summary(corpus(), use_llm=True, model="m")
+    summary = await build_summary(corpus(), model="m")
     assert summary.narrative == "Terse and direct."
     assert summary.highlights == (type(summary.highlights[0])(1, "cites a file"),)
 
 
 @pytest.mark.anyio
-async def test_build_summary_falls_back_when_claude_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_build_summary_raises_when_claude_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
-
-    monkeypatch.setattr("cc_pushback.report.claude_available", lambda: True)
 
     async def boom(*_: object, **__: object) -> str:
         raise subprocess.SubprocessError("claude timed out after 1s")
 
     monkeypatch.setattr("cc_pushback.report.run_claude", boom)
-    summary = await build_summary(corpus(), use_llm=True, model="m")
-    assert summary.narrative is None
-    assert summary.highlights
+    with pytest.raises(subprocess.SubprocessError):
+        await build_summary(corpus(), model="m")
 
 
 @pytest.mark.parametrize(
-    ("raw", "ok"),
+    ("raw", "expected"),
     [
-        pytest.param('{"narrative": "x", "highlights": [{"id": 1, "why": "y"}]}', True, id="clean"),
-        pytest.param('Here is the result:\n{"narrative": "x", "highlights": []}\nDone.', True, id="wrapped-in-prose"),
-        pytest.param("not json at all", False, id="garbage"),
-        pytest.param('{"highlights": []}', False, id="missing-narrative"),
+        pytest.param(
+            '{"narrative": "x", "highlights": [{"id": 1, "why": "y"}]}',
+            ("x", [{"id": 1, "why": "y"}]),
+            id="clean",
+        ),
+        pytest.param(
+            'Here is the result:\n{"narrative": "x", "highlights": []}\nDone.',
+            ("x", []),
+            id="wrapped-in-prose",
+        ),
     ],
 )
-def test_parse_summary_json(raw: str, ok: bool) -> None:
-    assert (parse_summary_json(raw) is not None) is ok
+def test_parse_summary_json(raw: str, expected: tuple[str, list[dict[str, Any]]]) -> None:
+    assert parse_summary_json(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("not json at all", id="garbage"),
+        pytest.param('{"highlights": []}', id="missing-narrative"),
+    ],
+)
+def test_parse_summary_json_raises(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_summary_json(raw)
 
 
 def test_sample_from_row_round_trips() -> None:

@@ -19,8 +19,9 @@ from cc_pushback.report import (
     Lineage,
     RefinedPairRow,
     Sample,
+    Summary,
     VerdictRow,
-    build_summary,
+    corpus_stats,
     golden_status,
 )
 from cc_pushback.triage import JUDGE, Verdict
@@ -302,7 +303,8 @@ def enrich_k1(correction: Correction) -> None:
 
 
 async def client(store: FeedbackStore) -> httpx.AsyncClient:
-    summary = await build_summary([Sample.from_row(row) for row in await store.candidates()], use_llm=False, model="m")
+    stats = corpus_stats([Sample.from_row(row) for row in await store.candidates()])
+    summary = Summary(stats=stats, highlights=(), narrative="Terse and direct.")
     transport = httpx.ASGITransport(app=build_app(store, summary=summary))
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
@@ -391,7 +393,7 @@ async def test_api_stats_shape(store: FeedbackStore) -> None:
     await seed(store)
     async with await client(store) as http:
         stats = (await http.get("/api/stats")).json()
-    assert stats["narrative"] is None
+    assert stats["narrative"] == "Terse and direct."
     assert stats["pipeline"]["refined"] == 1 and stats["pipeline"]["accepted"] == 2
     assert stats["pipeline"]["noise_judged"] == 1 and stats["pipeline"]["total_pairs"] == 1
     assert stats["pipeline"]["by_category_kind"] == {"wrong_approach": {"transcript_message": 2}}
