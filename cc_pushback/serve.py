@@ -17,11 +17,8 @@ BIND_HOST = "0.0.0.0"
 
 def lan_ip() -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        try:
-            probe.connect(("10.255.255.255", 1))
-            return probe.getsockname()[0]
-        except OSError:
-            return "127.0.0.1"
+        probe.connect(("10.255.255.255", 1))
+        return probe.getsockname()[0]
 
 
 async def serve(app: FastAPI, *, port: int, open_browser: bool) -> None:
