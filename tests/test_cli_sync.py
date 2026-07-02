@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, NoReturn
 
+import cc_transcript.judge
 import pytest
 from click.testing import CliRunner
 
@@ -160,6 +161,7 @@ def test_stage_sync_fires_only_when_the_pass_changed_data(
         return report
 
     monkeypatch.setattr(cc_pushback.cli, "claude_available", lambda: True)
+    monkeypatch.setattr(cc_transcript.judge, "resolved_model", lambda tier: "stub-model")
     monkeypatch.setattr(case.module, case.attribute, stage)
     result = runner.invoke(main, [case.command, "--db", str(db)])
     assert result.exit_code == 0, result.output
