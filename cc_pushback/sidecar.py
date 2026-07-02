@@ -61,10 +61,12 @@ class Finding:
 
     @classmethod
     def parse(cls, record: dict[str, object]) -> Finding:
+        if not isinstance(line := record["line"], int):
+            raise AssertionError(line)
         return cls(
             id=str(record["id"]),
             file=str(record["file"]),
-            line=int(record["line"]),  # type: ignore[arg-type]
+            line=line,
             rule=str(record["rule"]),
             severity=str(record["severity"]),
             track=str(record["track"]),
