@@ -9,7 +9,7 @@
 
 Mine your Claude Code transcripts for the moments you pushed back into a local database.
 
-cc-pushback collects your corrections, interrupts, rejected plans, and code-review comments — with the surrounding conversational context — into a feedback database. That corpus is the raw material for learning your pushback style; this first release builds it. Your taste is mostly tacit (you notice a rule when it's violated), and that signal sits unused in transcript files; this turns it into a structured dataset.
+cc-pushback collects your corrections, interrupts, rejected plans, and code-review comments — with the surrounding conversational context — into a feedback database, then judges each candidate, refines the accepted ones into atomic training pairs, and grounds them in the code they complain about. Your taste is mostly tacit (you notice a rule when it's violated), and that signal sits unused in transcript files; this turns it into a training dataset.
 
 ## Install
 
@@ -33,12 +33,19 @@ scanned 412 files, 1473 new rows
 
 | Command | What it does |
 | --- | --- |
-| `scan` | Scan transcripts for pushback, incrementally. `--full` re-mines every transcript; `--transcripts DIR` (repeatable) scans other directories. |
-| `stats` | Counts by source kind and the scanned-file count. |
-| `list` | Recent feedback, newest first. `--source KIND` (repeatable) and `--limit N`. |
-| `export` | Export the judged corpus as a HuggingFace dataset. `--push` uploads to a private repo. |
+| `scan` | Scan transcripts for feedback, incrementally. `--full` re-mines every transcript; `--transcripts DIR` (repeatable) scans other directories. |
+| `stats` | Print ingestion counts by source kind and triage coverage. |
+| `list` | List recent feedback events, newest first. `--source KIND` and `--limit N`. |
+| `triage` | Judge every stored candidate lacking a verdict at the current prompt version. |
+| `audit` | Audit a seeded stratified sample of the current prompt version's verdicts. |
+| `eval` | Compute the mechanical metrics for the current prompt version. No LLM calls. |
+| `refine` | Refine every accepted pushback event into atomic training pairs. |
+| `enrich` | Ground every refined pair in the code it complains about. |
+| `export` | Export the pushback lineage as a HuggingFace dataset. `--push` uploads every config to the private HF repo. |
+| `pairs` | Print the refined training pairs — the pipeline's deliverable. |
+| `view-samples` | Serve the training-pairs dashboard: refined pairs and their full lineage. |
 
-Run `uvx cc-pushback COMMAND --help` for the full flag list.
+`scan`, `triage`, `audit`, `refine`, and `enrich` sync the dataset to HuggingFace whenever a pass changes data; `--no-sync` skips it. Run `uvx cc-pushback COMMAND --help` for the full flag list.
 
 ## What gets collected
 
@@ -49,7 +56,7 @@ Run `uvx cc-pushback COMMAND --help` for the full flag list.
 Once the corpus is judged, `export` turns it into a HuggingFace dataset:
 
 ```bash
-uvx --with 'cc-pushback[export]' cc-pushback export
+uvx cc-pushback export
 ```
 
 ```
@@ -60,6 +67,8 @@ kto: train 1156  test 115
 ```
 
 One canonical `traces` config — one row per judged event, carrying the context, verdicts, refined pairs, and code evidence — plus three TRL-ready projections (`sft`, `dpo`, `kto`) land as per-split parquet under `~/.cc-pushback/dataset` (override with `--out`), next to a generated dataset card. Splits are a deterministic group split on the session hash, so a session never straddles train and test. `--push` uploads every config to a private HF repo (`--repo-id`, default `yasyf/cc-pushback-traces`).
+
+You rarely run `export` by hand. Every mutating pass that changed data rebuilds the dataset and pushes all four configs to that repo. A failed push exits nonzero with the local writes already committed, and the next sync picks them up; `export --push` is the manual catch-up.
 
 ## Mining from another machine
 

@@ -25,17 +25,6 @@ hero:
   tagline: "Learn your pushback style from past Claude Code feedback and code reviews, and replicate it with a language model."
   starfield: true
 
-# Narrative doc sections are optional — dynamic mode generates the API reference
-# from docstrings without them. Uncomment and point at docs/ dirs as they appear.
-# sections:
-#   - title: Getting Started
-#     dir: docs/getting-started
-#     index: true
-#   - title: Guide
-#     dir: docs/guide
-#     navbar_after: Getting Started
-#     index: true
-
 cli:
   enabled: true
   module: cc_pushback.cli
