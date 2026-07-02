@@ -515,5 +515,7 @@ async def view_samples(db: Path | None, model: str, port: int, open_: bool) -> N
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         samples = [Sample.from_row(row) for row in await store.candidates()]
+        if not samples:
+            raise click.ClickException("no judged samples to serve")
         summary = await build_summary(samples, model=model)
         await serve(build_app(store, summary=summary), port=port, open_browser=open_)

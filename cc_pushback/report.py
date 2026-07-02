@@ -479,7 +479,9 @@ async def build_summary(samples: Sequence[Sample], *, model: str) -> Summary:
     """Builds the corpus :class:`Summary` via the ``claude`` CLI.
 
     The narrative and highlights come from the model; any subprocess or parse
-    failure raises.
+    failure raises, as does a nonempty candidate pool whose picks are all
+    invalid. An all-noise corpus has no candidates to highlight, so its summary
+    carries the narrative alone with empty highlights.
 
     Args:
         samples: The full corpus to summarize.
@@ -493,7 +495,8 @@ async def build_summary(samples: Sequence[Sample], *, model: str) -> Summary:
         await run_claude(summary_prompt(pool, stats), system=SUMMARY_SYSTEM, model=model)
     )
     valid = {s.id for group in pool.values() for s in group}
-    if not (highlights := tuple(Highlight(pick["id"], pick.get("why")) for pick in picks if pick["id"] in valid)):
+    highlights = tuple(Highlight(pick["id"], pick.get("why")) for pick in picks if pick["id"] in valid)
+    if valid and not highlights:
         raise ValueError("summary returned no valid highlight ids")
     return Summary(stats=stats, highlights=highlights, narrative=narrative)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, NoReturn
 
 import pytest
 from click.testing import CliRunner
@@ -198,3 +198,14 @@ def test_push_failure_exits_nonzero(
     result = runner.invoke(main, ["scan", "--transcripts", str(transcripts), "--db", str(db)])
     assert result.exit_code != 0
     assert isinstance(result.exception, RuntimeError)
+
+
+def test_view_samples_refuses_an_empty_corpus(runner: CliRunner, db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def never(*_: object, **__: object) -> NoReturn:
+        raise AssertionError("build_summary must not run without samples")
+
+    monkeypatch.setattr(cc_pushback.cli, "claude_available", lambda: True)
+    monkeypatch.setattr(cc_pushback.cli, "build_summary", never)
+    result = runner.invoke(main, ["view-samples", "--db", str(db)])
+    assert result.exit_code != 0
+    assert "no judged samples to serve" in result.output

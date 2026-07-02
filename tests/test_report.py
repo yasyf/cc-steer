@@ -137,6 +137,31 @@ async def test_build_summary_uses_claude(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.anyio
+async def test_build_summary_serves_an_all_noise_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run(*_: object, **__: object) -> str:
+        return '{"narrative": "Mostly bare interruptions.", "highlights": [{"id": 2, "why": "made up"}]}'
+
+    monkeypatch.setattr("cc_pushback.report.run_claude", fake_run)
+    all_noise = [
+        make_sample(2, "transcript_message", "[Request interrupted by user]", signal=noise("bare_marker")),
+        make_sample(4, "transcript_message", "[Request interrupted by user]", signal=noise("bare_marker")),
+    ]
+    summary = await build_summary(all_noise, model="m")
+    assert summary.highlights == ()
+    assert summary.narrative == "Mostly bare interruptions."
+
+
+@pytest.mark.anyio
+async def test_build_summary_raises_when_picks_miss_a_nonempty_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run(*_: object, **__: object) -> str:
+        return '{"narrative": "x", "highlights": [{"id": 999, "why": "hallucinated"}]}'
+
+    monkeypatch.setattr("cc_pushback.report.run_claude", fake_run)
+    with pytest.raises(ValueError, match="no valid highlight ids"):
+        await build_summary(corpus(), model="m")
+
+
+@pytest.mark.anyio
 async def test_build_summary_raises_when_claude_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
 
