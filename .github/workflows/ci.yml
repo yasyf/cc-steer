@@ -26,7 +26,7 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Sync (dev)
-        run: uv sync --extra dev --extra export
+        run: uv sync --extra dev
 
       - name: Type check (ty)
         run: uv run ty check cc_pushback

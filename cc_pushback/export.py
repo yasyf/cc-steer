@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 from cc_transcript.context import ContextWindow
 from cc_transcript.corrections import CorrectionLog
 from cc_transcript.ids import EventUuid, SessionId
+from datasets import Dataset, DatasetDict, Features, Value
+from huggingface_hub import HfApi
 
 from cc_pushback.enrich import SOURCE
 from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
@@ -33,7 +35,6 @@ if TYPE_CHECKING:
 
     from cc_transcript.context import TurnRef
     from cc_transcript.corrections import Correction
-    from datasets import Features
 
     from cc_pushback.store import FeedbackStore
 
@@ -326,8 +327,6 @@ def config_rows(traces: list[dict[str, object]]) -> dict[str, dict[str, list[dic
 
 
 def config_features() -> dict[str, Features]:
-    from datasets import Features, Value
-
     def message() -> list[dict[str, Value]]:
         return [{"role": Value("string"), "content": Value("string")}]
 
@@ -448,9 +447,6 @@ async def export(
     Returns:
         The export's per-config, per-split row counts.
     """
-    from datasets import Dataset, DatasetDict
-    from huggingface_hub import HfApi
-
     traces = await load_traces(store)
     features = config_features()
     built = {

@@ -21,7 +21,9 @@ dependencies = [
     "anyio>=4.4",
     "cc-transcript>=7,<8",
     "click>=8",
+    "datasets>=3.2",
     "fastapi>=0.115",
+    "huggingface-hub>=0.27",
     "pydantic>=2",
     "spawnllm>=0.5.1,<0.6",
     "uvicorn>=0.30",
@@ -33,10 +35,6 @@ dev = [
     "ty>=0.0.44",
     "ruff>=0.8",
     "httpx>=0.27",
-]
-export = [
-    "datasets>=3.2",
-    "huggingface-hub>=0.27",
 ]
 
 [project.scripts]
