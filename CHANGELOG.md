@@ -16,15 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event. A deterministic session-hash 90/10 group split is computed once on
   `traces` and inherited by every derived row. Per-config parquet files and a
   generated dataset card land locally; `--push` uploads every config to a
-  private HuggingFace repo.
+  private dataset in the authenticated user's HuggingFace namespace,
+  `<hf-user>/cc-pushback-traces`, with `--repo-id` overriding the target. A
+  corpus with zero judged events exports cleanly; empty configs still write
+  and push, and the dataset card renders the unjudged corpus honestly.
 - Audit prompt v4 closes the judge-v5 boundary gap. The v3 auditor predated
   the judge's v5 boundary rules and missed exactly the four tuned cases; v4
   restates the correction boundary as six contrastive edges and scores 49/49
   on the golden set while keeping the auditor's independent quality-gate voice.
-- Auto-sync to the HuggingFace repo after every mutating pass. A `scan`,
-  `triage`, `audit`, `refine`, or `enrich` run that changed data rebuilds the
-  derived dataset and pushes it; `--sync/--no-sync` controls this per command
-  and defaults to on. CLI-level tests cover the push wiring and the sync seam.
+- Auto-sync to the authenticated user's HuggingFace repo after every mutating
+  pass. A `scan`, `triage`, `audit`, `refine`, or `enrich` run that changed
+  data rebuilds the derived dataset and pushes it; `--sync/--no-sync` controls
+  this per command and defaults to on. CLI-level tests cover the push wiring
+  and the sync seam, and run without a live LLM backend.
 
 ### Changed
 - `datasets` and `huggingface-hub` moved from the `[export]` extra into the
@@ -54,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `None` from the survival gate.
 - Sidecar `Finding.parse` narrows `line` with a typed check instead of a
   `type: ignore`.
+- `view-samples` refuses an empty corpus with a clear error; an all-noise
+  corpus now serves with an empty highlights set instead of crashing on its
+  empty candidate pool.
 
 ## [0.7.2]
 
