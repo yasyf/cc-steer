@@ -136,16 +136,35 @@ stopping point — even partially, even alongside unrelated content.
 
 It does not belong when the message only moves work forward or reports facts: telling
 the assistant what to do next, giving a new assignment, asking or answering a question,
-relaying status, or approving. A message that raises a doubt but ends by accepting the
-assistant's choice ("nevermind, if there's a reason for it, then do it") moves work
-forward and does not belong.
+relaying status, or approving.
 
-Two sharp edges. An inline code-review comment (source review_comment) annotates a
-specific line of code the assistant authored: short imperatives and suggestions there
-("inline", "it is required", "use dataclasses always") fault that line and belong in
-the dataset. And a question can go either way: one that presses on a choice ("couldn't
-this inherit from userlist?") faults the work, while one that merely seeks information
-does not.
+The boundary runs through what the message targets, not how it is phrased. Weigh each
+of these before deciding:
+
+- Removal orders. "get rid of the MAX_SEQ_LEN and the trt shapes" right after the
+  assistant added them faults that work — a correction. "get rid of the old build
+  artifacts", targeting pre-existing state the assistant never created, assigns
+  forward work.
+- Buried faults. "switch the client over — we arent supposed to be using litellm
+  anymore" leads with a directive but faults the work for still using something it
+  should not — a correction. An incredulous aside riding on a directive ("why on
+  earth are these separate", "why is X still here") faults the current state the
+  same way. "switch the client over to the new SDK" alone assigns work and faults
+  nothing.
+- Leading "no". "no we dont want to vendor it" countermands the assistant's proposal —
+  a correction. "nope just push the resolved branch", answering a question the
+  assistant asked and rolling into a directive, is an answer — not a correction.
+- Questions. "couldn't this inherit from userlist?" presses on a choice the assistant
+  made — a correction. "what are the tradeoffs of each option here?" seeks information
+  to settle something still open, and a question proposing a new addition presses on
+  nothing the assistant did — not corrections.
+- Inline review comments (source review_comment) annotate a specific line the
+  assistant authored: short imperatives, suggestions, and bare prohibitions or
+  conventions there ("inline", "it is required", "no comments", "use dataclasses
+  always") fault that line — corrections, even with no verb.
+- Accepted doubts. A message that raises a doubt but ends by accepting the assistant's
+  choice ("nevermind, if there's a reason for it, then do it") moves work forward —
+  not a correction.
 
 Choose the single best-fitting label:
 - wrong_approach / incorrect_change / unwanted_action / style_violation / premature (corrections)
@@ -341,16 +360,35 @@ stopping point — even partially, even alongside unrelated content.
 
 It does not belong when the message only moves work forward or reports facts: telling
 the assistant what to do next, giving a new assignment, asking or answering a question,
-relaying status, or approving. A message that raises a doubt but ends by accepting the
-assistant's choice ("nevermind, if there's a reason for it, then do it") moves work
-forward and does not belong.
+relaying status, or approving.
 
-Two sharp edges. An inline code-review comment (source review_comment) annotates a
-specific line of code the assistant authored: short imperatives and suggestions there
-("inline", "it is required", "use dataclasses always") fault that line and belong in
-the dataset. And a question can go either way: one that presses on a choice ("couldn't
-this inherit from userlist?") faults the work, while one that merely seeks information
-does not.
+The boundary runs through what the message targets, not how it is phrased. Weigh each
+of these before deciding:
+
+- Removal orders. "get rid of the MAX_SEQ_LEN and the trt shapes" right after the
+  assistant added them faults that work — a correction. "get rid of the old build
+  artifacts", targeting pre-existing state the assistant never created, assigns
+  forward work.
+- Buried faults. "switch the client over — we arent supposed to be using litellm
+  anymore" leads with a directive but faults the work for still using something it
+  should not — a correction. An incredulous aside riding on a directive ("why on
+  earth are these separate", "why is X still here") faults the current state the
+  same way. "switch the client over to the new SDK" alone assigns work and faults
+  nothing.
+- Leading "no". "no we dont want to vendor it" countermands the assistant's proposal —
+  a correction. "nope just push the resolved branch", answering a question the
+  assistant asked and rolling into a directive, is an answer — not a correction.
+- Questions. "couldn't this inherit from userlist?" presses on a choice the assistant
+  made — a correction. "what are the tradeoffs of each option here?" seeks information
+  to settle something still open, and a question proposing a new addition presses on
+  nothing the assistant did — not corrections.
+- Inline review comments (source review_comment) annotate a specific line the
+  assistant authored: short imperatives, suggestions, and bare prohibitions or
+  conventions there ("inline", "it is required", "no comments", "use dataclasses
+  always") fault that line — corrections, even with no verb.
+- Accepted doubts. A message that raises a doubt but ends by accepting the assistant's
+  choice ("nevermind, if there's a reason for it, then do it") moves work forward —
+  not a correction.
 
 Choose the single best-fitting label:
 - wrong_approach / incorrect_change / unwanted_action / style_violation / premature (corrections)
@@ -500,16 +538,35 @@ stopping point — even partially, even alongside unrelated content.
 
 It does not belong when the message only moves work forward or reports facts: telling
 the assistant what to do next, giving a new assignment, asking or answering a question,
-relaying status, or approving. A message that raises a doubt but ends by accepting the
-assistant's choice ("nevermind, if there's a reason for it, then do it") moves work
-forward and does not belong.
+relaying status, or approving.
 
-Two sharp edges. An inline code-review comment (source review_comment) annotates a
-specific line of code the assistant authored: short imperatives and suggestions there
-("inline", "it is required", "use dataclasses always") fault that line and belong in
-the dataset. And a question can go either way: one that presses on a choice ("couldn't
-this inherit from userlist?") faults the work, while one that merely seeks information
-does not.
+The boundary runs through what the message targets, not how it is phrased. Weigh each
+of these before deciding:
+
+- Removal orders. "get rid of the MAX_SEQ_LEN and the trt shapes" right after the
+  assistant added them faults that work — a correction. "get rid of the old build
+  artifacts", targeting pre-existing state the assistant never created, assigns
+  forward work.
+- Buried faults. "switch the client over — we arent supposed to be using litellm
+  anymore" leads with a directive but faults the work for still using something it
+  should not — a correction. An incredulous aside riding on a directive ("why on
+  earth are these separate", "why is X still here") faults the current state the
+  same way. "switch the client over to the new SDK" alone assigns work and faults
+  nothing.
+- Leading "no". "no we dont want to vendor it" countermands the assistant's proposal —
+  a correction. "nope just push the resolved branch", answering a question the
+  assistant asked and rolling into a directive, is an answer — not a correction.
+- Questions. "couldn't this inherit from userlist?" presses on a choice the assistant
+  made — a correction. "what are the tradeoffs of each option here?" seeks information
+  to settle something still open, and a question proposing a new addition presses on
+  nothing the assistant did — not corrections.
+- Inline review comments (source review_comment) annotate a specific line the
+  assistant authored: short imperatives, suggestions, and bare prohibitions or
+  conventions there ("inline", "it is required", "no comments", "use dataclasses
+  always") fault that line — corrections, even with no verb.
+- Accepted doubts. A message that raises a doubt but ends by accepting the assistant's
+  choice ("nevermind, if there's a reason for it, then do it") moves work forward —
+  not a correction.
 
 Choose the single best-fitting label:
 - wrong_approach / incorrect_change / unwanted_action / style_violation / premature (corrections)
