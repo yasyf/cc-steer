@@ -29,7 +29,6 @@ jobs:
         run: uv sync --extra dev --extra export
 
       - name: Type check (ty)
-        continue-on-error: true
         run: uv run ty check cc_pushback
 
       - name: Test (pytest)
