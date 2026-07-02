@@ -36,12 +36,30 @@ scanned 412 files, 1473 new rows
 | `scan` | Scan transcripts for pushback, incrementally. `--full` re-mines every transcript; `--transcripts DIR` (repeatable) scans other directories. |
 | `stats` | Counts by source kind and the scanned-file count. |
 | `list` | Recent feedback, newest first. `--source KIND` (repeatable) and `--limit N`. |
+| `export` | Export the judged corpus as a HuggingFace dataset. `--push` uploads to a private repo. |
 
 Run `uvx cc-pushback COMMAND --help` for the full flag list.
 
 ## What gets collected
 
 `scan` runs four detectors over each transcript, each tagged with a source kind: **transcript messages** (`transcript_message`, the pushback you typed mid-session), **plan reviews** (`plan_review`, rejected `ExitPlanMode` plans and plan-mode re-entries), **interrupts and rejections** (`interrupt_rejection`, permission denials and user interrupts), and **review comments** (`review_comment`, one row per inline code-review comment). Each row carries the conversational window around the feedback, captured at collection time because transcripts are ephemeral.
+
+## Exporting a training dataset
+
+Once the corpus is judged, `export` turns it into a HuggingFace dataset:
+
+```bash
+uvx --with 'cc-pushback[export]' cc-pushback export
+```
+
+```
+traces: train 1156  test 115
+sft: train 499  test 67
+dpo: train 363  test 44
+kto: train 1156  test 115
+```
+
+One canonical `traces` config — one row per judged event, carrying the context, verdicts, refined pairs, and code evidence — plus three TRL-ready projections (`sft`, `dpo`, `kto`) land as per-split parquet under `~/.cc-pushback/dataset` (override with `--out`), next to a generated dataset card. Splits are a deterministic group split on the session hash, so a session never straddles train and test. `--push` uploads every config to a private HF repo (`--repo-id`, default `yasyf/cc-pushback-traces`).
 
 ## Mining from another machine
 

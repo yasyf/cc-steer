@@ -369,6 +369,48 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
 
 
 @main.command()
+@click.option(
+    "--out",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path.home() / ".cc-pushback" / "dataset",
+    show_default=True,
+    help="Directory to write the per-config parquet files and dataset card into.",
+)
+@click.option(
+    "--repo-id",
+    default="yasyf/cc-pushback-traces",
+    show_default=True,
+    help="HuggingFace dataset repo to push to.",
+)
+@click.option("--push/--no-push", default=False, show_default=True, help="Push every config to the private HF repo.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+)
+@coro
+async def export(out: Path, repo_id: str, push: bool, db: Path | None) -> None:
+    """Export the pushback lineage as a HuggingFace dataset.
+
+    Builds the canonical ``traces`` config — one row per judged event, carrying
+    the context, judge and auditor verdicts, refined pairs, and code evidence —
+    plus the TRL-ready ``sft``, ``dpo``, and ``kto`` projections. Both source
+    databases are read-only; every config lands as per-split parquet under
+    ``--out`` next to a generated dataset card, and ``--push`` uploads every
+    config to the private HuggingFace repo. Requires the ``export`` extra
+    (``cc-pushback[export]``).
+    """
+    from cc_pushback.export import export as run_export
+
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await run_export(store, out=out, repo_id=repo_id, push=push)
+    for config, splits in report.counts.items():
+        click.echo(f"{config}: " + "  ".join(f"{split} {count}" for split, count in splits.items()))
+    click.echo(f"wrote {report.out}" + (f", pushed to {repo_id}" if report.pushed else ""))
+
+
+@main.command()
 @click.option("--jsonl", is_flag=True, help="Emit full pairs as JSON lines for fine-tuning export.")
 @click.option(
     "--db",
