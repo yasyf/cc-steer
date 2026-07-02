@@ -30,6 +30,14 @@ if TYPE_CHECKING:
 
 SOURCE_KINDS = [*PUSHBACK_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
+DATASET_DIR = Path.home() / ".cc-pushback" / "dataset"
+HF_REPO_ID = "yasyf/cc-pushback-traces"
+sync_option = click.option(
+    "--sync/--no-sync",
+    default=True,
+    show_default=True,
+    help="Rebuild the derived dataset and push it to the private HuggingFace repo when the pass changed data.",
+)
 
 
 def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:
@@ -40,6 +48,15 @@ def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:
         return anyio.run(functools.partial(fn, *args, **kwargs))
 
     return wrapper
+
+
+async def sync_dataset(store: FeedbackStore) -> None:
+    """Rebuilds the derived dataset and pushes every config to the private HF repo."""
+    from cc_pushback.export import export as run_export
+
+    click.echo(f"syncing dataset to {HF_REPO_ID}")
+    report = await run_export(store, out=DATASET_DIR, repo_id=HF_REPO_ID, push=True)
+    click.echo("synced " + "  ".join(f"{config} {sum(splits.values())}" for config, splits in report.counts.items()))
 
 
 @click.group()
@@ -70,8 +87,11 @@ def main() -> None:
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
+@sync_option
 @coro
-async def scan(transcripts: tuple[Path, ...], findings: tuple[Path, ...], full: bool, db: Path | None) -> None:
+async def scan(
+    transcripts: tuple[Path, ...], findings: tuple[Path, ...], full: bool, db: Path | None, sync: bool
+) -> None:
     """Scan transcripts for feedback, incrementally.
 
     Each transcript is parsed only when new or modified since the last scan, and
@@ -79,12 +99,15 @@ async def scan(transcripts: tuple[Path, ...], findings: tuple[Path, ...], full: 
     digest, so re-running ``scan`` over unchanged inputs is a no-op. Recording a
     file and inserting its candidates commit in one transaction. With ``--findings``,
     superset ``issues.jsonl`` files under the given directories are anchored to the
-    closest session and recorded through the same idempotent insert.
+    closest session and recorded through the same idempotent insert. A pass that
+    changes data syncs the dataset to HuggingFace; ``--no-sync`` skips it.
     """
     roots = transcripts or (CLAUDE_PROJECTS_DIR,)
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         report = await run_scan(store, roots, findings_dirs=findings, full=full)
-    click.echo(f"scanned {report.scanned} files, {report.inserted} new rows")
+        click.echo(f"scanned {report.scanned} files, {report.inserted} new rows")
+        if sync and report.inserted:
+            await sync_dataset(store)
 
 
 @main.command()
@@ -151,15 +174,19 @@ async def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
+@sync_option
 @coro
-async def triage(tier: TModel, limit: int | None, concurrency: int, refresh_summary: bool, db: Path | None) -> None:
+async def triage(
+    tier: TModel, limit: int | None, concurrency: int, refresh_summary: bool, db: Path | None, sync: bool
+) -> None:
     """Judge every stored candidate lacking a verdict at the current prompt version.
 
     Incremental and idempotent: verdicts persist per row as soon as each call
     completes, failed rows stay pending and are retried on the next run, and
     re-running over a fully judged corpus is a no-op. With ``--refresh-summary``,
     rows judged at summary fidelity are re-judged; a full-fidelity verdict
-    replaces the summary one once the row's window hydrates again.
+    replaces the summary one once the row's window hydrates again. A pass that
+    changes data syncs the dataset to HuggingFace; ``--no-sync`` skips it.
     """
     from cc_transcript.judge import resolved_model
 
@@ -177,7 +204,9 @@ async def triage(tier: TModel, limit: int | None, concurrency: int, refresh_summ
         report = await run_triage(
             store, tier=tier, limit=limit, concurrency=concurrency, refresh_summary=refresh_summary
         )
-    click.echo(f"judged {report.judged} rows ({report.failed} failed), {report.pending} pending")
+        click.echo(f"judged {report.judged} rows ({report.failed} failed), {report.pending} pending")
+        if sync and report.judged:
+            await sync_dataset(store)
 
 
 @main.command()
@@ -194,19 +223,25 @@ async def triage(tier: TModel, limit: int | None, concurrency: int, refresh_summ
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
+@sync_option
 @coro
-async def audit(tier: TModel, accepts: int, rejects: int, seed: int, concurrency: int, db: Path | None) -> None:
+async def audit(
+    tier: TModel, accepts: int, rejects: int, seed: int, concurrency: int, db: Path | None, sync: bool
+) -> None:
     """Audit a seeded stratified sample of the current prompt version's verdicts.
 
     The auditor is a stronger model, blind to the judge's verdicts; its labels are
     keyed independently of the judge's prompt version, so they accumulate across
-    iterations and re-auditing a sampled row costs nothing.
+    iterations and re-auditing a sampled row costs nothing. A pass that changes
+    data syncs the dataset to HuggingFace; ``--no-sync`` skips it.
     """
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         report = await run_audit(store, accepts=accepts, rejects=rejects, seed=seed, tier=tier, concurrency=concurrency)
-    click.echo(f"audited {report.judged} fresh rows ({report.failed} failed)")
+        click.echo(f"audited {report.judged} fresh rows ({report.failed} failed)")
+        if sync and report.judged:
+            await sync_dataset(store)
 
 
 @main.command(name="eval")
@@ -301,13 +336,15 @@ async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, a
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
+@sync_option
 @coro
-async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | None) -> None:
+async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | None, sync: bool) -> None:
     """Refine every accepted pushback event into atomic training pairs.
 
     Incremental and idempotent: pairs commit per event as soon as each call
     completes, failed events stay pending and are retried on the next run, and
-    re-running over a fully refined corpus is a no-op.
+    re-running over a fully refined corpus is a no-op. A pass that changes data
+    syncs the dataset to HuggingFace; ``--no-sync`` skips it.
     """
     from cc_transcript.judge import resolved_model
 
@@ -320,9 +357,12 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
         pending = len(await store.unrefined(prompt_version=REFINE_VERSION, model=resolved_model(tier)))
         click.echo(f"pending: {pending} events at refine v{REFINE_VERSION} ({resolved_model(tier)})")
         report = await run_refine(store, tier=tier, limit=limit, concurrency=concurrency)
-    click.echo(
-        f"refined {report.refined} events into {report.pairs} pairs ({report.failed} failed), {report.pending} pending"
-    )
+        click.echo(
+            f"refined {report.refined} events into {report.pairs} pairs ({report.failed} failed), "
+            f"{report.pending} pending"
+        )
+        if sync and report.refined:
+            await sync_dataset(store)
 
 
 @main.command()
@@ -337,8 +377,9 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     default=None,
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
+@sync_option
 @coro
-async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | None) -> None:
+async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | None, sync: bool) -> None:
     """Ground every refined pair in the code it complains about.
 
     Hands each pair's pushback anchor and complaint to cc-transcript's shared
@@ -350,7 +391,8 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     Incremental and idempotent: a pair settles once its anchor carries a ledger row,
     a failure aborts the pass loudly (corrections already appended to the ledger
     persist, so a re-run resumes), and a refine re-run resurfaces its new pairs here
-    automatically.
+    automatically. A pass that changes data syncs the dataset to HuggingFace;
+    ``--no-sync`` skips it.
     """
     from cc_transcript.corrections import CorrectionLog
 
@@ -362,24 +404,26 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
         pending = len(await store.unenriched(CorrectionLog.open()))
         click.echo(f"pending: {pending} pairs")
         report = await run_enrich(store, tier=tier, limit=limit, concurrency=concurrency)
-    click.echo(
-        f"enriched {report.enriched} pairs ({report.corrections} corrections, {report.skipped} skipped), "
-        f"{report.pending} pending"
-    )
-    click.echo(f"recorded {report.corrections} corrections to the shared ledger (~/.cc-transcript/corrections.db)")
+        click.echo(
+            f"enriched {report.enriched} pairs ({report.corrections} corrections, {report.skipped} skipped), "
+            f"{report.pending} pending"
+        )
+        click.echo(f"recorded {report.corrections} corrections to the shared ledger (~/.cc-transcript/corrections.db)")
+        if sync and report.corrections:
+            await sync_dataset(store)
 
 
 @main.command()
 @click.option(
     "--out",
     type=click.Path(file_okay=False, path_type=Path),
-    default=Path.home() / ".cc-pushback" / "dataset",
+    default=DATASET_DIR,
     show_default=True,
     help="Directory to write the per-config parquet files and dataset card into.",
 )
 @click.option(
     "--repo-id",
-    default="yasyf/cc-pushback-traces",
+    default=HF_REPO_ID,
     show_default=True,
     help="HuggingFace dataset repo to push to.",
 )
@@ -399,8 +443,7 @@ async def export(out: Path, repo_id: str, push: bool, db: Path | None) -> None:
     plus the TRL-ready ``sft``, ``dpo``, and ``kto`` projections. Both source
     databases are read-only; every config lands as per-split parquet under
     ``--out`` next to a generated dataset card, and ``--push`` uploads every
-    config to the private HuggingFace repo. Requires the ``export`` extra
-    (``cc-pushback[export]``).
+    config to the private HuggingFace repo.
     """
     from cc_pushback.export import export as run_export
 
