@@ -23,6 +23,7 @@ from cc_transcript.context import ContextWindow
 from cc_transcript.corrections import CorrectionLog
 from cc_transcript.ids import EventUuid, SessionId
 
+from cc_pushback.enrich import SOURCE
 from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
 from cc_pushback.report import project_label
 from cc_pushback.triage import AUDIT_VERSION, PROMPT_VERSION, PUSHBACK_CATEGORIES
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
 
 __all__ = ["ExportReport", "export"]
 
-SOURCE = "cc-pushback"
 SPLITS = ("train", "test")
 REVIEW_META_KEYS = ("file", "line_start", "line_end", "format")
 DPO_SIDES = ("faulted_old", "faulted_new", "correcting_old", "correcting_new")
@@ -223,7 +223,7 @@ def evidence_entry(correction: Correction) -> dict[str, object]:
     }
 
 
-def meta_of(row: Mapping[str, object]) -> str:
+def trace_meta(row: Mapping[str, object]) -> str:
     payload = json.loads(str(row["payload_json"]))
     return json.dumps(
         {"signal": payload["signal"]}
@@ -267,7 +267,7 @@ def trace_row(row: Mapping[str, object], pairs: list[dict[str, object]], log: Co
             if correction.source == SOURCE
         ],
         "split": split_of(session_id),
-        "meta": meta_of(row),
+        "meta": trace_meta(row),
     }
 
 
