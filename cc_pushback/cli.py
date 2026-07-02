@@ -31,12 +31,11 @@ if TYPE_CHECKING:
 SOURCE_KINDS = [*PUSHBACK_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
 DATASET_DIR = Path.home() / ".cc-pushback" / "dataset"
-HF_REPO_ID = "yasyf/cc-pushback-traces"
 sync_option = click.option(
     "--sync/--no-sync",
     default=True,
     show_default=True,
-    help="Rebuild the derived dataset and push it to the private HuggingFace repo when the pass changed data.",
+    help="Rebuild the derived dataset and push it to your private HuggingFace repo when the pass changed data.",
 )
 
 
@@ -50,12 +49,20 @@ def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:
     return wrapper
 
 
+@functools.cache
+def hf_repo_id() -> str:
+    """Resolves the dataset repo in the authenticated HF user's namespace: ``<hf-user>/cc-pushback-traces``."""
+    from huggingface_hub import HfApi
+
+    return f"{HfApi().whoami()['name']}/cc-pushback-traces"
+
+
 async def sync_dataset(store: FeedbackStore) -> None:
-    """Rebuilds the derived dataset and pushes every config to the private HF repo."""
+    """Rebuilds the derived dataset and pushes every config to the user's private HF repo."""
     from cc_pushback.export import export as run_export
 
-    click.echo(f"syncing dataset to {HF_REPO_ID}")
-    report = await run_export(store, out=DATASET_DIR, repo_id=HF_REPO_ID, push=True)
+    click.echo(f"syncing dataset to {(repo_id := hf_repo_id())}")
+    report = await run_export(store, out=DATASET_DIR, repo_id=repo_id, push=True)
     click.echo("synced " + "  ".join(f"{config} {sum(splits.values())}" for config, splits in report.counts.items()))
 
 
@@ -423,11 +430,13 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
 )
 @click.option(
     "--repo-id",
-    default=HF_REPO_ID,
-    show_default=True,
+    default=None,
+    show_default="<hf-user>/cc-pushback-traces",
     help="HuggingFace dataset repo to push to.",
 )
-@click.option("--push/--no-push", default=False, show_default=True, help="Push every config to the private HF repo.")
+@click.option(
+    "--push/--no-push", default=False, show_default=True, help="Push every config to --repo-id as a private dataset."
+)
 @click.option(
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
@@ -435,7 +444,7 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
 )
 @coro
-async def export(out: Path, repo_id: str, push: bool, db: Path | None) -> None:
+async def export(out: Path, repo_id: str | None, push: bool, db: Path | None) -> None:
     """Export the pushback lineage as a HuggingFace dataset.
 
     Builds the canonical ``traces`` config — one row per judged event, carrying
@@ -443,10 +452,13 @@ async def export(out: Path, repo_id: str, push: bool, db: Path | None) -> None:
     plus the TRL-ready ``sft``, ``dpo``, and ``kto`` projections. Both source
     databases are read-only; every config lands as per-split parquet under
     ``--out`` next to a generated dataset card, and ``--push`` uploads every
-    config to the private HuggingFace repo.
+    config to a private dataset in your HF namespace (created on first push),
+    ``--repo-id`` overriding the target.
     """
     from cc_pushback.export import export as run_export
 
+    if push:
+        repo_id = repo_id or hf_repo_id()
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         report = await run_export(store, out=out, repo_id=repo_id, push=push)
     for config, splits in report.counts.items():

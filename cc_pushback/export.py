@@ -423,9 +423,7 @@ async def load_traces(store: FeedbackStore) -> list[dict[str, object]]:
     return [trace_row(row, pairs_by_key.get(str(row["dedup_key"]), []), log) async for row in cur]
 
 
-async def export(
-    store: FeedbackStore, *, out: Path, repo_id: str = "yasyf/cc-pushback-traces", push: bool = False
-) -> ExportReport:
+async def export(store: FeedbackStore, *, out: Path, repo_id: str | None = None, push: bool = False) -> ExportReport:
     """Exports the judged corpus as a HuggingFace dataset: ``traces`` plus TRL views.
 
     Reads the feedback store and the shared ``corrections`` ledger (both read-only)
@@ -441,7 +439,7 @@ async def export(
     Args:
         store: The open feedback store.
         out: The directory to write the parquet files and dataset card into.
-        repo_id: The HuggingFace dataset repo to push to.
+        repo_id: The HuggingFace dataset repo to push to; required when ``push``.
         push: When True, push every config to ``repo_id`` as a private dataset.
 
     Returns:

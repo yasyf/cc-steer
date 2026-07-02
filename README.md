@@ -41,11 +41,11 @@ scanned 412 files, 1473 new rows
 | `eval` | Compute the mechanical metrics for the current prompt version. No LLM calls. |
 | `refine` | Refine every accepted pushback event into atomic training pairs. |
 | `enrich` | Ground every refined pair in the code it complains about. |
-| `export` | Export the pushback lineage as a HuggingFace dataset. `--push` uploads every config to the private HF repo. |
+| `export` | Export the pushback lineage as a HuggingFace dataset. `--push` uploads every config to a private dataset in your HF namespace. |
 | `pairs` | Print the refined training pairs — the pipeline's deliverable. |
 | `view-samples` | Serve the training-pairs dashboard: refined pairs and their full lineage. |
 
-`scan`, `triage`, `audit`, `refine`, and `enrich` sync the dataset to HuggingFace whenever a pass changes data; `--no-sync` skips it. Run `uvx cc-pushback COMMAND --help` for the full flag list.
+`scan`, `triage`, `audit`, `refine`, and `enrich` sync the dataset to `<hf-user>/cc-pushback-traces` — a private dataset in your HF namespace, created on first push (requires `hf auth login`) — whenever a pass changes data; `--no-sync` skips it. Run `uvx cc-pushback COMMAND --help` for the full flag list.
 
 ## What gets collected
 
@@ -66,7 +66,7 @@ dpo: train 363  test 44
 kto: train 1156  test 115
 ```
 
-One canonical `traces` config — one row per judged event, carrying the context, verdicts, refined pairs, and code evidence — plus three TRL-ready projections (`sft`, `dpo`, `kto`) land as per-split parquet under `~/.cc-pushback/dataset` (override with `--out`), next to a generated dataset card. Splits are a deterministic group split on the session hash, so a session never straddles train and test. `--push` uploads every config to a private HF repo (`--repo-id`, default `yasyf/cc-pushback-traces`).
+One canonical `traces` config — one row per judged event, carrying the context, verdicts, refined pairs, and code evidence — plus three TRL-ready projections (`sft`, `dpo`, `kto`) land as per-split parquet under `~/.cc-pushback/dataset` (override with `--out`), next to a generated dataset card. Splits are a deterministic group split on the session hash, so a session never straddles train and test. `--push` uploads every config to a private dataset in your HF namespace (`--repo-id`, default `<hf-user>/cc-pushback-traces`).
 
 You rarely run `export` by hand. Every mutating pass that changed data rebuilds the dataset and pushes all four configs to that repo. A failed push exits nonzero with the local writes already committed, and the next sync picks them up; `export --push` is the manual catch-up.
 

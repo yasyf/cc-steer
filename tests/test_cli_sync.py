@@ -31,7 +31,7 @@ pytestmark = pytest.mark.integration
 
 class ExportCall(NamedTuple):
     out: Path
-    repo_id: str
+    repo_id: str | None
     push: bool
 
 
@@ -80,12 +80,13 @@ STAGES = (
 def export_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[ExportCall]:
     calls: list[ExportCall] = []
 
-    async def record(store: FeedbackStore, *, out: Path, repo_id: str, push: bool) -> ExportReport:
+    async def record(store: FeedbackStore, *, out: Path, repo_id: str | None, push: bool) -> ExportReport:
         calls.append(ExportCall(out, repo_id, push))
         return ExportReport(counts={"traces": {"train": 2, "test": 1}}, out=out, pushed=push)
 
     monkeypatch.setattr(cc_pushback.export, "export", record)
     monkeypatch.setattr(cc_pushback.cli, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(cc_pushback.cli, "hf_repo_id", lambda: HF_REPO_ID)
     return calls
 
 
@@ -164,6 +165,27 @@ def test_stage_sync_fires_only_when_the_pass_changed_data(
     assert result.exit_code == 0, result.output
     assert export_calls == ([ExportCall(tmp_path, HF_REPO_ID, True)] if changed else [])
     assert ("syncing dataset to" in result.output) is changed
+
+
+def test_export_push_resolves_the_repo_from_the_hf_user(
+    runner: CliRunner, db: Path, tmp_path: Path, export_calls: list[ExportCall]
+) -> None:
+    result = runner.invoke(main, ["export", "--db", str(db), "--out", str(tmp_path / "ds"), "--push"])
+    assert result.exit_code == 0, result.output
+    assert export_calls == [ExportCall(tmp_path / "ds", HF_REPO_ID, True)]
+    assert f"pushed to {HF_REPO_ID}" in result.output
+
+
+def test_export_without_push_never_resolves_the_hf_user(
+    runner: CliRunner, db: Path, tmp_path: Path, export_calls: list[ExportCall], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def offline() -> str:
+        raise AssertionError("hf_repo_id must not be called without --push")
+
+    monkeypatch.setattr(cc_pushback.cli, "hf_repo_id", offline)
+    result = runner.invoke(main, ["export", "--db", str(db), "--out", str(tmp_path / "ds")])
+    assert result.exit_code == 0, result.output
+    assert export_calls == [ExportCall(tmp_path / "ds", None, False)]
 
 
 def test_push_failure_exits_nonzero(
