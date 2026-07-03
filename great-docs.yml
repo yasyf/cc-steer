@@ -22,7 +22,7 @@ keyboard_nav: true
 
 hero:
   name: cc-pushback
-  tagline: "Learn your pushback style from past Claude Code feedback and code reviews, and replicate it with a language model."
+  tagline: "Your best training data is rotting in ~/.claude."
   starfield: true
 
 cli:

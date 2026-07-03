@@ -1,62 +1,61 @@
-# cc-pushback
+# ![cc-pushback](https://github.com/yasyf/cc-pushback/raw/main/docs/assets/readme-banner.webp)
 
-![cc-pushback banner](https://github.com/yasyf/cc-pushback/raw/main/docs/assets/readme-banner.webp)
+**Your best training data is rotting in ~/.claude.** cc-pushback mines every correction, interrupt, and rejected plan from your transcripts into judge-refined, TRL-ready SFT/DPO/KTO pairs on HuggingFace.
 
+[![CI](https://github.com/yasyf/cc-pushback/actions/workflows/ci.yml/badge.svg)](https://github.com/yasyf/cc-pushback/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cc-pushback.svg)](https://pypi.org/project/cc-pushback/)
-[![Python](https://img.shields.io/pypi/pyversions/cc-pushback.svg)](https://pypi.org/project/cc-pushback/)
-[![Docs](https://img.shields.io/github/actions/workflow/status/yasyf/cc-pushback/docs.yml?branch=main&label=docs)](https://yasyf.github.io/cc-pushback/)
-[![License: PolyForm-Noncommercial-1.0.0](https://img.shields.io/badge/License-PolyForm--Noncommercial--1.0.0-blue.svg)](https://github.com/yasyf/cc-pushback/blob/main/LICENSE)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](https://github.com/yasyf/cc-pushback/blob/main/LICENSE)
 
-Mine your Claude Code transcripts for the moments you pushed back into a local database.
-
-cc-pushback collects your corrections, interrupts, rejected plans, and code-review comments — with the surrounding conversational context — into a feedback database, then judges each candidate, refines the accepted ones into atomic training pairs, and grounds them in the code they complain about. Your taste is mostly tacit (you notice a rule when it's violated), and that signal sits unused in transcript files; this turns it into a training dataset.
-
-## Install
-
-Run with [uvx](https://docs.astral.sh/uv/): `uvx cc-pushback --help`.
-
-## Quickstart
-
-Scan your transcripts and accumulate the pushback into a local feedback database:
+## Get started
 
 ```bash
 uvx cc-pushback scan
 ```
 
+One pass over `~/.claude/projects` fills `~/.cc-pushback/feedback.db` with every correction you typed, every plan you rejected, and every inline review comment — conversational context included. `stats` shows what landed:
+
+<img src="https://github.com/yasyf/cc-pushback/raw/main/docs/assets/demo.png" alt="Terminal running 'uvx cc-pushback stats' — 980 pushback events counted across four source kinds" width="700">
+
+Driving with an agent? Paste this:
+
+```text
+Run `uvx cc-pushback scan` to mine my Claude Code transcripts into ~/.cc-pushback/feedback.db.
+Then run `uvx cc-pushback stats` and report how much pushback was collected per source kind.
+Docs: https://yasyf.github.io/cc-pushback/
 ```
-scanned 412 files, 1473 new rows
-```
 
-`scan` is incremental and idempotent: each transcript is parsed only when new or changed, every candidate is keyed by a content digest, and recording a file commits in one transaction, so an interrupted scan never leaves the database half-written. The database lives at `~/.cc-pushback/feedback.db` by default (override with `--db`).
+---
 
-## Commands
+## Use cases
 
-| Command | What it does |
-| --- | --- |
-| `scan` | Scan transcripts for feedback, incrementally. `--full` re-mines every transcript; `--transcripts DIR` (repeatable) scans other directories. |
-| `stats` | Print ingestion counts by source kind and triage coverage. |
-| `list` | List recent feedback events, newest first. `--source KIND` and `--limit N`. |
-| `triage` | Judge every stored candidate lacking a verdict at the current prompt version. |
-| `audit` | Audit a seeded stratified sample of the current prompt version's verdicts. |
-| `eval` | Compute the mechanical metrics for the current prompt version. No LLM calls. |
-| `refine` | Refine every accepted pushback event into atomic training pairs. |
-| `enrich` | Ground every refined pair in the code it complains about. |
-| `export` | Export the pushback lineage as a HuggingFace dataset. `--push` uploads every config to a private dataset in your HF namespace. |
-| `pairs` | Print the refined training pairs — the pipeline's deliverable. |
-| `view-samples` | Serve the training-pairs dashboard: refined pairs and their full lineage. |
+### Build a training set from feedback you already gave
 
-`scan`, `triage`, `audit`, `refine`, and `enrich` sync the dataset to `<hf-user>/cc-pushback-traces` — a private dataset in your HF namespace, created on first push (requires `hf auth login`) — whenever a pass changes data; `--no-sync` skips it. Run `uvx cc-pushback COMMAND --help` for the full flag list.
-
-## What gets collected
-
-`scan` runs four detectors over each transcript, each tagged with a source kind: **transcript messages** (`transcript_message`, the pushback you typed mid-session), **plan reviews** (`plan_review`, rejected `ExitPlanMode` plans and plan-mode re-entries), **interrupts and rejections** (`interrupt_rejection`, permission denials and user interrupts), and **review comments** (`review_comment`, one row per inline code-review comment). Each row carries the conversational window around the feedback, captured at collection time because transcripts are ephemeral.
-
-## Exporting a training dataset
-
-Once the corpus is judged, `export` turns it into a HuggingFace dataset:
+You've spent months telling Claude "no, not like that", and that signal evaporates as transcripts rotate out. Judge the corpus, then distill the accepted events into atomic pairs grounded in the code they complain about:
 
 ```bash
-uvx cc-pushback export
+uvx cc-pushback triage
+uvx cc-pushback refine
+uvx cc-pushback enrich
+```
+
+`uvx cc-pushback pairs` prints the deliverable: training pairs distilled from your own pushback, each carrying the conversational window and code evidence behind it.
+
+### See what you actually push back on, across every project
+
+Your taste is mostly tacit — you notice a rule when it's violated. The corpus makes it legible:
+
+```bash
+uvx cc-pushback list --source plan_review
+```
+
+On my machine the split is 698 mid-session corrections, 219 rejected plans, 41 review comments, and 22 interrupts. Another machine's history folds in too: mirror it with rsync and point `scan --transcripts` at it (repeatable, so several mirrors fold into one scan).
+
+### Push a private SFT/DPO/KTO dataset to your HuggingFace namespace
+
+A judged corpus in SQLite trains nothing. Export projects it into TRL-ready configs:
+
+```bash
+uvx cc-pushback export --push
 ```
 
 ```
@@ -66,19 +65,15 @@ dpo: train 363  test 44
 kto: train 1156  test 115
 ```
 
-One canonical `traces` config — one row per judged event, carrying the context, verdicts, refined pairs, and code evidence — plus three TRL-ready projections (`sft`, `dpo`, `kto`) land as per-split parquet under `~/.cc-pushback/dataset` (override with `--out`), next to a generated dataset card. Splits are a deterministic group split on the session hash, so a session never straddles train and test. `--push` uploads every config to a private dataset in your HF namespace (`--repo-id`, default `<hf-user>/cc-pushback-traces`).
+Four configs land as per-split parquet in a private `<hf-user>/cc-pushback-traces`, next to a generated dataset card. Splits group on the session hash, so a session never straddles train and test.
 
-You rarely run `export` by hand. Every mutating pass that changed data rebuilds the dataset and pushes all four configs to that repo. A failed push exits nonzero with the local writes already committed, and the next sync picks them up; `export --push` is the manual catch-up.
+## More in the docs
 
-## Mining from another machine
+- **Incremental scanning** — content digests and one-transaction commits make re-scans cheap and interrupt-safe — [scan](https://yasyf.github.io/cc-pushback/reference/cli/scan.html)
+- **Judge, audit, eval** — prompt-versioned triage, a seeded audit sample, and mechanical metrics with no LLM calls — [triage](https://yasyf.github.io/cc-pushback/reference/cli/triage.html)
+- **Pair dashboard** — browse refined pairs and their full lineage in a local web UI — [view-samples](https://yasyf.github.io/cc-pushback/reference/cli/view_samples.html)
+- **Python API** — drive the scanner and the feedback store from your own code — [reference](https://yasyf.github.io/cc-pushback/reference/)
 
-Transcripts live under `~/.claude/projects`. Mirror a remote machine's history locally, then point `scan` at it — `--transcripts` is repeatable, so several mirrors fold into one scan:
+Status: alpha — the pipeline runs end to end; the judge prompt still iterates (v5 today).
 
-```bash
-rsync -az yasyf@yasyf:.claude/projects/ ~/.cc-pushback/mirrors/yasyf/
-uvx cc-pushback scan --transcripts ~/.cc-pushback/mirrors/yasyf/
-```
-
-## Docs
-
-[Read the docs](https://yasyf.github.io/cc-pushback/) for the full guide and API reference.
+Read the [docs](https://yasyf.github.io/cc-pushback/) for the full guide. Licensed under [PolyForm Noncommercial 1.0.0](LICENSE).

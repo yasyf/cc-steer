@@ -19,6 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # TEMPORARY: satisfies the ../cc-transcript path override in pyproject.toml
+      # (unreleased cc-transcript v8) — drop alongside the override.
+      - name: Clone cc-transcript sibling
+        run: git clone --depth 1 https://github.com/yasyf/cc-transcript ../cc-transcript
+
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0
         with:
