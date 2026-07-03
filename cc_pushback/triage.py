@@ -37,7 +37,12 @@ JUDGE = "judge"
 AUDITOR = "auditor"
 TRIGGER_BUDGET = Budget(turn_chars=2000, tool_chars=6000)
 CONTEXT_BUDGET = Budget()
-KIND_QUOTAS: dict[str, int | None] = {"interrupt_rejection": None, "review_comment": 10, "plan_review": 10}
+KIND_QUOTAS: dict[str, int | None] = {
+    "interrupt_rejection": None,
+    "review_comment": 10,
+    "plan_review": 10,
+    "question_answer": 10,
+}
 REMAINDER_KIND = "transcript_message"
 
 PUSHBACK_CATEGORIES = frozenset(

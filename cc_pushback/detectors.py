@@ -77,6 +77,8 @@ def parts(sig: MiningSignal) -> tuple[str, ...]:
                 str(sig.evidence["line_end"] or ""),
                 sig.text,
             )
+        case "ask_user_question":
+            return (sig.session_id, "question_answer", sig.evidence["question"], sig.text)
     raise AssertionError(sig.detector)
 
 
@@ -90,6 +92,8 @@ def payload_of(sig: MiningSignal) -> Mapping[str, Any] | None:
             return dict(sig.evidence) or None
         case "review_comment":
             return {key: sig.evidence[key] for key in ("format", "file", "line_start", "line_end", "provenance")}
+        case "ask_user_question":
+            return dict(sig.evidence)
     raise AssertionError(sig.detector)
 
 

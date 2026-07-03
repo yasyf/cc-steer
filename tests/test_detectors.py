@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from cc_transcript import keep
-from cc_transcript.mining import mine
+from cc_transcript.ids import EventUuid, SessionId
+from cc_transcript.mining import CandidateSignal, Confidence, MiningSignal, SourceKind, mine
 
 from cc_pushback.detectors import (
     PUSHBACK_MINING_SPEC,
     detect,
     interrupt_rejections,
+    parts,
+    payload_of,
     plan_reviews,
     survives,
     transcript_messages,
@@ -26,6 +31,31 @@ from tests.builders import (
     tool_result,
     user_text,
 )
+
+QUESTION_EVIDENCE: dict[str, Any] = {
+    "question": "Which auth scheme should the API use?",
+    "header": "Auth",
+    "multi_select": False,
+    "option_pick": True,
+    "picked_labels": ["JWT"],
+    "recommended_pick": False,
+}
+
+
+def question_signal(evidence: dict[str, Any]) -> MiningSignal:
+    return MiningSignal(
+        kind=SourceKind("question_answer"),
+        detector="ask_user_question",
+        session_id=SessionId("sess-1"),
+        event_index=0,
+        event_uuid=EventUuid("uuid-q1"),
+        occurred_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        text=evidence.get("notes", "JWT"),
+        cc_version=None,
+        trigger_index=None,
+        signal=CandidateSignal(confidence=Confidence(0.9)),
+        evidence=evidence,
+    )
 
 
 @pytest.mark.unit
@@ -372,3 +402,31 @@ def test_dedup_keys_derive_from_content_not_entry_identity() -> None:
     [second] = plan_reviews(parse(entries()))  # fresh entries: new uuids, same content
     assert first.ref != second.ref
     assert first.dedup_key == second.dedup_key
+
+
+@pytest.mark.unit
+def test_ask_user_question_parts_key_on_question_and_answer() -> None:
+    assert parts(question_signal(QUESTION_EVIDENCE)) == (
+        "sess-1",
+        "question_answer",
+        "Which auth scheme should the API use?",
+        "JWT",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "extras",
+    [
+        pytest.param({}, id="required-keys-only"),
+        pytest.param({"preview": "def auth(): ...", "notes": "sessions need sticky LB"}, id="with-preview-and-notes"),
+    ],
+)
+def test_ask_user_question_payload_is_the_full_evidence(extras: dict[str, Any]) -> None:
+    evidence = QUESTION_EVIDENCE | extras
+    assert payload_of(question_signal(evidence)) == evidence
+
+
+@pytest.mark.unit
+def test_ask_user_question_survives_unconditionally() -> None:
+    assert survives([], question_signal(QUESTION_EVIDENCE)) is True

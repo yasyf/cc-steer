@@ -156,7 +156,7 @@
   {
     "dedup_key": "399eb2db5c26dbe935a65bb0898b93a6d912887a3e1c027f6db29509fc49e24b",
     "source_kind": "plan_review",
-    "text": ">  2. internal/overlay/symlink.go \u2014 self-heal already-affected account dirs. \n\nget rid of this and any other self-healing, we dont need to worry aboutt hat, assume no one used the broekn one",
+    "text": ">  2. internal/overlay/symlink.go — self-heal already-affected account dirs. \n\nget rid of this and any other self-healing, we dont need to worry aboutt hat, assume no one used the broekn one",
     "expected": "pushback",
     "note": "orders removal of self-healing from the plan"
   },
@@ -289,7 +289,7 @@
   {
     "dedup_key": "f2139a00df120c9f1ae15ea0873f55ef5f8a68e84d9e090bf7715071b171b1ca",
     "source_kind": "transcript_message",
-    "text": ">  The one bucket left alone is forward operational directives (set higher max tokens, commit and push) \u2014 the data showed\n  they're\n    indistinguishable by rule from genuine pushback (get rid of X, stop suggesting Y), so filtering them would cost recall.\n    That'd need an LLM classifier, not a re for the filtering.\n\n  we're building the detemrinistic part of the pipelne, and then it will feed into an llm filtering part of the pipeline, so\n  this is ok. plan to do this then use subllm for the filtering.",
+    "text": ">  The one bucket left alone is forward operational directives (set higher max tokens, commit and push) — the data showed\n  they're\n    indistinguishable by rule from genuine pushback (get rid of X, stop suggesting Y), so filtering them would cost recall.\n    That'd need an LLM classifier, not a re for the filtering.\n\n  we're building the detemrinistic part of the pipelne, and then it will feed into an llm filtering part of the pipeline, so\n  this is ok. plan to do this then use subllm for the filtering.",
     "expected": "noise",
     "note": "quotes prior summary, assigns the next build phase"
   },
@@ -341,5 +341,33 @@
     "text": "I killed it already",
     "expected": "noise",
     "note": "interrupt twin of I-killed-it-already"
+  },
+  {
+    "dedup_key": "181ecfe2f18892216f3535793ddf0fba55c80242145ec3cbba5bdf8e94974383",
+    "source_kind": "plan_review",
+    "text": "```\nCOMMENT_KINDS: dict[str, tuple[str, ...]] = {\r     \"py\": (\"comment\",), \"ts\": (\"comment\",), \"tsx\": (\"comment\",), \"js\": (\"comment\",),\r     \"jsx\": (\"comment\",), \"go\": (\"comment\",), \"bash\": (\"comment\",),\r     \"rs\": (\"line_comment\", \"block_comment\"), \"java\": (\"line_comment\", \"block_comment\"),\r }\r\n```\n\ninstead of this, why not just search for the union of comment, line_comment, and block_comment regardless of the language. make that fix in theotehr place too\n\n> - Not Clause/NlpSignal: match_clause (nlp.py:92-101) anchors on a noun lemma hit — tombstone objects are unpredictable identifiers\r (\"fetchUsers\", \"retry logic\"), so the shipped Clause unit can't fire; bending it verb-anchored would be public-type surgery for one hook.\n\nlets design NlpSignal/Clause to properly mtch use cases like this, dont worry about backwards compat, do the right thing, eitehr changing the abstraction or introducing a new option\n\n> A custom @on handler (not bare llm_nudge — its prompt is static; we need the suspect comments and the edit's old/new text interpolated\r into the judge prompt)\n\nwhat is missing to be able to do llm_nudge with this? we should improve the framework",
+    "expected": "pushback",
+    "note": "polite question-form design pushback opening with a quoted plan excerpt"
+  },
+  {
+    "dedup_key": "e6599df8e446b4e4eb26251d8164ddb3f9f43da1b842088e7fdc54eb0ebc7f7d",
+    "source_kind": "plan_review",
+    "text": ">  message=lambda r: (\r         f\"Tombstone comment: {r.reasoning} Delete the comment line itself — do NOT restore \"\r         \"the removed code; git history already records what changed. If it can instead \"\r         \"document the behavior of the code that remains, rewrite it to say that.\"\r     ),\n\nwhy not expose that a signal as you mentioned so we dont have to make message a lambda? or look into more declerative ways we can add context",
+    "expected": "pushback",
+    "note": "why-not question pressing to expose a signal instead of a lambda"
+  },
+  {
+    "dedup_key": "a0776bdc6ec715347e477a9c144abaf674f05073329dde062df1637f5a67b2aa",
+    "source_kind": "plan_review",
+    "text": "looks great, last thing, `kind: frozenset[str] = frozenset({\"comment\", \"line_comment\", \"block_comment\"})` we should export a COMMENT_TYPES, and also we shouldnt force the end-user to create a frozenset, we can do that for them when getting a set (use pydantic or something)",
+    "expected": "pushback",
+    "note": "approve-then-add-scope: looks great, last thing + API redesign ask"
+  },
+  {
+    "dedup_key": "2845a78a4318822b79bfce19b6630a3eeddb4422441f2ab40d3e5af45f3cf79e",
+    "source_kind": "transcript_message",
+    "text": "wrong quoted code in my last emssge, I was tqlking about tombstone_prompt",
+    "expected": "noise",
+    "note": "user correcting their own previous message, not Claude"
   }
 ]
