@@ -44,5 +44,8 @@ jobs:
           uv build
           rm -rf .wheel-smoke
           uv venv --seed .wheel-smoke
+          # TEMPORARY: cc-transcript>=8 is not on PyPI yet — seed it from the
+          # sibling clone so the wheel's dependencies resolve.
+          uv pip install --python .wheel-smoke/bin/python ../cc-transcript
           uv pip install --python .wheel-smoke/bin/python dist/*.whl
           .wheel-smoke/bin/cc-pushback --help
