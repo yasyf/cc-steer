@@ -51,9 +51,10 @@ Changelog = "https://github.com/yasyf/cc-pushback/blob/main/CHANGELOG.md"
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
 
-# TEMPORARY: path override for unreleased cc-transcript v8 — drop before release.
-[tool.uv.sources]
-cc-transcript = { path = "../cc-transcript", editable = true }
+# cc-transcript is a Rust package with macOS/Linux wheels only (no Windows), so
+# scope lock resolution to the platforms it actually supports.
+[tool.uv]
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 
 [tool.uv.build-backend]
 module-name = "cc_pushback"
