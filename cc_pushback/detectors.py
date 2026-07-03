@@ -15,8 +15,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cc_transcript import keep
-from cc_transcript.activity import SessionActivity, meta_of
+from cc_transcript.activity import SessionActivity
 from cc_transcript.context import capture_window
+from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef
 from cc_transcript.mining import FeedbackCandidate, MiningSpec, dedup_key, mine
 
@@ -93,7 +94,7 @@ def payload_of(sig: MiningSignal) -> Mapping[str, Any] | None:
 
 
 def clamped_before(activity: SessionActivity, events: Sequence[TranscriptEvent], sig: MiningSignal) -> int:
-    if sig.lower_bound is None or (meta := meta_of(events[sig.lower_bound])) is None:
+    if sig.lower_bound is None or (meta := event_meta(events[sig.lower_bound])) is None:
         return DEFAULT_BEFORE
     match (
         activity.turn_of(EventRef(meta.session_id, meta.uuid)),

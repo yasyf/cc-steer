@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anyio
-from cc_transcript.activity import SessionActivity, meta_of
+from cc_transcript.activity import SessionActivity
 from cc_transcript.corrections import CorrectionLog
 from cc_transcript.discovery import TranscriptExpiredError
 from cc_transcript.extract import extract_correction, usable_backend
+from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.parser import parse_events_async
 
@@ -63,7 +64,7 @@ def repo_of(turn: Turn, anchor: EventRef) -> Path | None:
         (
             Path(meta.cwd)
             for event in turn.events
-            if (meta := meta_of(event)) is not None and meta.uuid == anchor.event_uuid and meta.cwd
+            if (meta := event_meta(event)) is not None and meta.uuid == anchor.event_uuid and meta.cwd
         ),
         None,
     )

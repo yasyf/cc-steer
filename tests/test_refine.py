@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
-from cc_transcript.judge import resolved_model
+from cc_transcript.judge import JudgeError, resolved_model
 from pydantic import ValidationError
 
 from cc_pushback.detectors import detect
@@ -196,7 +195,7 @@ async def test_one_failing_event_does_not_abort_then_heals(
 
     async def flaky(prompt: str) -> Refinement:
         if poison in prompt:
-            raise subprocess.CalledProcessError(1, ["claude"])
+            raise JudgeError("claude exited 1")
         return refinement()
 
     monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: flaky)

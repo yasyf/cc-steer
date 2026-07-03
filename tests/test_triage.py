@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import subprocess
 from random import Random
 from typing import TYPE_CHECKING
 
 import pytest
 from cc_transcript.context import SUMMARY_LABEL
-from cc_transcript.judge import sample_audit
+from cc_transcript.judge import JudgeError, sample_audit
 from cc_transcript.judge.verdicts import stratified
 
 from cc_pushback.detectors import detect
@@ -251,7 +250,7 @@ async def test_one_failing_row_does_not_abort_the_pass(store: FeedbackStore, mon
 
     async def flaky(prompt: str) -> Verdict:
         if poison in prompt:
-            raise subprocess.CalledProcessError(1, ["claude"])
+            raise JudgeError("claude exited 1")
         return verdict()
 
     monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: flaky)

@@ -18,8 +18,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cc_transcript import TranscriptDiscovery
-from cc_transcript.activity import SessionActivity, meta_of
+from cc_transcript.activity import SessionActivity
 from cc_transcript.context import capture_window
+from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef, SessionId
 from cc_transcript.mining import REVIEW_COMMENT, FeedbackCandidate, dedup_key, firm
 from cc_transcript.parser import parse_events_async
@@ -98,7 +99,7 @@ def edge_distance(start: datetime, end: datetime, when: datetime) -> float:
 
 
 def time_range(events: Sequence[TranscriptEvent]) -> tuple[datetime, datetime] | None:
-    stamps = [meta.timestamp for event in events if (meta := meta_of(event)) is not None]
+    stamps = [meta.timestamp for event in events if (meta := event_meta(event)) is not None]
     return (min(stamps), max(stamps)) if stamps else None
 
 
@@ -146,7 +147,7 @@ async def anchor_for(roots: Sequence[Path], uuid: str, when: datetime) -> Anchor
     events = await parse_events_async(winner)
     activity = SessionActivity.from_events(SessionId(winner.stem), events)
     meta = min(
-        (m for event in events if (m := meta_of(event)) is not None),
+        (m for event in events if (m := event_meta(event)) is not None),
         key=lambda m: abs((m.timestamp - when).total_seconds()),
     )
     return Anchor(meta.session_id, EventRef(meta.session_id, meta.uuid), activity, meta.timestamp)
