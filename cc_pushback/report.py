@@ -391,7 +391,7 @@ def candidate_status(row: Mapping[str, object]) -> Literal["refined", "accepted"
 
 
 def golden_label(is_pushback: object) -> str:
-    return "pushback" if is_pushback else "noise"
+    return "steering" if is_pushback else "noise"
 
 
 def golden_status(

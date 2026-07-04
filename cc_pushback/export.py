@@ -28,7 +28,7 @@ from huggingface_hub import HfApi
 from cc_pushback.enrich import SOURCE
 from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
 from cc_pushback.report import project_label
-from cc_pushback.triage import AUDIT_VERSION, PROMPT_VERSION, PUSHBACK_CATEGORIES
+from cc_pushback.triage import AUDIT_VERSION, PROMPT_VERSION, STEERING_CATEGORIES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -83,7 +83,8 @@ CATEGORIES = {
     "unwanted_action": "the assistant did something the user did not ask for or want",
     "style_violation": "the work violates the user's conventions or stated preferences",
     "premature": "the assistant stopped early, skipped work, or claimed completion when work remains",
-    "operational_directive": "a forward instruction that does not criticize prior work",
+    "direction": "a forward instruction or answer that resolves a decision the assistant faced or raised",
+    "operational_directive": "routine logistics that faults nothing and resolves no choice the assistant raised",
     "status_update": "the user reporting state",
     "new_task": "a fresh request or spec, not a reaction to the preceding action",
     "question": "a genuine request for information",
@@ -470,7 +471,7 @@ def dataset_card(counts: Mapping[str, Mapping[str, int]], *, pushback_count: int
             for config, splits in counts.items()
         ),
         category_list="\n".join(
-            f"- `{category}` — {definition}{' *(pushback)*' if category in PUSHBACK_CATEGORIES else ''}"
+            f"- `{category}` — {definition}{' *(steering)*' if category in STEERING_CATEGORIES else ''}"
             for category, definition in CATEGORIES.items()
         ),
         train_count=counts["traces"]["train"],

@@ -55,7 +55,7 @@ GOLDEN_PATH = Path(__file__).with_name("golden_triage.json")
 def load_golden(path: Path = GOLDEN_PATH) -> tuple[GoldenRow, ...]:
     """Loads the frozen golden fixture, mapping its labels to booleans.
 
-    The on-disk fixture is frozen with ``"pushback"``/``"noise"`` labels; the
+    The on-disk fixture is frozen with ``"steering"``/``"noise"`` labels; the
     mining domain's :class:`GoldenRow` carries ``expected`` as a bool, so the
     mapping happens here at load time.
 
@@ -65,7 +65,7 @@ def load_golden(path: Path = GOLDEN_PATH) -> tuple[GoldenRow, ...]:
     Returns:
         The fixture's rows.
     """
-    return tuple(GoldenRow(**row | {"expected": row["expected"] == "pushback"}) for row in json.loads(path.read_text()))
+    return tuple(GoldenRow(**row | {"expected": row["expected"] == "steering"}) for row in json.loads(path.read_text()))
 
 
 def golden_sha256(path: Path = GOLDEN_PATH) -> str:

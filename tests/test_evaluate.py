@@ -70,7 +70,7 @@ def test_golden_result_hard_fails_on_corpus_drift() -> None:
 def test_load_golden_maps_labels_to_bool(tmp_path: Path) -> None:
     path = tmp_path / "golden.json"
     rows = [
-        {"dedup_key": "k", "source_kind": "plan_review", "text": "no", "expected": "pushback", "note": "terse"},
+        {"dedup_key": "k", "source_kind": "plan_review", "text": "no", "expected": "steering", "note": "terse"},
         {"dedup_key": "k2", "source_kind": "plan_review", "text": "ok", "expected": "noise", "note": "approval"},
     ]
     path.write_text(json.dumps(rows))

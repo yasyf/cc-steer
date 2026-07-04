@@ -1,7 +1,7 @@
 """Stage 2 of the pipeline: the LLM judge that turns mined candidates into training pairs.
 
 The deterministic detectors are tuned for recall; this module supplies the precision.
-A judge classifies every stored candidate into a pushback or noise category, and an
+A judge classifies every stored candidate into a steering or noise category, and an
 independently-prompted auditor (a stronger model, blind to the judge's verdicts)
 samples the results so the judge's error rate is measurable. Prompts render each
 candidate's :class:`~cc_transcript.context.ContextWindow` at full fidelity while the
@@ -13,6 +13,7 @@ table; accepted rows surface through the ``accepted_pushback`` view.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
@@ -31,8 +32,8 @@ if TYPE_CHECKING:
 
     from cc_pushback.store import FeedbackStore
 
-PROMPT_VERSION = 5
-AUDIT_VERSION = 4
+PROMPT_VERSION = 6
+AUDIT_VERSION = 5
 JUDGE = "judge"
 AUDITOR = "auditor"
 TRIGGER_BUDGET = Budget(turn_chars=2000, tool_chars=6000)
@@ -45,8 +46,8 @@ KIND_QUOTAS: dict[str, int | None] = {
 }
 REMAINDER_KIND = "transcript_message"
 
-PUSHBACK_CATEGORIES = frozenset(
-    {"wrong_approach", "incorrect_change", "unwanted_action", "style_violation", "premature"}
+STEERING_CATEGORIES = frozenset(
+    {"wrong_approach", "incorrect_change", "unwanted_action", "style_violation", "premature", "direction"}
 )
 
 Category = Literal[
@@ -55,6 +56,7 @@ Category = Literal[
     "unwanted_action",
     "style_violation",
     "premature",
+    "direction",
     "operational_directive",
     "status_update",
     "new_task",
@@ -63,9 +65,16 @@ Category = Literal[
 ]
 
 JUDGE_PROMPT = """\
-You are auditing one message a developer sent to an AI coding assistant (Claude),
-deciding whether it is genuine PUSHBACK — corrective feedback on something the
-assistant just did — or non-pushback noise.
+You are classifying one message a developer sent to an AI coding assistant (Claude),
+deciding whether it is genuine STEERING — the human shaping a decision the assistant
+faced or raised — or non-steering noise.
+
+Steering has two faces. The corrective face faults or redirects work the assistant
+already did or proposed. The forward face resolves an open choice the assistant put on
+the table — picking among options it offered, answering a question it asked, or
+settling a decision it surfaced. Noise shapes no decision: routine next-step logistics
+any operator would issue, status reports, bare approvals, pure information-seeking, and
+fresh unrelated tasks.
 
 Pick exactly one category:
 - wrong_approach: rejects the assistant's plan, strategy, or design.
@@ -73,25 +82,34 @@ Pick exactly one category:
 - unwanted_action: the assistant did something the user did not ask for or want.
 - style_violation: the work violates the user's conventions or stated preferences.
 - premature: the assistant stopped early, skipped work, or claimed completion when work remains.
-- operational_directive: a forward instruction ("commit and push", "set a higher timeout")
-  that does not criticize prior work. Approving then adding scope ("yes — also do Y",
-  "upgrade our alias as well") is operational; forward words like "fix" or "review"
-  aimed at future work do not by themselves fault what was already done.
+- direction: a forward instruction or answer that RESOLVES a decision the assistant
+  faced or raised — choosing among options it offered, answering a question it asked
+  (including declining an option: "nope just push the resolved branch"), or a directive
+  that settles a specific open choice it surfaced ("lets do 3.14 for the python pin").
+  The choice must trace back to the assistant: a directive that resolves nothing the
+  assistant raised is operational_directive, not direction.
+- operational_directive: routine logistics ("commit and push", "set a higher timeout")
+  that faults nothing and resolves no choice the assistant raised. Approving then
+  adding scope ("yes — also do Y", "upgrade our alias as well") is operational; forward
+  words like "fix" or "review" aimed at future work do not by themselves fault what was
+  already done.
 - status_update: the user reporting state ("done, its running", "I killed it already").
-- new_task: a fresh request or spec, not a reaction to the preceding action. A report
-  that an external tool or pre-existing system is broken is new_task or status_update,
-  not incorrect_change, unless the assistant built it.
-- question: a genuine request for information. A skeptical or rhetorical question that
-  presses on a choice the assistant made ("why are we hardcoding this?", "should this
-  ever be optional?", "there's really no better way?") is pushback, not a question —
-  categorize it by what it challenges. But a question proposing a NEW addition
-  ("should we add a pyright config?", "can we also bundle the plugin?") presses on
-  nothing the assistant did — it stays a question or new_task.
+- new_task: a fresh request or spec, not a reaction to the preceding action and not the
+  resolution of anything the assistant raised. A report that an external tool or
+  pre-existing system is broken is new_task or status_update, not incorrect_change,
+  unless the assistant built it.
+- question: a pure request for information, settling nothing by itself. A skeptical or
+  rhetorical question that presses on a choice the assistant made ("why are we
+  hardcoding this?", "should this ever be optional?", "there's really no better way?")
+  is steering, not a question — categorize it by what it challenges. But a question
+  proposing a NEW addition ("should we add a pyright config?", "can we also bundle the
+  plugin?") presses on nothing the assistant did and resolves nothing it raised — it
+  stays a question or new_task.
 - other: none of the above.
 
-The first five categories are pushback; the rest are noise.
-A mixed message that contains ANY genuine corrective content is pushback — pick the
-category of the corrective part. Corrective content is often implicit in a directive:
+The first six categories are steering; the last five are noise.
+A mixed message that contains ANY steering content is steering — pick the category of
+the steering part. Corrective steering is often implicit in a directive:
 "figure out the right proper fix" faults the current fix, "look more closely" faults a
 shallow look, "not just X — give me Y" faults an insufficient answer, praise followed
 by a redirect ("its good that you did X, but the more important thing is Y") faults the
@@ -102,22 +120,32 @@ something the assistant just produced ("get rid of the MAX_SEQ_LEN and the trt s
 unwanted, even with no other criticism. And a clause noting the work still contains or
 uses something it should not ("we arent supposed to be using litellm anymore", "why is
 X still here", "thats not how we do it") is corrective even when the lead clause is a
-forward directive.
+forward directive. An incredulous aside riding on a directive ("unify the code paths —
+why on earth are they separate", "why is this hardcoded") faults the current
+arrangement the assistant produced or left standing; the directive it rides on is
+corrective steering, not a fresh new_task.
 An implicit fault only counts when the faulted thing exists in the assistant's prior
 work: "set the right headers" while assigning fresh config work is a plain directive;
 "use the right template" after the assistant used the wrong one is a correction;
 "get rid of X" where X is pre-existing state the assistant did not create (clearing
-local state, deleting an old branch) is a plain directive, not pushback. And when the
-user corrects their own earlier instruction ("ah sorry, my bad — we treat it as
-native"), that is a spec clarification, not pushback on the assistant.
-A leading "no" or "nope" is not automatically rejection. When it answers a yes/no
-question the assistant asked or declines an option the assistant offered, and the rest
-is a plain forward directive with no fault of completed work ("nope just push the
-resolved branch", "nope this is good, commit and push"), it is an answer — noise. It is
-pushback only when the "no" countermands or rejects work the assistant actually did or
-proposed ("no we dont want to vendor it", "no, that's the wrong file").
-The assistant action being corrected may predate the context shown: when the message
-critiques files or output the assistant produced earlier in the session, it is pushback
+local state, deleting an old branch) is a plain directive — noise unless it settles a
+choice the assistant raised. And when the user corrects their own earlier instruction
+("ah sorry, my bad — we treat it as native"), that is a spec revision originating with
+the user — the decision it changes was never the assistant's — so it is a new
+instruction, not steering.
+Forward direction only counts when the choice was genuinely open. Picking an option,
+declining one, or supplying the missing parameter of a decision the assistant surfaced
+is direction; a bare approval or acknowledgment that merely green-lights the course the
+assistant already proposed ("lgtm", "sounds good", "yes go ahead") chooses nothing —
+noise. A leading "no" or "nope" is therefore rarely noise: when it answers a yes/no
+question the assistant asked or declines an option it offered, and the rest is a plain
+forward directive with no fault of completed work ("nope just push the resolved
+branch", "nope this is good, commit and push"), it resolves the assistant's open
+question — direction. When the "no" countermands or rejects work the assistant actually
+did or proposed ("no we dont want to vendor it", "no, that's the wrong file"), it is
+corrective steering — categorize it by what it rejects.
+The assistant action being steered may predate the context shown: when the message
+critiques files or output the assistant produced earlier in the session, it is steering
 on that work even if the immediately preceding action is unrelated.
 When the source is review_comment, the message is an inline code-review comment on code
 the assistant wrote: terse imperatives there ("inline", "remove this one", "maybe make
@@ -125,71 +153,94 @@ this _safe?") are corrections — usually style_violation, incorrect_change, or
 wrong_approach — not operational directives. A bare prohibition or convention naming a
 rule for that line ("no comments", "no globals", "it is required", "always use X") is a
 style_violation correction, not other or noise — even with no verb.
+When the source is question_answer, the message is the user's answer to a question the
+assistant posed through its AskUserQuestion tool; the question and the option the
+answer resolves to are rendered below. The assistant explicitly handed this decision to
+the user, so the answer is steering by definition — it is never noise. A plain pick or
+answer is direction (an ordinal or shorthand like "3, ..." resolves to that option's
+label); reach for wrong_approach, unwanted_action, or style_violation when the answer
+rejects the offered options outright, redirects the assistant, or specifies a different
+approach than anything presented.
 
-what_claude_did: ONE neutral sentence naming the assistant action the message responds
-to (e.g. "Force-pushed to the shared branch with git push --force"). Write it even when
-the message is noise.
-confidence: your probability (0 to 1) that your pushback-vs-noise call is correct.
+what_claude_did: ONE neutral sentence naming the assistant action or question the
+message responds to (e.g. "Force-pushed to the shared branch with git push --force").
+Write it even when the message is noise.
+confidence: your probability (0 to 1) that your steering-vs-noise call is correct.
 rationale: one short clause.
 
 [source: {source_kind}]
 {context}
+{question_answer}
 === USER MESSAGE TO CLASSIFY ===
 {text}"""
 
 AUDIT_PROMPT = """\
-A dataset is being built of developer corrections: moments where a human, reading what
-an AI coding assistant just did, told it that something about that work was wrong,
-unwanted, or off-course. You are the quality gate: given one human message and its
-surrounding conversation, decide independently whether the message belongs in that
-dataset.
+A dataset is being built of developer steering: moments where a human, watching an AI
+coding assistant work, shaped its course — told it that something about its work was
+wrong, unwanted, or off-track, or settled a decision the assistant had put in the
+human's hands. You are the quality gate: given one human message and its surrounding
+conversation, decide independently whether the message belongs in that dataset.
 
-It belongs (it is a correction) when the message faults the assistant's preceding work
-or behavior in any way — its direction, its output, its side effects, its style, or its
-stopping point — even partially, even alongside unrelated content.
+It belongs (it is steering) in either of two cases. First, when the message faults the
+assistant's preceding work or behavior in any way — its direction, its output, its side
+effects, its style, or its stopping point — even partially, even alongside unrelated
+content. Second, when the message resolves a decision the assistant faced or raised:
+picks among options it offered, answers a question it asked, or settles a specific open
+choice it surfaced.
 
-It does not belong when the message only moves work forward or reports facts: telling
-the assistant what to do next, giving a new assignment, asking or answering a question,
-relaying status, or approving.
+It does not belong when the message shapes no decision: routine logistics any operator
+would issue that settle nothing the assistant raised, a fresh assignment, a status
+report, a pure request for information, or a bare approval that merely green-lights the
+course the assistant already proposed.
 
 The boundary runs through what the message targets, not how it is phrased. Weigh each
 of these before deciding:
 
 - Removal orders. "get rid of the MAX_SEQ_LEN and the trt shapes" right after the
-  assistant added them faults that work — a correction. "get rid of the old build
+  assistant added them faults that work — steering. "get rid of the old build
   artifacts", targeting pre-existing state the assistant never created, assigns
   forward work.
 - Buried faults. "switch the client over — we arent supposed to be using litellm
   anymore" leads with a directive but faults the work for still using something it
-  should not — a correction. An incredulous aside riding on a directive ("why on
-  earth are these separate", "why is X still here") faults the current state the
-  same way. "switch the client over to the new SDK" alone assigns work and faults
-  nothing.
+  should not — steering. An incredulous aside riding on a directive ("why on earth
+  are these separate", "why is X still here") faults the current state the same way.
+  "switch the client over to the new SDK" alone assigns work and settles nothing.
 - Leading "no". "no we dont want to vendor it" countermands the assistant's proposal —
-  a correction. "nope just push the resolved branch", answering a question the
-  assistant asked and rolling into a directive, is an answer — not a correction.
+  corrective steering. "nope just push the resolved branch", answering a question the
+  assistant asked and rolling into a directive, settles that open question — forward
+  steering. Both belong; contrast "commit and push" issued unprompted, which answers
+  nothing and settles nothing the assistant raised.
+- Handed-over decisions. When the source is question_answer, the human is answering a
+  question the assistant posed through its AskUserQuestion tool (the question and the
+  option the answer resolves to are rendered below): the assistant deferred the
+  decision, so the answer always belongs — as forward steering when it plainly picks
+  or answers, as a correction when it rejects or redirects what was offered.
 - Questions. "couldn't this inherit from userlist?" presses on a choice the assistant
-  made — a correction. "what are the tradeoffs of each option here?" seeks information
-  to settle something still open, and a question proposing a new addition presses on
-  nothing the assistant did — not corrections.
+  made — steering. "what are the tradeoffs of each option here?" seeks information to
+  settle something still open, and a question proposing a new addition presses on
+  nothing the assistant did — neither steers.
 - Inline review comments (source review_comment) annotate a specific line the
   assistant authored: short imperatives, suggestions, and bare prohibitions or
   conventions there ("inline", "it is required", "no comments", "use dataclasses
-  always") fault that line — corrections, even with no verb.
-- Accepted doubts. A message that raises a doubt but ends by accepting the assistant's
-  choice ("nevermind, if there's a reason for it, then do it") moves work forward —
-  not a correction.
+  always") fault that line — steering, even with no verb.
+- Accepted doubts and bare approvals. A message that raises a doubt but ends by
+  deferring to the assistant's choice ("nevermind, if there's a reason for it, then do
+  it"), or that simply approves the proposed course ("lgtm", "yes go ahead"), chooses
+  nothing — not steering.
 
 Choose the single best-fitting label:
-- wrong_approach / incorrect_change / unwanted_action / style_violation / premature (corrections)
-- operational_directive / status_update / new_task / question / other (not corrections)
+- wrong_approach / incorrect_change / unwanted_action / style_violation / premature /
+  direction (steering; direction marks the forward face — the message steers by
+  resolving a choice the assistant raised rather than by faulting work)
+- operational_directive / status_update / new_task / question / other (not steering)
 
 Also provide: what_claude_did — one neutral sentence describing the assistant's
-preceding action; confidence — your probability (0 to 1) that your correction-vs-not
-call is right; rationale — one short clause.
+preceding action or question; confidence — your probability (0 to 1) that your
+steering-vs-not call is right; rationale — one short clause.
 
 [source: {source_kind}]
 {context}
+{question_answer}
 === HUMAN MESSAGE TO ASSESS ===
 {text}"""
 
@@ -198,10 +249,10 @@ class Verdict(BaseModel):
     """One triage verdict on a stored feedback candidate.
 
     Attributes:
-        category: The single best-fitting pushback or noise category.
+        category: The single best-fitting steering or noise category.
         what_claude_did: One neutral sentence naming the assistant action the
             message responds to.
-        confidence: The model's probability that its pushback-vs-noise call is right.
+        confidence: The model's probability that its steering-vs-noise call is right.
         rationale: One short clause explaining the call.
     """
 
@@ -212,8 +263,8 @@ class Verdict(BaseModel):
 
     @property
     def is_pushback(self) -> bool:
-        """Whether the category marks genuine pushback."""
-        return self.category in PUSHBACK_CATEGORIES
+        """Whether the category marks genuine steering (kept as ``is_pushback`` until the S3 rename)."""
+        return self.category in STEERING_CATEGORIES
 
     @property
     def accepted(self) -> bool:
@@ -273,9 +324,28 @@ async def render_context(window: ContextWindow) -> tuple[str, Fidelity]:
     )
 
 
+def question_answer_block(row: Mapping[str, object]) -> str:
+    if row["source_kind"] != "question_answer":
+        return ""
+    payload = json.loads(str(row["payload_json"]))
+    if not (picked := payload.get("picked_labels")):
+        resolved = "The user selected none of the offered options and wrote their own answer."
+    else:
+        marked = (
+            "the option the assistant marked (Recommended)"
+            if payload.get("recommended_pick")
+            else "an option (not the recommended one)"
+        )
+        resolved = f"The answer resolves to {marked}: " + "; ".join(picked)
+    return f"=== QUESTION THE ASSISTANT ASKED ===\n{payload['question']}\n{resolved}\n"
+
+
 async def build_prompt(template: str, row: Mapping[str, object]) -> tuple[str, Fidelity]:
     context, fidelity = await render_context(ContextWindow.from_json(str(row["context_json"])))
-    return template.format(source_kind=row["source_kind"], context=context, text=row["text"]), fidelity
+    prompt = template.format(
+        source_kind=row["source_kind"], context=context, text=row["text"], question_answer=question_answer_block(row)
+    )
+    return prompt, fidelity
 
 
 def prompt_builder(template: str, fidelities: dict[str, Fidelity]) -> Callable[[Mapping[str, object]], Awaitable[str]]:
