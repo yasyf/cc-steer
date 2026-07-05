@@ -1,11 +1,11 @@
-"""Stage 4 of the pipeline: ground each refined pair in the code it complains about.
+"""Stage 4 of the pipeline: ground each refined pair in the code evidence behind it.
 
-The refine stage distills accepted pushback into atomic complaint pairs; this stage
-links each pair to concrete code evidence. It hands each pair's pushback anchor and
-complaint text to cc-transcript's shared correction extractor
+The refine stage distills accepted steering into atomic direction pairs; this stage
+links each pair to concrete code evidence. It hands each pair's steering anchor and
+direction text to cc-transcript's shared correction extractor
 (:func:`cc_transcript.extract.extract_correction`), which harvests the candidate
 incorrect edits — and the corrections that later overwrote them, from the same
-session or from git history — picks the one edit the complaint faults, and appends
+session or from git history — picks the one edit the direction faults, and appends
 it to the shared ``corrections`` ledger (``~/.cc-transcript/corrections.db``) for
 every consumer to join. The extractor is idempotent per anchor, so pairs that share
 one anchor produce a single row. The dashboard reads its evidence straight from that
@@ -33,9 +33,9 @@ if TYPE_CHECKING:
     from cc_transcript.activity import Turn
     from spawnllm import LlmBackend, TModel
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
-SOURCE = "cc-pushback"
+SOURCE = "cc-steer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +86,7 @@ async def load_activity(session_id: SessionId, origin_path: object) -> SessionAc
 async def resolve_pair(
     row: Mapping[str, object], log: CorrectionLog, *, tier: TModel, backend: LlmBackend | None
 ) -> bool:
-    """Extracts and appends the correction one refined pair's complaint faults.
+    """Extracts and appends the correction one refined pair's direction faults.
 
     Returns True when a correction was appended, False when the pair resolves to no
     correction (no anchor, expired transcript, compacted anchor, editless window, or
@@ -109,7 +109,7 @@ async def resolve_pair(
         activity,
         anchor,
         source=SOURCE,
-        feedback=str(row["complaint_verbatim"]),
+        feedback=str(row["direction_verbatim"]),
         repo=repo_of(turn, anchor),
         tier=tier,
         backend=backend,
@@ -143,8 +143,8 @@ async def enrich(
 ) -> EnrichReport:
     """Grounds every refined pair lacking a shared-ledger correction in the edit it faults.
 
-    Hands each pair's anchor and complaint to cc-transcript's shared extractor,
-    which harvests the candidate edits, picks the one the complaint faults — an LLM
+    Hands each pair's anchor and direction to cc-transcript's shared extractor,
+    which harvests the candidate edits, picks the one the direction faults — an LLM
     call when a backend is ready, the best-overlap candidate otherwise — and appends
     it to the shared ``corrections`` ledger. Incremental and idempotent: the ledger
     is the single source of truth for "done", so a pair settles once its anchor

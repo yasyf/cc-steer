@@ -1,5 +1,5 @@
 [project]
-name = "cc-pushback"
+name = "cc-steer"
 # Inert sentinel — the real version is set from the release tag (uv version --frozen); never read this value.
 version = "0.0.0"
 description = "Your best training data is rotting in ~/.claude."
@@ -38,14 +38,14 @@ dev = [
 ]
 
 [project.scripts]
-cc-pushback = "cc_pushback.cli:main"
+cc-steer = "cc_steer.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yasyf/cc-pushback"
-Documentation = "https://yasyf.github.io/cc-pushback/"
-Repository = "https://github.com/yasyf/cc-pushback"
-Issues = "https://github.com/yasyf/cc-pushback/issues"
-Changelog = "https://github.com/yasyf/cc-pushback/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/yasyf/cc-steer"
+Documentation = "https://yasyf.github.io/cc-steer/"
+Repository = "https://github.com/yasyf/cc-steer"
+Issues = "https://github.com/yasyf/cc-steer/issues"
+Changelog = "https://github.com/yasyf/cc-steer/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
@@ -57,7 +57,7 @@ build-backend = "uv_build"
 environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 
 [tool.uv.build-backend]
-module-name = "cc_pushback"
+module-name = "cc_steer"
 module-root = ""
 
 [tool.pytest.ini_options]
@@ -68,7 +68,7 @@ markers = [
     "integration: Integration tests",
 ]
 
-# ty (Astral) is the default type checker — run `uv run ty check cc_pushback`.
+# ty (Astral) is the default type checker — run `uv run ty check cc_steer`.
 # It is fast, understands modern syntax, and avoids the strict-pyright false
 # positives on pydantic/attrs-style dynamic defaults and PK-type overrides.
 [tool.ty.rules]
@@ -81,7 +81,7 @@ unresolved-import = "ignore"
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
-include = ["cc_pushback"]
+include = ["cc_steer"]
 venvPath = "."
 venv = ".venv"
 reportImplicitOverride = "none"

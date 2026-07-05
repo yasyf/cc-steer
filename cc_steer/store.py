@@ -1,12 +1,12 @@
-"""The SQLite feedback store: the platform's mining store plus cc-pushback's triage layer.
+"""The SQLite feedback store: the platform's mining store plus cc-steer's triage layer.
 
 The store mechanism lives in :mod:`cc_transcript.mining`; this module adds
-cc-pushback's default database location, the ``origin_path`` display-hint column,
+cc-steer's default database location, the ``origin_path`` display-hint column,
 the ``triage`` verdict table, the ``refinement`` table, and two views:
-``accepted_pushback`` (judge-accepted candidates, the refine stage's input) and
+``accepted_steering`` (judge-accepted candidates, the refine stage's input) and
 ``refined_pairs`` — the pipeline's final deliverable. The enrich stage's code
 evidence no longer lives here: it lands in cc-transcript's shared ``corrections``
-ledger, keyed by the pushback anchor, and the dashboard reads it straight from there.
+ledger, keyed by the steering anchor, and the dashboard reads it straight from there.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from cc_transcript.corrections import CorrectionLog
     from cc_transcript.mining import DedupKey, FeedbackCandidate
 
-    from cc_pushback.refine import Refinement
+    from cc_steer.refine import Refinement
 
 __all__ = [
     "FEEDBACK_DDL",
@@ -74,20 +74,21 @@ SELECT * FROM (
   FROM triage t
   WHERE t.role = 'auditor'
 ) WHERE rn = 1;
-DROP VIEW IF EXISTS accepted_pushback;
-CREATE VIEW accepted_pushback AS
+DROP VIEW IF EXISTS accepted_steering;
+CREATE VIEW accepted_steering AS
 SELECT
   e.id AS event_id,
   e.dedup_key,
   e.source_kind,
   e.text,
   e.context_json,
+  e.payload_json,
   t.category,
   t.what_claude_did,
   e.origin_path
 FROM feedback_events e
 JOIN latest_judge t ON t.dedup_key = e.dedup_key
-WHERE t.is_pushback = 1;
+WHERE t.is_steering = 1;
 """
 
 REFINE_DDL = """
@@ -98,8 +99,8 @@ CREATE TABLE IF NOT EXISTS refinement (
   model TEXT NOT NULL,
   pair_index INTEGER NOT NULL,
   action TEXT NOT NULL,
-  complaint_verbatim TEXT NOT NULL,
-  complaint TEXT NOT NULL,
+  direction_verbatim TEXT NOT NULL,
+  direction TEXT NOT NULL,
   refined_at TEXT NOT NULL,
   UNIQUE(dedup_key, prompt_version, model, pair_index)
 );
@@ -124,8 +125,8 @@ SELECT
   r.dedup_key,
   r.pair_index,
   r.action,
-  r.complaint_verbatim,
-  r.complaint,
+  r.direction_verbatim,
+  r.direction,
   e.text AS original_message,
   ap.category,
   e.source_kind,
@@ -137,19 +138,19 @@ SELECT
   r.model
 FROM latest_refinement r
 JOIN feedback_events e ON e.dedup_key = r.dedup_key
-JOIN accepted_pushback ap ON ap.dedup_key = r.dedup_key
+JOIN accepted_steering ap ON ap.dedup_key = r.dedup_key
 ORDER BY e.id, r.pair_index;
 """
 
 INSERT_REFINEMENT = """
 INSERT OR IGNORE INTO refinement (
-  dedup_key, prompt_version, model, pair_index, action, complaint_verbatim, complaint, refined_at
+  dedup_key, prompt_version, model, pair_index, action, direction_verbatim, direction, refined_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 CANDIDATES_QUERY = f"""
 WITH judge_flip AS (
-  SELECT dedup_key, COUNT(DISTINCT is_pushback) > 1 AS flipped
+  SELECT dedup_key, COUNT(DISTINCT is_steering) > 1 AS flipped
   FROM triage WHERE role = 'judge' GROUP BY dedup_key
 ),
 refine_summary AS (
@@ -158,9 +159,9 @@ refine_summary AS (
   FROM latest_refinement GROUP BY dedup_key
 )
 SELECT {EVENT_COLUMNS}, e.origin_path,
-  j.category, j.is_pushback, j.confidence, j.prompt_version AS judge_version,
+  j.category, j.is_steering, j.confidence, j.prompt_version AS judge_version,
   j.model AS judge_model, j.what_claude_did,
-  a.is_pushback AS auditor_is_pushback,
+  a.is_steering AS auditor_is_steering,
   COALESCE(f.flipped, 0) AS flipped,
   rs.pair_count, rs.refine_version, rs.refine_model
 FROM feedback_events e
@@ -172,12 +173,12 @@ ORDER BY e.id
 """
 
 LINEAGE_VERDICTS_QUERY = (
-    "SELECT role, prompt_version, model, category, is_pushback, what_claude_did, "
+    "SELECT role, prompt_version, model, category, is_steering, what_claude_did, "
     "confidence, rationale, judged_at FROM triage WHERE dedup_key = ? ORDER BY role, prompt_version, id"
 )
 
 LINEAGE_PAIRS_QUERY = """
-SELECT r.pair_index, r.action, r.complaint_verbatim, r.complaint, r.prompt_version, r.model,
+SELECT r.pair_index, r.action, r.direction_verbatim, r.direction, r.prompt_version, r.model,
   e.session_id, e.event_uuid
 FROM latest_refinement r
 JOIN feedback_events e ON e.dedup_key = r.dedup_key
@@ -187,7 +188,7 @@ ORDER BY r.pair_index
 
 REFINED_PAIRS_QUERY = """
 SELECT dedup_key, prompt_version AS refine_version, model AS refine_model, pair_index,
-  action, complaint, complaint_verbatim, source_kind, session_id, event_uuid, origin_path
+  action, direction, direction_verbatim, source_kind, session_id, event_uuid, origin_path
 FROM refined_pairs
 ORDER BY event_id, pair_index"""
 
@@ -199,7 +200,7 @@ class TriageStats:
     Attributes:
         total: The total feedback events in the corpus.
         judged: How many carry a judge verdict at this prompt version.
-        accepted: How many of those verdicts are pushback.
+        accepted: How many of those verdicts are steering.
         by_category: Verdict counts keyed by category.
     """
 
@@ -215,11 +216,11 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     Layers the ``feedback_events`` table (extended with the ``origin_path``
     display-hint column) onto cc-transcript's file-mtime ledger and adds the
     ``triage`` verdict table (the judge package's verdict mechanism pinned to
-    cc-pushback's column names), the ``refinement`` table, and the
-    ``accepted_pushback`` and ``refined_pairs`` views. Verdicts and refinements key
+    cc-steer's column names), the ``refinement`` table, and the
+    ``accepted_steering`` and ``refined_pairs`` views. Verdicts and refinements key
     on the content-derived dedup key, so they survive a database rebuild; the enrich
     stage's code evidence lives in cc-transcript's shared ``corrections`` ledger,
-    keyed by the pushback anchor.
+    keyed by the steering anchor.
 
     Example:
         >>> async with await FeedbackStore.open(FeedbackStore.default_path()) as store:
@@ -227,13 +228,13 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     """
 
     VERDICT_TABLE = "triage"
-    ACCEPTED_COLUMN = "is_pushback"
+    ACCEPTED_COLUMN = "is_steering"
     SUMMARY_COLUMN = "what_claude_did"
 
     @staticmethod
     def default_path() -> Path:
-        """Returns the default database path, ``~/.cc-pushback/feedback.db``."""
-        return Path.home() / ".cc-pushback" / "feedback.db"
+        """Returns the default database path, ``~/.cc-steer/feedback.db``."""
+        return Path.home() / ".cc-steer" / "feedback.db"
 
     @classmethod
     async def open(cls, path: Path) -> Self:
@@ -266,10 +267,11 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             return inserted
 
     async def unrefined(self, *, prompt_version: int, model: str, limit: int | None = None) -> list[dict[str, object]]:
-        """Returns accepted pushback events lacking a refinement at ``(prompt_version, model)``.
+        """Returns accepted steering events lacking a refinement at ``(prompt_version, model)``.
 
         Surfaces the columns the refine prompt needs — ``dedup_key``, ``source_kind``,
-        ``text``, ``context_json``, and the judge's ``what_claude_did`` hint — oldest first.
+        ``text``, ``context_json``, ``payload_json``, and the judge's ``what_claude_did``
+        hint — oldest first.
 
         Args:
             prompt_version: The refine prompt version the refinement must carry.
@@ -280,8 +282,8 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             One dict per accepted, unrefined event.
         """
         query = (
-            "SELECT ap.dedup_key, ap.source_kind, ap.text, ap.context_json, ap.what_claude_did "
-            "FROM accepted_pushback ap "
+            "SELECT ap.dedup_key, ap.source_kind, ap.text, ap.context_json, ap.payload_json, ap.what_claude_did "
+            "FROM accepted_steering ap "
             "LEFT JOIN refinement r ON r.dedup_key = ap.dedup_key "
             "AND r.prompt_version = ? AND r.model = ? "
             "WHERE r.id IS NULL ORDER BY ap.event_id"
@@ -318,8 +320,8 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
                         model,
                         index,
                         pair.action,
-                        pair.complaint_verbatim,
-                        pair.complaint,
+                        pair.direction_verbatim,
+                        pair.direction,
                         refined_at,
                     )
                     for index, pair in enumerate(refinement.pairs)
@@ -327,7 +329,7 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             )
 
     async def unenriched(self, log: CorrectionLog, *, limit: int | None = None) -> list[dict[str, object]]:
-        """Returns refined pairs whose pushback anchor carries no shared-ledger correction.
+        """Returns refined pairs whose steering anchor carries no shared-ledger correction.
 
         A pair settles once its ``(session_id, event_uuid)`` anchor has a row in the
         shared ``corrections`` ledger — the single source of truth for "done". Since
@@ -369,9 +371,9 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
 
         Returns:
             One dict per event: the event columns plus the latest judge verdict
-            (``category``, ``is_pushback``, ``confidence``, ``judge_version``,
+            (``category``, ``is_steering``, ``confidence``, ``judge_version``,
             ``judge_model``, ``what_claude_did``), the latest auditor side
-            (``auditor_is_pushback``), the judge ``flipped`` flag, and the refine
+            (``auditor_is_steering``), the judge ``flipped`` flag, and the refine
             summary (``pair_count``, ``refine_version``, ``refine_model``).
         """
         cur = await self.store.conn.execute(CANDIDATES_QUERY)
@@ -410,7 +412,7 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         conn = self.store.conn
         total_cur = await conn.execute("SELECT COUNT(*) AS n FROM feedback_events")
         by_category_cur = await conn.execute(
-            "SELECT category, COUNT(*) AS n, SUM(is_pushback) AS accepted FROM triage "
+            "SELECT category, COUNT(*) AS n, SUM(is_steering) AS accepted FROM triage "
             "WHERE role = 'judge' AND prompt_version = ? GROUP BY category ORDER BY n DESC",
             (prompt_version,),
         )

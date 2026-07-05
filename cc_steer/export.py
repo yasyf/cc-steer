@@ -1,12 +1,12 @@
-"""Stage 5 of the pipeline: export the pushback lineage as a HuggingFace dataset.
+"""Stage 5 of the pipeline: export the steering lineage as a HuggingFace dataset.
 
 The enrich stage completes the lineage — detector hit, judge verdict, refined
 pairs, and code evidence in the shared ``corrections`` ledger. This stage reads
 both stores (never writing to either) and materializes one canonical ``traces``
 config — one row per judged event — plus three TRL-ready projections: ``sft``
-(context + agent action → the user's verbatim pushback), ``dpo`` (correcting
+(context + agent action → the user's verbatim steering), ``dpo`` (correcting
 edit preferred over faulted edit), and ``kto`` (context + action → would the
-user push back). Every config lands as per-split parquet under the output
+user steer). Every config lands as per-split parquet under the output
 directory next to a generated dataset card, and optionally pushes to a private
 HuggingFace repo.
 """
@@ -25,10 +25,10 @@ from cc_transcript.ids import EventUuid, SessionId
 from datasets import Dataset, DatasetDict, Features, Value
 from huggingface_hub import HfApi
 
-from cc_pushback.enrich import SOURCE
-from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
-from cc_pushback.report import project_label
-from cc_pushback.triage import AUDIT_VERSION, PROMPT_VERSION, STEERING_CATEGORIES
+from cc_steer.enrich import SOURCE
+from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
+from cc_steer.report import project_label
+from cc_steer.triage import AUDIT_VERSION, PROMPT_VERSION, STEERING_CATEGORIES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from cc_transcript.context import TurnRef
     from cc_transcript.corrections import Correction
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 __all__ = ["ExportReport", "export"]
 
@@ -62,7 +62,7 @@ auditor AS (
 )
 SELECT e.dedup_key, e.source_kind, e.session_id, e.event_uuid, e.occurred_at, e.text,
   e.payload_json, e.context_json, e.cc_version, e.origin_path,
-  j.category, j.is_pushback, j.what_claude_did, j.confidence, j.rationale AS judge_rationale,
+  j.category, j.is_steering, j.what_claude_did, j.confidence, j.rationale AS judge_rationale,
   j.model AS judge_model, j.fidelity,
   a.category AS auditor_category
 FROM feedback_events e
@@ -72,7 +72,7 @@ ORDER BY e.id
 """
 
 LATEST_PAIRS_QUERY = """
-SELECT dedup_key, pair_index, action, complaint_verbatim, complaint
+SELECT dedup_key, pair_index, action, direction_verbatim, direction
 FROM latest_refinement
 ORDER BY dedup_key, pair_index
 """
@@ -113,14 +113,15 @@ tags:
 - human-feedback
 ---
 
-# cc-pushback traces
+# cc-steer traces
 
-One developer's pushback on a coding agent: every judged moment the user corrected
-Claude Code, mined from their own transcripts by
-[cc-pushback](https://github.com/yasyf/cc-pushback), judged pushback-vs-noise by an
-LLM triage judge, refined into atomic {{action, complaint}} pairs, and grounded in
-the code edits the complaints fault. Built to train models that push back on — and
-steer — a coding agent the way this user does.
+One developer's steering of a coding agent: every judged moment the user shaped what
+Claude Code did — correcting it, redirecting it, or resolving a choice it raised — mined
+from their own transcripts by
+[cc-steer](https://github.com/yasyf/cc-steer), judged steering-vs-noise by an
+LLM triage judge, refined into atomic {{action, direction}} pairs, and grounded in the
+code edits the corrective ones fault. Built to train models that steer a coding agent
+the way this user does.
 
 ## Configs
 
@@ -134,8 +135,8 @@ every derived row back to its `traces` parent.
 
 ## Categories
 
-The judge classifies every event into one of ten categories; the first five are
-pushback, the rest noise.
+The judge classifies every event into one of eleven categories; the first six are
+steering, the rest noise.
 
 {category_list}
 
@@ -148,12 +149,12 @@ straddle the split. `traces` lands at {train_count} train / {test_count} test.
 
 ## Class balance
 
-{pushback_count} pushback vs {noise_count} noise{pushback_share} at
+{steering_count} steering vs {noise_count} noise{steering_share} at
 judge v{judge_version}. The natural imbalance is preserved; balance at train time
-(e.g. KTO's `desirable_weight`), not in the data. `sft` keeps only the pushback rows;
+(e.g. KTO's `desirable_weight`), not in the data. `sft` keeps only the steering rows;
 `dpo` keeps one row per fully-grounded ledger correction, deduplicated across
-dual-detected sibling events (the pushback-judged parent wins); `kto` keeps everything —
-`label = True` means the user would NOT have pushed back on the action.
+dual-detected sibling events (the steering-judged parent wins); `kto` keeps everything —
+`label = True` means the user would NOT have steered the action.
 
 ## Privacy
 
@@ -164,13 +165,13 @@ and message text are raw and unredacted, so the repo stays private.
 
 detector → judge v{judge_version} (auditor v{audit_version}) → refine
 v{refine_version} → enrich (code evidence from the shared cc-transcript
-`corrections` ledger, joined by pushback anchor). Context turns are the previews
+`corrections` ledger, joined by steering anchor). Context turns are the previews
 captured at mining time; transcripts are never re-hydrated at export.
 """
 
 CONFIG_USES = {
     "traces": "The canonical superset: context, verdicts, refined pairs, code evidence, and the aftermath.",
-    "sft": "TRL conversational prompt-completion: context + agent action → the user's verbatim pushback.",
+    "sft": "TRL conversational prompt-completion: context + agent action → the user's verbatim steering.",
     "dpo": "TRL explicit-prompt preference: the correcting edit (`chosen`) over the faulted edit (`rejected`).",
     "kto": "TRL unpaired preference over every judged event; the only view that uses the noise negatives.",
 }
@@ -184,8 +185,8 @@ class Message(TypedDict):
 class Pair(TypedDict):
     pair_index: int
     action: str
-    complaint_verbatim: str
-    complaint: str
+    direction_verbatim: str
+    direction: str
 
 
 class Evidence(TypedDict):
@@ -214,7 +215,7 @@ class Trace(TypedDict):
     what_claude_did: str
     user_message: str
     aftermath: list[Message]
-    is_pushback: bool
+    is_steering: bool
     category: str
     confidence: float
     judge_rationale: str
@@ -316,7 +317,7 @@ def trace_meta(row: Row) -> str:
 def trace_row(row: Row, pairs: list[Pair], log: CorrectionLog) -> Trace:
     window = ContextWindow.from_json(str(row["context_json"]))
     session_id = str(row["session_id"])
-    is_pushback = bool(row["is_pushback"])
+    is_steering = bool(row["is_steering"])
     return {
         "id": row["dedup_key"],
         "session_id": session_id,
@@ -330,14 +331,14 @@ def trace_row(row: Row, pairs: list[Pair], log: CorrectionLog) -> Trace:
         "what_claude_did": row["what_claude_did"],
         "user_message": row["text"],
         "aftermath": messages([turn for turn in (window.trigger, *window.after) if turn is not None]),
-        "is_pushback": is_pushback,
+        "is_steering": is_steering,
         "category": row["category"],
         "confidence": row["confidence"],
         "judge_rationale": row["judge_rationale"],
         "judge_model": row["judge_model"],
         "fidelity": row["fidelity"],
         "auditor_category": row["auditor_category"],
-        "pairs": pairs if is_pushback else [],
+        "pairs": pairs if is_steering else [],
         "evidence": [
             evidence_entry(correction)
             for correction in log.for_anchor(SessionId(session_id), EventUuid(str(row["event_uuid"])))
@@ -361,7 +362,7 @@ def kto_row(trace: Trace) -> KtoRow:
     return {
         "prompt": trace["context"],
         "completion": assistant_message(trace["agent_action"] or trace["what_claude_did"]),
-        "label": not trace["is_pushback"],
+        "label": not trace["is_steering"],
         "id": trace["id"],
         "category": trace["category"],
     }
@@ -383,7 +384,7 @@ def dpo_split(traces: Sequence[Trace]) -> list[DpoRow]:
     return list(
         {
             (trace["session_id"], trace["event_uuid"], entry["digest"]): dpo_row(trace, entry)
-            for trace in sorted(traces, key=lambda trace: trace["is_pushback"])
+            for trace in sorted(traces, key=lambda trace: trace["is_steering"])
             for entry in trace["evidence"]
             if all(entry[side] is not None for side in DPO_SIDES)
         }.values()
@@ -394,7 +395,7 @@ def config_rows(traces: list[Trace]) -> dict[str, Mapping[str, Sequence[Mapping[
     by_split = {split: [trace for trace in traces if trace["split"] == split] for split in SPLITS}
     return {
         "traces": by_split,
-        "sft": {split: [sft_row(t) for t in ts if t["is_pushback"]] for split, ts in by_split.items()},
+        "sft": {split: [sft_row(t) for t in ts if t["is_steering"]] for split, ts in by_split.items()},
         "dpo": {split: dpo_split(ts) for split, ts in by_split.items()},
         "kto": {split: [kto_row(t) for t in ts] for split, ts in by_split.items()},
     }
@@ -420,7 +421,7 @@ def config_features() -> dict[str, Features]:
                 "what_claude_did": Value("string"),
                 "user_message": Value("string"),
                 "aftermath": message(),
-                "is_pushback": Value("bool"),
+                "is_steering": Value("bool"),
                 "category": Value("string"),
                 "confidence": Value("float64"),
                 "judge_rationale": Value("string"),
@@ -431,8 +432,8 @@ def config_features() -> dict[str, Features]:
                     {
                         "pair_index": Value("int64"),
                         "action": Value("string"),
-                        "complaint_verbatim": Value("string"),
-                        "complaint": Value("string"),
+                        "direction_verbatim": Value("string"),
+                        "direction": Value("string"),
                     }
                 ],
                 "evidence": [
@@ -459,7 +460,7 @@ def config_features() -> dict[str, Features]:
     }
 
 
-def dataset_card(counts: Mapping[str, Mapping[str, int]], *, pushback_count: int, noise_count: int) -> str:
+def dataset_card(counts: Mapping[str, Mapping[str, int]], *, steering_count: int, noise_count: int) -> str:
     return CARD_TEMPLATE.format(
         configs_yaml="\n".join(
             CARD_CONFIG_YAML.format(config=config, default="\n  default: true" if config == "traces" else "")
@@ -476,9 +477,9 @@ def dataset_card(counts: Mapping[str, Mapping[str, int]], *, pushback_count: int
         ),
         train_count=counts["traces"]["train"],
         test_count=counts["traces"]["test"],
-        pushback_count=pushback_count,
+        steering_count=steering_count,
         noise_count=noise_count,
-        pushback_share=f" ({pushback_count / judged:.0%} pushback)" if (judged := pushback_count + noise_count) else "",
+        steering_share=f" ({steering_count / judged:.0%} steering)" if (judged := steering_count + noise_count) else "",
         judge_version=PROMPT_VERSION,
         audit_version=AUDIT_VERSION,
         refine_version=REFINE_VERSION,
@@ -494,8 +495,8 @@ async def load_traces(store: FeedbackStore) -> list[Trace]:
             Pair(
                 pair_index=pair["pair_index"],
                 action=pair["action"],
-                complaint_verbatim=pair["complaint_verbatim"],
-                complaint=pair["complaint"],
+                direction_verbatim=pair["direction_verbatim"],
+                direction=pair["direction"],
             )
         )
     cur = await store.store.conn.execute(TRACES_QUERY, (PROMPT_VERSION, AUDIT_VERSION))
@@ -547,8 +548,8 @@ async def export(store: FeedbackStore, *, out: Path, push_to: str | None = None)
     card.write_text(
         dataset_card(
             counts,
-            pushback_count=sum(trace["is_pushback"] for trace in traces),
-            noise_count=sum(not trace["is_pushback"] for trace in traces),
+            steering_count=sum(trace["is_steering"] for trace in traces),
+            noise_count=sum(not trace["is_steering"] for trace in traces),
         )
     )
     if push_to is not None:

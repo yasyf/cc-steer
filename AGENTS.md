@@ -1,12 +1,12 @@
-# cc-pushback Development Guide
+# cc-steer Development Guide
 
-Learn your pushback style from past Claude Code feedback and code reviews, and replicate it with a language model. Published to PyPI as `cc-pushback`; the CLI is `cc-pushback`, run as `uvx cc-pushback`.
+Learn your steering style from the corrections, directions, and choices you've given Claude Code, and replicate it with a language model. Published to PyPI as `cc-steer`; the CLI is `cc-steer`, run as `uvx cc-steer`.
 
 ## Repository Structure
 
 ```
-cc-pushback/
-├── cc_pushback/      # The package — transcript extraction and the CLI (cli.py)
+cc-steer/
+├── cc_steer/      # The package — transcript extraction and the CLI (cli.py)
 ├── tests/            # Pytest suite
 ├── .github/          # CI, docs, and PyPI release workflows
 ├── AGENTS.md         # This file — shared conventions

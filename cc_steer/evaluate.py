@@ -26,12 +26,12 @@ from cc_transcript.judge import (
     sample_audit,
 )
 
-from cc_pushback.triage import AUDIT_VERSION, AUDITOR, JUDGE, KIND_QUOTAS, PROMPT_VERSION, REMAINDER_KIND
+from cc_steer.triage import AUDIT_VERSION, AUDITOR, JUDGE, KIND_QUOTAS, PROMPT_VERSION, REMAINDER_KIND
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 __all__ = [
     "GOLDEN_PATH",

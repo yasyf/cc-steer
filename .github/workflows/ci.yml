@@ -34,7 +34,7 @@ jobs:
         run: uv sync --extra dev
 
       - name: Type check (ty)
-        run: uv run ty check cc_pushback
+        run: uv run ty check cc_steer
 
       - name: Test (pytest)
         run: uv run pytest
@@ -48,4 +48,4 @@ jobs:
           # sibling clone so the wheel's dependencies resolve.
           uv pip install --python .wheel-smoke/bin/python ../cc-transcript
           uv pip install --python .wheel-smoke/bin/python dist/*.whl
-          .wheel-smoke/bin/cc-pushback --help
+          .wheel-smoke/bin/cc-steer --help

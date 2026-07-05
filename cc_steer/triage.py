@@ -8,7 +8,7 @@ candidate's :class:`~cc_transcript.context.ContextWindow` at full fidelity while
 transcript lives — a generous budget on the trigger turn, a moderate budget on the
 surrounding turns — and fall back to the labeled summary previews once it expires;
 each verdict records the fidelity it was judged at. Verdicts land in the ``triage``
-table; accepted rows surface through the ``accepted_pushback`` view.
+table; accepted rows surface through the ``accepted_steering`` view.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from cc_transcript.context import Fidelity
     from spawnllm import TModel
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 PROMPT_VERSION = 6
 AUDIT_VERSION = 5
@@ -262,14 +262,14 @@ class Verdict(BaseModel):
     rationale: str
 
     @property
-    def is_pushback(self) -> bool:
-        """Whether the category marks genuine steering (kept as ``is_pushback`` until the S3 rename)."""
+    def is_steering(self) -> bool:
+        """Whether the category marks genuine steering."""
         return self.category in STEERING_CATEGORIES
 
     @property
     def accepted(self) -> bool:
         """Alias satisfying the judge package's ``VerdictLike`` protocol."""
-        return self.is_pushback
+        return self.is_steering
 
     @property
     def summary(self) -> str:

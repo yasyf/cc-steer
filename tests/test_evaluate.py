@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from cc_transcript.mining import DedupKey
 
-from cc_pushback.evaluate import (
+from cc_steer.evaluate import (
     AuditEstimate,
     GoldenRow,
     estimate,
@@ -17,11 +17,11 @@ from cc_pushback.evaluate import (
     golden_result,
     load_golden,
 )
-from cc_pushback.triage import AUDIT_VERSION, AUDITOR, JUDGE, PROMPT_VERSION
+from cc_steer.triage import AUDIT_VERSION, AUDITOR, JUDGE, PROMPT_VERSION
 from tests.test_triage import seed, verdict
 
 if TYPE_CHECKING:
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 pytestmark = pytest.mark.anyio
 
@@ -106,14 +106,14 @@ async def test_evaluate_end_to_end(store: FeedbackStore, tmp_path: Path, monkeyp
                     "dedup_key": accepted,
                     "source_kind": "transcript_message",
                     "text": "t",
-                    "expected": "pushback",
+                    "expected": "steering",
                     "note": "",
                 },
                 {
                     "dedup_key": rejected,
                     "source_kind": "transcript_message",
                     "text": "t",
-                    "expected": "pushback",
+                    "expected": "steering",
                     "note": "",
                 },
             ]
@@ -123,7 +123,7 @@ async def test_evaluate_end_to_end(store: FeedbackStore, tmp_path: Path, monkeyp
     assert (metrics.total, metrics.judged, metrics.accepted) == (2, 2, 1)
     assert (metrics.golden.passed, metrics.golden.total) == (1, 2)
     assert metrics.precision == 1.0  # the auditor agrees with the accept
-    assert metrics.contamination == 1.0  # the auditor found pushback in the reject
+    assert metrics.contamination == 1.0  # the auditor found steering in the reject
     assert len(metrics.disagreements) == 1
     assert metrics.disagreements[0].judge_category == "status_update"
     assert metrics.disagreements[0].judge_rationale == "r"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from cc_transcript.mining.spec import regex_review_comments
 
-from cc_pushback.formats import CONDUCTOR_FINDING_FMT, extract_superset_inline
+from cc_steer.formats import CONDUCTOR_FINDING_FMT, extract_superset_inline
 
 
 @pytest.mark.unit

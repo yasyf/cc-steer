@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING
 
 from cc_transcript import TranscriptDiscovery, TranscriptParser
 
-from cc_pushback.detectors import detect
-from cc_pushback.sidecar import candidates_for, discover_sidecars
+from cc_steer.detectors import detect
+from cc_steer.sidecar import candidates_for, discover_sidecars
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 
 @dataclass(frozen=True, slots=True)

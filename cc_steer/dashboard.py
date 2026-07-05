@@ -3,7 +3,7 @@
 Serves the static client (the files under ``assets/``) and a JSON API — the
 refined pairs (the pipeline's deliverable), every candidate behind them, the
 corpus stats, and one candidate's full lineage as structured JSON the client
-renders into a five-stage rail. The data model lives in :mod:`cc_pushback.report`.
+renders into a five-stage rail. The data model lives in :mod:`cc_steer.report`.
 """
 
 from __future__ import annotations
@@ -18,18 +18,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from cc_pushback import report
-from cc_pushback.enrich import SOURCE
-from cc_pushback.evaluate import load_golden
+from cc_steer import report
+from cc_steer.enrich import SOURCE
+from cc_steer.evaluate import load_golden
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from cc_transcript.context import ContextWindow, TurnRef
 
-    from cc_pushback.evaluate import GoldenRow
-    from cc_pushback.report import EvidenceRow, Lineage, RefinedPairRow, Sample, Summary, VerdictRow
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.evaluate import GoldenRow
+    from cc_steer.report import EvidenceRow, Lineage, RefinedPairRow, Sample, Summary, VerdictRow
+    from cc_steer.store import FeedbackStore
 
 LIST_TEXT_LIMIT = 280
 ASSETS = Path(__file__).with_name("assets")
@@ -52,9 +52,9 @@ def edit_json(old: str, new: str) -> dict[str, str]:
 def evidence_resolver(log: CorrectionLog) -> Callable[[Mapping[str, object]], EvidenceRow | None]:
     """Resolves a refined-pair row's grounding evidence from the shared ledger by anchor.
 
-    A pair's pushback anchor is its event's ``(session_id, event_uuid)``; the enrich
-    stage writes at most one ``cc-pushback`` correction per anchor, so the dashboard
-    shows that row's edit. Returns None when the anchor carries no cc-pushback
+    A pair's steering anchor is its event's ``(session_id, event_uuid)``; the enrich
+    stage writes at most one ``cc-steer`` correction per anchor, so the dashboard
+    shows that row's edit. Returns None when the anchor carries no cc-steer
     correction.
     """
 
@@ -86,8 +86,8 @@ def serialize_pair(row: Mapping[str, object], evidence: EvidenceRow | None) -> d
         "dedup_key": row["dedup_key"],
         "pair_index": row["pair_index"],
         "action": report.truncate(str(row["action"]), LIST_TEXT_LIMIT),
-        "complaint_verbatim": report.truncate(str(row["complaint_verbatim"]), LIST_TEXT_LIMIT),
-        "complaint": row["complaint"],
+        "direction_verbatim": report.truncate(str(row["direction_verbatim"]), LIST_TEXT_LIMIT),
+        "direction": row["direction"],
         "category": row["category"],
         "source_kind": row["source_kind"],
         "project": project_of(row["origin_path"]),
@@ -99,8 +99,8 @@ def serialize_pair(row: Mapping[str, object], evidence: EvidenceRow | None) -> d
 
 def serialize_candidate(row: Mapping[str, object], golden_map: Mapping[str, GoldenRow]) -> dict[str, object]:
     key = str(row["dedup_key"])
-    audited = row["auditor_is_pushback"] is not None and row["is_pushback"] is not None
-    in_golden = key in golden_map and row["is_pushback"] is not None
+    audited = row["auditor_is_steering"] is not None and row["is_steering"] is not None
+    in_golden = key in golden_map and row["is_steering"] is not None
     return {
         "dedup_key": key,
         "source_kind": row["source_kind"],
@@ -111,10 +111,10 @@ def serialize_candidate(row: Mapping[str, object], golden_map: Mapping[str, Gold
         "confidence": row["confidence"],
         "pair_count": row["pair_count"],
         "flipped": bool(row["flipped"]),
-        "agreement": ("agree" if bool(row["auditor_is_pushback"]) == bool(row["is_pushback"]) else "disagree")
+        "agreement": ("agree" if bool(row["auditor_is_steering"]) == bool(row["is_steering"]) else "disagree")
         if audited
         else None,
-        "golden": ("pass" if bool(row["is_pushback"]) == golden_map[key].expected else "fail") if in_golden else None,
+        "golden": ("pass" if bool(row["is_steering"]) == golden_map[key].expected else "fail") if in_golden else None,
         "text": report.truncate(str(row["text"]), LIST_TEXT_LIMIT),
     }
 
@@ -155,7 +155,7 @@ def serialize_verdict(verdict: VerdictRow, *, flipped: bool) -> dict[str, object
         "prompt_version": verdict.prompt_version,
         "model": verdict.model,
         "confidence": verdict.confidence,
-        "is_pushback": verdict.is_pushback,
+        "is_steering": verdict.is_steering,
         "what_claude_did": report.truncate(verdict.what_claude_did),
         "rationale": report.truncate(verdict.rationale),
         "flipped": flipped,
@@ -177,8 +177,8 @@ def serialize_detail_pair(pair: RefinedPairRow) -> dict[str, object]:
         "prompt_version": pair.prompt_version,
         "model": pair.model,
         "action": report.truncate(pair.action),
-        "complaint_verbatim": pair.complaint_verbatim,
-        "complaint": pair.complaint,
+        "direction_verbatim": pair.direction_verbatim,
+        "direction": pair.direction,
         "evidence": None if pair.evidence is None else serialize_evidence_detail(pair.evidence),
     }
 
@@ -207,7 +207,7 @@ def serialize_lineage(lineage: Lineage, golden_map: Mapping[str, GoldenRow]) -> 
         "auditor": auditor,
         "refiner": {
             "original": sample.text,
-            "spans": [pair.complaint_verbatim for pair in lineage.pairs],
+            "spans": [pair.direction_verbatim for pair in lineage.pairs],
             "pairs": [serialize_detail_pair(pair) for pair in lineage.pairs],
         },
         "golden": golden,
@@ -227,7 +227,7 @@ def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
     """
     golden_map = {row.dedup_key: row for row in load_golden()}
     evidence_of = evidence_resolver(CorrectionLog.open())
-    app = FastAPI(title="cc-pushback")
+    app = FastAPI(title="cc-steer")
     app.mount("/static", StaticFiles(directory=ASSETS), name="static")
 
     @app.get("/", response_class=HTMLResponse)

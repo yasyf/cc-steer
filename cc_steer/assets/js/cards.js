@@ -17,8 +17,8 @@ function pairRow(r) {
     badge("cat-" + (r.category || "other"), r.category || "—") + badge("badge-" + r.source_kind, r.source_kind) +
     `${chip(r.project)}<span class="chip">pair ${r.pair_index}</span>${file}${lang}</header>` +
     `<div class="text"><pre>${esc(r.action)}</pre></div>` +
-    `<blockquote class="pverbatim">${esc(r.complaint_verbatim)}</blockquote>` +
-    `<div class="complaint">↳ ${esc(r.complaint)}</div>${evidenceHtml(r.evidence)}</article>`;
+    `<blockquote class="pverbatim">${esc(r.direction_verbatim)}</blockquote>` +
+    `<div class="direction">↳ ${esc(r.direction)}</div>${evidenceHtml(r.evidence)}</article>`;
 }
 
 function candRow(r) {

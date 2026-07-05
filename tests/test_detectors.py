@@ -10,8 +10,8 @@ from cc_transcript import keep
 from cc_transcript.ids import EventUuid, SessionId
 from cc_transcript.mining import CandidateSignal, Confidence, MiningSignal, SourceKind, mine
 
-from cc_pushback.detectors import (
-    PUSHBACK_MINING_SPEC,
+from cc_steer.detectors import (
+    STEERING_MINING_SPEC,
     detect,
     interrupt_rejections,
     parts,
@@ -20,7 +20,7 @@ from cc_pushback.detectors import (
     survives,
     transcript_messages,
 )
-from cc_pushback.spec import PUSHBACK_SPEC
+from cc_steer.spec import STEERING_SPEC
 from tests.builders import (
     assistant_text,
     assistant_tool_use,
@@ -179,7 +179,7 @@ def test_reasonless_denial_without_correction_drops_the_row() -> None:
 
 
 @pytest.mark.unit
-def test_ask_user_question_denial_is_not_pushback() -> None:
+def test_ask_user_question_denial_is_not_steering() -> None:
     events = parse(
         [
             assistant_tool_use("t7", "AskUserQuestion", {"questions": []}),
@@ -304,7 +304,7 @@ def test_surfaced_carrier_with_empty_text_survives_the_spec() -> None:
         ]
     )
     [carrier] = [e for e in events if type(e).__name__ == "UserEvent"]
-    assert keep(carrier, PUSHBACK_SPEC) is False  # the carrier alone would be dropped
+    assert keep(carrier, STEERING_SPEC) is False  # the carrier alone would be dropped
     [candidate] = [c for c in detect(events) if c.source_kind == "review_comment"]
     assert candidate.text == "off by one"
     assert candidate.payload and candidate.payload["provenance"] == "surfaced"
@@ -343,7 +343,7 @@ def test_claude_review_provenance_crashes_the_survival_gate() -> None:
             tool_result("s2", payload),
         ]
     )
-    spec = replace(PUSHBACK_MINING_SPEC, review=replace(PUSHBACK_MINING_SPEC.review, surfaces=frozenset({"claude"})))
+    spec = replace(STEERING_MINING_SPEC, review=replace(STEERING_MINING_SPEC.review, surfaces=frozenset({"claude"})))
     [sig] = [s for s in mine(events, spec) if s.detector == "review_comment"]
     assert sig.evidence["provenance"] == "claude"
     with pytest.raises(AssertionError, match="claude"):
@@ -377,17 +377,17 @@ def test_repeated_interrupt_markers_collapse_on_the_shared_correction() -> None:
 
 
 @pytest.mark.unit
-def test_pushback_spec_keeps_interrupt_marker() -> None:
+def test_steering_spec_keeps_interrupt_marker() -> None:
     [event] = parse([user_text("[Request interrupted by user] run the tests instead, not the build")])
-    assert keep(event, PUSHBACK_SPEC) is True
+    assert keep(event, STEERING_SPEC) is True
 
 
 @pytest.mark.unit
-def test_pushback_spec_drops_structural_noise_and_acks() -> None:
+def test_steering_spec_drops_structural_noise_and_acks() -> None:
     [noise] = parse([user_text("<system-reminder>be good</system-reminder>")])
     [ack] = parse([user_text("ok")])
-    assert keep(noise, PUSHBACK_SPEC) is False
-    assert keep(ack, PUSHBACK_SPEC) is False
+    assert keep(noise, STEERING_SPEC) is False
+    assert keep(ack, STEERING_SPEC) is False
 
 
 @pytest.mark.unit

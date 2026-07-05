@@ -7,17 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- New `export` command ships the pushback lineage as a HuggingFace dataset.
+- New `export` command ships the steering lineage as a HuggingFace dataset.
   The canonical `traces` config carries one row per judged event, and three
   TRL-ready projections derive from it. `sft` maps context and action to the
-  user's verbatim pushback; `dpo` prefers the correcting edit over the faulted
+  user's verbatim steering; `dpo` prefers the correcting edit over the faulted
   one, one row per both-sided ledger correction, deduplicated across
   dual-detected sibling events; `kto` scores unpaired desirability over every
   event. A deterministic session-hash 90/10 group split is computed once on
   `traces` and inherited by every derived row. Per-config parquet files and a
   generated dataset card land locally; `--push` uploads every config to a
   private dataset in the authenticated user's HuggingFace namespace,
-  `<hf-user>/cc-pushback-traces`, with `--repo-id` overriding the target. A
+  `<hf-user>/cc-steer-traces`, with `--repo-id` overriding the target. A
   corpus with zero judged events exports cleanly; empty configs still write
   and push, and the dataset card renders the unjudged corpus honestly.
 - Audit prompt v4 closes the judge-v5 boundary gap. The v3 auditor predated
@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the sync seam, and run without a live LLM backend.
 
 ### Changed
+- The judge and pipeline reframe from pushback to steering: any moment a human
+  shapes a decision the assistant faced or raised, covering corrections plus
+  the forward direction that resolves an open choice, such as an answered
+  question, a picked option, or a directive. Judge prompt v6 adds a `direction` category and
+  captures answered `AskUserQuestion` rounds as `question_answer` steering,
+  resolving ordinal picks like "2, but…" to the concrete option chosen.
+- The package is renamed from `cc-pushback` to `cc-steer`: the PyPI
+  distribution, the `cc-steer` CLI, the `cc_steer` module, the `~/.cc-steer/`
+  data directory, and the HuggingFace dataset `<hf-user>/cc-steer-traces`.
+  Breaking, with no backwards-compat layer.
+- The refiner distills each accepted message into `{action, direction}` pairs,
+  replacing `{action, complaint}`.
 - `datasets` and `huggingface-hub` moved from the `[export]` extra into the
   core dependencies, so a bare install can build and push the dataset.
 - The ty type check now blocks CI; its `continue-on-error` escape is gone.
@@ -94,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Requires cc-transcript `>=6,<7`, adopting its declarative mining API. The six
   `iter_*_signals` detector entrypoints and `extract_all` are replaced by a single
-  spec-driven `mine(events, spec)` over a `MiningSpec`. cc-pushback's review policy
+  spec-driven `mine(events, spec)` over a `MiningSpec`. cc-steer's review policy
   is now a `ReviewSpec` carrying its formats and `surfaces={"typed","surfaced"}`,
   and `detect` runs every detector through one `mine` pass. The mined confidence
   and reason tuples are byte-identical. The spec defaults reproduce the
@@ -129,7 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requires cc-transcript `>=4,<5` and spawnllm `>=0.2.0`. The `enrich` stage now
   delegates to cc-transcript's shared correction extractor,
   `cc_transcript.extract.extract_correction`. Per refined pair it harvests the
-  candidate edits around the pushback anchor, picks the one the complaint
+  candidate edits around the steering anchor, picks the one the complaint
   faults, and appends it to the shared `corrections` ledger. The pick is an LLM
   call when a backend is ready (`usable_backend()`) and the best-overlap
   candidate otherwise. The extractor is idempotent per anchor, so pairs sharing
@@ -166,14 +178,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dashboard's project labels; transcript resolution goes through cc-transcript
   discovery by session UUID. The legacy `origin_uuid` column is replaced by the
   platform's `event_uuid`.
-- Removed the `cc_pushback.context` / `nav` / `markers` / shim modules; their
+- Removed the `cc_steer.context` / `nav` / `markers` / shim modules; their
   contents live in `cc_transcript.mining` and `cc_transcript.context`.
 
 ### Added
 - `enrich` command, the new final stage of the scan -> triage -> audit ->
   refine -> enrich pipeline. It grounds each refined pair in the code it
   complains about. Candidate incorrect edits and the corrections that later
-  overwrote them are harvested deterministically around the pushback anchor by
+  overwrote them are harvested deterministically around the steering anchor by
   `cc_transcript.evidence`, which ranks session corrections by hunk overlap
   with a read-only git-pickaxe fallback, and an LLM picks the one edit per
   complaint, copied verbatim. Expired transcripts and editless lookback windows
@@ -196,8 +208,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `triage --refresh-summary` re-judges rows whose verdict was recorded at
   summary fidelity; a full-fidelity verdict replaces the summary one once the
   row's window hydrates again.
-- `scan` command for idempotent, incremental collection of developer pushback
-  into a local SQLite feedback DB at `~/.cc-pushback/feedback.db` from existing
+- `scan` command for idempotent, incremental collection of developer steering
+  into a local SQLite feedback DB at `~/.cc-steer/feedback.db` from existing
   Claude Code transcripts. Four detectors cover transcript messages; plan
   reviews, both rejected `ExitPlanMode` plans and post-edit plan re-entries;
   interrupts and permission denials; and review-format comments spanning
@@ -214,4 +226,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsing, and the `claude` shell-out all run on `anyio`; Click commands bridge
   to the async core via `anyio.run`.
 
-[Unreleased]: https://github.com/yasyf/cc-pushback/commits/main
+[Unreleased]: https://github.com/yasyf/cc-steer/commits/main

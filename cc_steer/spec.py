@@ -1,6 +1,6 @@
-"""cc-pushback's event-filter policy, composed from cc-transcript primitives.
+"""cc-steer's event-filter policy, composed from cc-transcript primitives.
 
-Keeps user turns that carry pushback worth learning from: drops structural noise,
+Keeps user turns that carry steering worth learning from: drops structural noise,
 agent-injected banners, approve-and-advance directives, automated stop-hook output,
 trivial acknowledgements, very short control messages, and sidechain/meta/compacted/
 empty turns. Interrupt markers are deliberately kept, so a turn that pairs a marker
@@ -25,7 +25,7 @@ from cc_transcript import (
     keep_only,
 )
 
-PUSHBACK_SPEC: FilterSpec = build_spec(
+STEERING_SPEC: FilterSpec = build_spec(
     keep_only("user"),
     drop_sidechain(),
     drop_meta_flag("is_meta"),

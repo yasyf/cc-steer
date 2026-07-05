@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cc_pushback.sidecar import (
+from cc_steer.sidecar import (
     Finding,
     candidate_text,
     candidates_for,
@@ -179,7 +179,7 @@ def test_to_candidate_dedup_key_is_stable() -> None:
     from cc_transcript.activity import SessionActivity
     from cc_transcript.ids import EventRef, SessionId
 
-    from cc_pushback.sidecar import Anchor
+    from cc_steer.sidecar import Anchor
     from tests.builders import parse
 
     events = parse(

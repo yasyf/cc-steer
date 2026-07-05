@@ -4,13 +4,13 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cc_pushback.scan import scan
+from cc_steer.scan import scan
 from tests.builders import assistant_tool_use, denial_result, user_text, write_transcript
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 pytestmark = pytest.mark.anyio
 

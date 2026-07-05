@@ -1,8 +1,8 @@
-"""cc-pushback's concrete code-review formats over the platform's mining policy.
+"""cc-steer's concrete code-review formats over the platform's mining policy.
 
 The generic :class:`ReviewComment`/:class:`StructuredFormat` types and the
 format-dispatch live in :mod:`cc_transcript.mining`; this module supplies
-cc-pushback's policy — the three review formats it recognizes and the structured
+cc-steer's policy — the three review formats it recognizes and the structured
 finding formats it lifts — assembled into a :class:`ReviewSpec` for the
 review-comment detector. ``conductor-finding`` is a portable
 :class:`RegexReviewFormat`; ``superset-inline`` (lookahead) and

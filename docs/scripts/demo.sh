@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Regenerates docs/assets/demo.png from a real run of `uvx cc-pushback stats`.
+# Regenerates docs/assets/demo.png from a real run of `uvx cc-steer stats`.
 # Requires freeze (https://github.com/charmbracelet/freeze) and a scanned
-# ~/.cc-pushback/feedback.db. Output shows counts only — no transcript text.
+# ~/.cc-steer/feedback.db. Output shows counts only — no transcript text.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-out="$(mktemp -t cc-pushback-demo)"
+out="$(mktemp -t cc-steer-demo)"
 trap 'rm -f "$out"' EXIT
 
-printf '$ uvx cc-pushback stats\n' >"$out"
-uvx cc-pushback stats >>"$out"
+printf '$ uvx cc-steer stats\n' >"$out"
+uvx cc-steer stats >>"$out"
 
 freeze "$out" \
   --language ansi \

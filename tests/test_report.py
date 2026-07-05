@@ -9,7 +9,7 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import firm, noise, weak
 from cc_transcript.mining.confidence import to_payload
 
-from cc_pushback.report import (
+from cc_steer.report import (
     Sample,
     build_summary,
     candidate_pool,
@@ -118,7 +118,7 @@ def test_corpus_stats_counts() -> None:
 
 
 def test_candidate_pool_excludes_noise_and_caps() -> None:
-    samples = [make_sample(i, "transcript_message", f"a substantive piece of pushback number {i}") for i in range(12)]
+    samples = [make_sample(i, "transcript_message", f"a substantive piece of steering number {i}") for i in range(12)]
     samples.append(make_sample(99, "transcript_message", "[Request interrupted by user]", signal=noise("bare_marker")))
     pool = candidate_pool(samples)
     assert len(pool["transcript_message"]) == 8
@@ -130,7 +130,7 @@ async def test_build_summary_uses_claude(monkeypatch: pytest.MonkeyPatch) -> Non
     async def fake_run(*_: object, **__: object) -> str:
         return '{"narrative": "Terse and direct.", "highlights": [{"id": 1, "why": "cites a file"}]}'
 
-    monkeypatch.setattr("cc_pushback.report.run_claude", fake_run)
+    monkeypatch.setattr("cc_steer.report.run_claude", fake_run)
     summary = await build_summary(corpus(), model="m")
     assert summary.narrative == "Terse and direct."
     assert summary.highlights == (type(summary.highlights[0])(1, "cites a file"),)
@@ -141,7 +141,7 @@ async def test_build_summary_serves_an_all_noise_corpus(monkeypatch: pytest.Monk
     async def fake_run(*_: object, **__: object) -> str:
         return '{"narrative": "Mostly bare interruptions.", "highlights": [{"id": 2, "why": "made up"}]}'
 
-    monkeypatch.setattr("cc_pushback.report.run_claude", fake_run)
+    monkeypatch.setattr("cc_steer.report.run_claude", fake_run)
     all_noise = [
         make_sample(2, "transcript_message", "[Request interrupted by user]", signal=noise("bare_marker")),
         make_sample(4, "transcript_message", "[Request interrupted by user]", signal=noise("bare_marker")),
@@ -156,7 +156,7 @@ async def test_build_summary_raises_when_picks_miss_a_nonempty_pool(monkeypatch:
     async def fake_run(*_: object, **__: object) -> str:
         return '{"narrative": "x", "highlights": [{"id": 999, "why": "hallucinated"}]}'
 
-    monkeypatch.setattr("cc_pushback.report.run_claude", fake_run)
+    monkeypatch.setattr("cc_steer.report.run_claude", fake_run)
     with pytest.raises(ValueError, match="no valid highlight ids"):
         await build_summary(corpus(), model="m")
 
@@ -168,7 +168,7 @@ async def test_build_summary_raises_when_claude_errors(monkeypatch: pytest.Monke
     async def boom(*_: object, **__: object) -> str:
         raise subprocess.SubprocessError("claude timed out after 1s")
 
-    monkeypatch.setattr("cc_pushback.report.run_claude", boom)
+    monkeypatch.setattr("cc_steer.report.run_claude", boom)
     with pytest.raises(subprocess.SubprocessError):
         await build_summary(corpus(), model="m")
 

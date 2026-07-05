@@ -6,23 +6,23 @@ import pytest
 from cc_transcript.corrections import CorrectionLog
 from cc_transcript.ids import EventUuid, SessionId, tool_digest
 
-from cc_pushback.detectors import detect
-from cc_pushback.enrich import enrich
-from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
-from cc_pushback.refine import RefinedPair, Refinement, refine
-from cc_pushback.triage import Verdict, triage
+from cc_steer.detectors import detect
+from cc_steer.enrich import enrich
+from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
+from cc_steer.refine import RefinedPair, Refinement, refine
+from cc_steer.triage import Verdict, triage
 from tests.builders import SESSION, assistant_text, assistant_tool_use, parse, tool_result, user_text, write_transcript
 
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 pytestmark = pytest.mark.anyio
 
 FILE = "/repo/projects/session.jsonl"
-PUSHBACK = "no, this skips validation, this is wrong"
+STEERING = "no, this skips validation, this is wrong"
 
 INCORRECT_OLD = "def parse(blob):\n    return blob"
 INCORRECT_NEW = "def parse(blob):\n    return json.loads(blob)"
@@ -30,15 +30,15 @@ CORRECT_NEW = "def parse(blob):\n    data = json.loads(blob)\n    validate(data)
 
 PROMPT_ROW = {
     "action": "rewrote the parser without validation",
-    "complaint": "the change skips validation",
-    "complaint_verbatim": PUSHBACK,
+    "direction": "the change skips validation",
+    "direction_verbatim": STEERING,
 }
 
 
 @pytest.fixture(autouse=True)
 def deterministic_pick(monkeypatch: pytest.MonkeyPatch) -> None:
     """Probe no LLM backend, so the extractor picks the best-overlap candidate."""
-    monkeypatch.setattr("cc_pushback.enrich.usable_backend", lambda: None)
+    monkeypatch.setattr("cc_steer.enrich.usable_backend", lambda: None)
 
 
 def coding_entries() -> list[dict[str, Any]]:
@@ -49,7 +49,7 @@ def coding_entries() -> list[dict[str, Any]]:
             "t1", "Edit", {"file_path": "/repo/app.py", "old_string": INCORRECT_OLD, "new_string": INCORRECT_NEW}
         ),
         tool_result("t1", "ok"),
-        user_text(PUSHBACK),
+        user_text(STEERING),
         assistant_text("restoring validation"),
         assistant_tool_use(
             "t2", "Edit", {"file_path": "/repo/app.py", "old_string": INCORRECT_NEW, "new_string": CORRECT_NEW}
@@ -63,13 +63,13 @@ async def seed_refined(
     monkeypatch: pytest.MonkeyPatch,
     entries: list[dict[str, Any]],
     *,
-    pushback: str = PUSHBACK,
+    steering: str = STEERING,
     origin: str = FILE,
 ) -> None:
     await store.record_file_scan(origin, 1.0, detect(parse(entries)))
 
     async def judge(prompt: str) -> Verdict:
-        accepted = f"USER MESSAGE TO CLASSIFY ===\n{pushback}" in prompt
+        accepted = f"USER MESSAGE TO CLASSIFY ===\n{steering}" in prompt
         return Verdict(
             category="incorrect_change" if accepted else "status_update",
             what_claude_did="edited the parser",
@@ -77,7 +77,7 @@ async def seed_refined(
             rationale="r",
         )
 
-    monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: judge)
+    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: judge)
     await triage(store)
 
     async def refiner(prompt: str) -> Refinement:
@@ -85,13 +85,13 @@ async def seed_refined(
             pairs=[
                 RefinedPair(
                     action=PROMPT_ROW["action"],
-                    complaint_verbatim=pushback,
-                    complaint=PROMPT_ROW["complaint"],
+                    direction_verbatim=steering,
+                    direction=PROMPT_ROW["direction"],
                 )
             ]
         )
 
-    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: refiner)
+    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: refiner)
     report = await refine(store)
     assert report.refined == 1
 
@@ -109,7 +109,7 @@ async def test_enrich_appends_one_correction_to_the_shared_ledger(
 
     edit_input = {"file_path": "/repo/app.py", "old_string": INCORRECT_OLD, "new_string": INCORRECT_NEW}
     (row,) = CorrectionLog.open().by_digest(SessionId(SESSION), incorrect_digest=tool_digest("Edit", edit_input))
-    assert (row.source, row.incorrect_file) == ("cc-pushback", "/repo/app.py")
+    assert (row.source, row.incorrect_file) == ("cc-steer", "/repo/app.py")
     assert (row.incorrect_old, row.incorrect_new) == (INCORRECT_OLD, INCORRECT_NEW)
     assert (row.correction_origin, row.correction_old, row.correction_new) == ("session", INCORRECT_NEW, CORRECT_NEW)
     assert row.overlap == 1.0
@@ -183,7 +183,7 @@ async def test_editless_window_skips_without_an_llm_call(
         assistant_text("checking again"),
     ]
     write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
-    await seed_refined(store, monkeypatch, entries, pushback="no, look closer, this is wrong")
+    await seed_refined(store, monkeypatch, entries, steering="no, look closer, this is wrong")
 
     report = await enrich(store)
     assert (report.corrections, report.skipped, report.pending) == (0, 1, 1)
@@ -197,7 +197,7 @@ async def test_enrich_propagates_worker_failures(store: FeedbackStore, monkeypat
     async def broken(*_: object, **__: object) -> bool:
         raise RuntimeError("corrupt transcript")
 
-    monkeypatch.setattr("cc_pushback.enrich.resolve_pair", broken)
+    monkeypatch.setattr("cc_steer.enrich.resolve_pair", broken)
     with pytest.raises(ExceptionGroup):
         await enrich(store)
 
@@ -211,7 +211,7 @@ async def test_pairs_sharing_one_anchor_settle_together(
     await store.record_file_scan(FILE, 1.0, detect(parse(entries)))
 
     async def judge(prompt: str) -> Verdict:
-        accepted = f"USER MESSAGE TO CLASSIFY ===\n{PUSHBACK}" in prompt
+        accepted = f"USER MESSAGE TO CLASSIFY ===\n{STEERING}" in prompt
         return Verdict(
             category="incorrect_change" if accepted else "status_update",
             what_claude_did="edited the parser",
@@ -219,18 +219,18 @@ async def test_pairs_sharing_one_anchor_settle_together(
             rationale="r",
         )
 
-    monkeypatch.setattr("cc_pushback.triage.structured_judge", lambda *_, **__: judge)
+    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: judge)
     await triage(store)
 
     async def refiner(prompt: str) -> Refinement:
         return Refinement(
             pairs=[
-                RefinedPair(action="a0", complaint_verbatim=PUSHBACK, complaint="skips validation"),
-                RefinedPair(action="a1", complaint_verbatim=PUSHBACK, complaint="loses the schema"),
+                RefinedPair(action="a0", direction_verbatim=STEERING, direction="skips validation"),
+                RefinedPair(action="a1", direction_verbatim=STEERING, direction="loses the schema"),
             ]
         )
 
-    monkeypatch.setattr("cc_pushback.refine.structured_judge", lambda *_, **__: refiner)
+    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: refiner)
     assert (await refine(store)).pairs == 2
 
     assert len(await store.unenriched(CorrectionLog.open())) == 2  # two pairs, one shared anchor
@@ -252,9 +252,9 @@ async def test_a_grounded_anchor_stays_settled_across_a_refine_rerun(
     assert (await enrich(store)).pending == 0
     assert await store.unenriched(CorrectionLog.open()) == []
 
-    # A fresh refine generation reuses the same pushback anchor, which already
+    # A fresh refine generation reuses the same steering anchor, which already
     # carries a correction — so the pair stays settled and enrich never re-writes.
-    monkeypatch.setattr("cc_pushback.refine.PROMPT_VERSION", REFINE_VERSION + 1)
+    monkeypatch.setattr("cc_steer.refine.PROMPT_VERSION", REFINE_VERSION + 1)
     await refine(store)
     assert await store.unenriched(CorrectionLog.open()) == []
 

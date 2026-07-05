@@ -13,7 +13,7 @@ jobs:
     uses: yasyf/homebrew-tap/.github/workflows/release-pypi-build.yml@pypi-v1
     secrets: inherit
     with:
-      dist-name: cc-pushback
+      dist-name: cc-steer
       python-version: "3.13"
 
   # PyPI Trusted Publishing must run in THIS repo's workflow — it authenticates via the OIDC

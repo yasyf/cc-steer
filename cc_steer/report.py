@@ -5,7 +5,7 @@ Holds the data model the dashboard serves — :class:`Sample`, :class:`VerdictRo
 correction ledger), and the :class:`Lineage` that stitches a candidate's whole
 pipeline trail together — plus the corpus :class:`Summary` (written by the
 ``claude`` CLI). The FastAPI surface and the JSON shapes it serves — including
-the client-rendered lineage — live in :mod:`cc_pushback.dashboard`.
+the client-rendered lineage — live in :mod:`cc_steer.dashboard`.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from cc_transcript.context import ContextWindow
 from cc_transcript.mining import NOISE_FLOOR
 from cc_transcript.mining.confidence import from_payload
 
-from cc_pushback.claude import run_claude
+from cc_steer.claude import run_claude
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -30,17 +30,17 @@ if TYPE_CHECKING:
     from cc_transcript.corrections import Correction
     from cc_transcript.mining import CandidateSignal
 
-    from cc_pushback.evaluate import GoldenRow
+    from cc_steer.evaluate import GoldenRow
 
 CONTEXT_TURN_LIMIT = 700
 SAMPLE_TEXT_LIMIT = 400
 HIGHLIGHT_POOL_PER_KIND = 8
 
 SUMMARY_SYSTEM = """\
-You analyze a developer's "pushback" — the corrective feedback they give an AI coding assistant.
+You analyze a developer's "steering" — how they shape, redirect, and correct an AI coding assistant.
 You receive corpus statistics and a numbered pool of real feedback samples.
 Return ONLY a JSON object, with no prose around it, of exactly this shape:
-{"narrative": "<2-4 sentences on the developer's pushback style and recurring themes>",
+{"narrative": "<2-4 sentences on the developer's steering style and recurring themes>",
  "highlights": [{"id": <sample id>, "why": "<one short clause on why it is representative>"}]}
 Pick 8-12 highlights, only from the provided sample ids, favoring variety across feedback kinds.
 """
@@ -54,7 +54,7 @@ class Sample:
         id: The event's database id.
         source_kind: Which detector produced it.
         occurred_at: The ISO timestamp of the feedback.
-        text: The verbatim pushback text.
+        text: The verbatim steering text.
         payload: The detector-specific metadata, decoded from ``payload_json``.
         window: The durable context window around the feedback.
         origin_path: The transcript file the event came from — a display hint only.
@@ -98,7 +98,7 @@ class VerdictRow:
         prompt_version: The prompt version that produced it.
         model: The resolved model name that produced it.
         category: The chosen category.
-        is_pushback: Whether the category counts as pushback.
+        is_steering: Whether the category counts as steering.
         what_claude_did: The one-line normalization of the action under review.
         confidence: The verdict's confidence, ``0``–``1``.
         rationale: The short justification for the call.
@@ -109,7 +109,7 @@ class VerdictRow:
     prompt_version: int
     model: str
     category: str
-    is_pushback: bool
+    is_steering: bool
     what_claude_did: str
     confidence: float
     rationale: str
@@ -123,7 +123,7 @@ class VerdictRow:
             prompt_version=int(str(row["prompt_version"])),
             model=str(row["model"]),
             category=str(row["category"]),
-            is_pushback=bool(row["is_pushback"]),
+            is_steering=bool(row["is_steering"]),
             what_claude_did=str(row["what_claude_did"]),
             confidence=float(str(row["confidence"])),
             rationale=str(row["rationale"]),
@@ -162,13 +162,13 @@ class EvidenceRow:
 
 @dataclass(frozen=True, slots=True)
 class RefinedPairRow:
-    """One atomic training pair distilled by the refiner from a single complaint.
+    """One atomic training pair distilled by the refiner from a single direction.
 
     Attributes:
         pair_index: The pair's position within the message's split.
         action: The faithful re-synthesis of what the assistant did.
-        complaint_verbatim: The exact span of the user's message voicing the complaint.
-        complaint: The one-sentence distillation of the objection.
+        direction_verbatim: The exact span of the user's message voicing the direction.
+        direction: The one-sentence distillation of the correction or choice.
         prompt_version: The refine prompt version that produced it.
         model: The resolved model name that produced it.
         evidence: The enrich stage's code evidence from the shared ledger, when the
@@ -177,8 +177,8 @@ class RefinedPairRow:
 
     pair_index: int
     action: str
-    complaint_verbatim: str
-    complaint: str
+    direction_verbatim: str
+    direction: str
     prompt_version: int
     model: str
     evidence: EvidenceRow | None = None
@@ -188,13 +188,13 @@ class RefinedPairRow:
         """Decodes a :meth:`FeedbackStore.lineage` pair row into a :class:`RefinedPairRow`.
 
         The pair's grounding ``evidence`` comes from the shared ledger, resolved by
-        the caller from the pair's pushback anchor.
+        the caller from the pair's steering anchor.
         """
         return cls(
             pair_index=int(str(row["pair_index"])),
             action=str(row["action"]),
-            complaint_verbatim=str(row["complaint_verbatim"]),
-            complaint=str(row["complaint"]),
+            direction_verbatim=str(row["direction_verbatim"]),
+            direction=str(row["direction"]),
             prompt_version=int(str(row["prompt_version"])),
             model=str(row["model"]),
             evidence=evidence,
@@ -224,7 +224,7 @@ class Lineage:
         """Builds a :class:`Lineage` from a :meth:`FeedbackStore.lineage` result.
 
         Each pair's grounding evidence comes from ``evidence_of``, which resolves the
-        pair's pushback anchor against the shared correction ledger.
+        pair's steering anchor against the shared correction ledger.
         """
         return cls(
             sample=Sample.from_row(data),
@@ -247,7 +247,7 @@ class Lineage:
 
     @property
     def flipped(self) -> bool:
-        return len({v.is_pushback for v in self.judge_verdicts}) > 1
+        return len({v.is_steering for v in self.judge_verdicts}) > 1
 
     @property
     def agreement(self) -> Literal["agree", "disagree"] | None:
@@ -255,7 +255,7 @@ class Lineage:
             case (None, _) | (_, None):
                 return None
             case (judge, auditor):
-                return "agree" if judge.is_pushback == auditor.is_pushback else "disagree"
+                return "agree" if judge.is_steering == auditor.is_steering else "disagree"
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,9 +292,9 @@ class PipelineStats:
         accepted: Judge-accepted events (the refiner's input pool).
         refined: Accepted events split into atomic pairs.
         pending: Accepted events not yet refined.
-        noise_judged: Events the judge labeled non-pushback.
+        noise_judged: Events the judge labeled non-steering.
         unjudged: Events without a judge verdict.
-        total_pairs: Atomic ``{action, complaint}`` pairs across the corpus.
+        total_pairs: Atomic ``{action, direction}`` pairs across the corpus.
         pairs_per_event: Mean pairs per refined event.
         by_category: Accepted-event counts keyed by judge category.
         by_category_kind: Accepted-event counts keyed by category then source kind,
@@ -344,7 +344,7 @@ class Summary:
     Attributes:
         stats: The aggregate corpus counts.
         highlights: The standout samples chosen for the summary.
-        narrative: The prose description of the developer's pushback style,
+        narrative: The prose description of the developer's steering style,
             written by the ``claude`` CLI.
     """
 
@@ -381,7 +381,7 @@ def corpus_stats(samples: Sequence[Sample]) -> CorpusStats:
 
 def candidate_status(row: Mapping[str, object]) -> Literal["refined", "accepted", "noise", "unjudged"]:
     """Classifies one :meth:`FeedbackStore.candidates` row by how far it reached."""
-    match row["is_pushback"]:
+    match row["is_steering"]:
         case None:
             return "unjudged"
         case 0:
@@ -390,8 +390,8 @@ def candidate_status(row: Mapping[str, object]) -> Literal["refined", "accepted"
             return "refined" if row["pair_count"] else "accepted"
 
 
-def golden_label(is_pushback: object) -> str:
-    return "steering" if is_pushback else "noise"
+def golden_label(is_steering: object) -> str:
+    return "steering" if is_steering else "noise"
 
 
 def golden_status(
@@ -400,19 +400,19 @@ def golden_status(
     """Returns whether the latest judge matches the frozen golden label, or ``None`` off-fixture."""
     if (gold := golden_map.get(dedup_key)) is None or final is None:
         return None
-    return "pass" if final.is_pushback == gold.expected else "fail"
+    return "pass" if final.is_steering == gold.expected else "fail"
 
 
 def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Mapping[str, GoldenRow]) -> PipelineStats:
     statuses = Counter(candidate_status(row) for row in candidates)
     refined_rows = [row for row in candidates if candidate_status(row) == "refined"]
     total_pairs = sum(int(str(row["pair_count"])) for row in refined_rows)
-    audited = [row for row in candidates if row["auditor_is_pushback"] is not None and row["is_pushback"] is not None]
-    agree = sum(bool(row["auditor_is_pushback"]) == bool(row["is_pushback"]) for row in audited)
+    audited = [row for row in candidates if row["auditor_is_steering"] is not None and row["is_steering"] is not None]
+    agree = sum(bool(row["auditor_is_steering"]) == bool(row["is_steering"]) for row in audited)
     golden = [(row, golden_map[key]) for row in candidates if (key := str(row["dedup_key"])) in golden_map]
     composition: dict[str, Counter[str]] = defaultdict(Counter)
     for row in candidates:
-        if row["is_pushback"]:
+        if row["is_steering"]:
             composition[str(row["category"])][str(row["source_kind"])] += 1
     return PipelineStats(
         accepted=statuses["accepted"] + statuses["refined"],
@@ -423,7 +423,7 @@ def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Ma
         total_pairs=total_pairs,
         pairs_per_event=total_pairs / len(refined_rows) if refined_rows else 0.0,
         by_category=dict(
-            Counter(str(row["category"]) for row in candidates if row["is_pushback"]).most_common()
+            Counter(str(row["category"]) for row in candidates if row["is_steering"]).most_common()
         ),
         by_category_kind={
             category: dict(kinds.most_common())
@@ -434,7 +434,7 @@ def pipeline_stats(candidates: Sequence[Mapping[str, object]], *, golden_map: Ma
         disagree=len(audited) - agree,
         flips=sum(bool(row["flipped"]) for row in candidates),
         golden_total=len(golden),
-        golden_pass=sum(bool(row["is_pushback"]) == gold.expected for row, gold in golden),
+        golden_pass=sum(bool(row["is_steering"]) == gold.expected for row, gold in golden),
     )
 
 

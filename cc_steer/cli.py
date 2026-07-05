@@ -1,4 +1,4 @@
-"""The ``cc-pushback`` command-line interface: scan, triage, audit, eval, and friends."""
+"""The ``cc-steer`` command-line interface: scan, triage, audit, eval, and friends."""
 
 from __future__ import annotations
 
@@ -13,24 +13,24 @@ import anyio
 import click
 from cc_transcript import CLAUDE_PROJECTS_DIR
 
-from cc_pushback.claude import claude_available
-from cc_pushback.dashboard import build_app
-from cc_pushback.evaluate import evaluate, flip_report
-from cc_pushback.models import PUSHBACK_SOURCE_KINDS, SourceKind
-from cc_pushback.report import Sample, build_summary, golden_label, project_label
-from cc_pushback.scan import scan as run_scan
-from cc_pushback.serve import serve
-from cc_pushback.store import FeedbackStore
-from cc_pushback.triage import PROMPT_VERSION
-from cc_pushback.triage import audit as run_audit
-from cc_pushback.triage import triage as run_triage
+from cc_steer.claude import claude_available
+from cc_steer.dashboard import build_app
+from cc_steer.evaluate import evaluate, flip_report
+from cc_steer.models import STEERING_SOURCE_KINDS, SourceKind
+from cc_steer.report import Sample, build_summary, golden_label, project_label
+from cc_steer.scan import scan as run_scan
+from cc_steer.serve import serve
+from cc_steer.store import FeedbackStore
+from cc_steer.triage import PROMPT_VERSION
+from cc_steer.triage import audit as run_audit
+from cc_steer.triage import triage as run_triage
 
 if TYPE_CHECKING:
     from spawnllm import TModel
 
-SOURCE_KINDS = [*PUSHBACK_SOURCE_KINDS]
+SOURCE_KINDS = [*STEERING_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
-DATASET_DIR = Path.home() / ".cc-pushback" / "dataset"
+DATASET_DIR = Path.home() / ".cc-steer" / "dataset"
 sync_option = click.option(
     "--sync/--no-sync",
     default=True,
@@ -51,15 +51,15 @@ def coro[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, R]:
 
 @functools.cache
 def hf_repo_id() -> str:
-    """Resolves the dataset repo in the authenticated HF user's namespace: ``<hf-user>/cc-pushback-traces``."""
+    """Resolves the dataset repo in the authenticated HF user's namespace: ``<hf-user>/cc-steer-traces``."""
     from huggingface_hub import HfApi
 
-    return f"{HfApi().whoami()['name']}/cc-pushback-traces"
+    return f"{HfApi().whoami()['name']}/cc-steer-traces"
 
 
 async def sync_dataset(store: FeedbackStore) -> None:
     """Rebuilds the derived dataset and pushes every config to the user's private HF repo."""
-    from cc_pushback.export import export as run_export
+    from cc_steer.export import export as run_export
 
     click.echo(f"syncing dataset to {(repo_id := hf_repo_id())}")
     report = await run_export(store, out=DATASET_DIR, push_to=repo_id)
@@ -67,9 +67,9 @@ async def sync_dataset(store: FeedbackStore) -> None:
 
 
 @click.group()
-@click.version_option(package_name="cc-pushback")
+@click.version_option(package_name="cc-steer")
 def main() -> None:
-    """Collect developer pushback signals from existing Claude Code transcripts."""
+    """Collect developer steering signals from existing Claude Code transcripts."""
 
 
 @main.command()
@@ -92,7 +92,7 @@ def main() -> None:
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @sync_option
 @coro
@@ -122,7 +122,7 @@ async def scan(
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @coro
 async def stats(db: Path | None) -> None:
@@ -152,7 +152,7 @@ async def stats(db: Path | None) -> None:
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @coro
 async def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
@@ -179,7 +179,7 @@ async def list_(source: SourceKind | None, limit: int, db: Path | None) -> None:
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @sync_option
 @coro
@@ -197,7 +197,7 @@ async def triage(
     """
     from cc_transcript.judge import resolved_model
 
-    from cc_pushback.triage import JUDGE
+    from cc_steer.triage import JUDGE
 
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
@@ -228,7 +228,7 @@ async def triage(
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @sync_option
 @coro
@@ -261,7 +261,7 @@ async def audit(
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @coro
 async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, as_json: bool, db: Path | None) -> None:
@@ -341,12 +341,12 @@ async def eval_(seed: int, accepts: int, rejects: int, compare_to: int | None, a
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @sync_option
 @coro
 async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | None, sync: bool) -> None:
-    """Refine every accepted pushback event into atomic training pairs.
+    """Refine every accepted steering event into atomic training pairs.
 
     Incremental and idempotent: pairs commit per event as soon as each call
     completes, failed events stay pending and are retried on the next run, and
@@ -355,8 +355,8 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     """
     from cc_transcript.judge import resolved_model
 
-    from cc_pushback.refine import PROMPT_VERSION as REFINE_VERSION
-    from cc_pushback.refine import refine as run_refine
+    from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
+    from cc_steer.refine import refine as run_refine
 
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
@@ -382,16 +382,16 @@ async def refine(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @sync_option
 @coro
 async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | None, sync: bool) -> None:
-    """Ground every refined pair in the code it complains about.
+    """Ground every refined pair in the code evidence behind it.
 
-    Hands each pair's pushback anchor and complaint to cc-transcript's shared
+    Hands each pair's steering anchor and direction to cc-transcript's shared
     correction extractor, which harvests the candidate edits and their later
-    corrections (from the session, or from git history), picks the one the complaint
+    corrections (from the session, or from git history), picks the one the direction
     faults — an LLM call when a backend is ready, the best-overlap candidate
     otherwise — and appends it to the shared ``corrections`` ledger. Anchors that
     yield no correction (expired transcripts, editless windows) cost no LLM call.
@@ -403,7 +403,7 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     """
     from cc_transcript.corrections import CorrectionLog
 
-    from cc_pushback.enrich import enrich as run_enrich
+    from cc_steer.enrich import enrich as run_enrich
 
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
@@ -431,7 +431,7 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
 @click.option(
     "--repo-id",
     default=None,
-    show_default="<hf-user>/cc-pushback-traces",
+    show_default="<hf-user>/cc-steer-traces",
     help="HuggingFace dataset repo to push to.",
 )
 @click.option(
@@ -441,11 +441,11 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @coro
 async def export(out: Path, repo_id: str | None, push: bool, db: Path | None) -> None:
-    """Export the pushback lineage as a HuggingFace dataset.
+    """Export the steering lineage as a HuggingFace dataset.
 
     Builds the canonical ``traces`` config — one row per judged event, carrying
     the context, judge and auditor verdicts, refined pairs, and code evidence —
@@ -455,7 +455,7 @@ async def export(out: Path, repo_id: str | None, push: bool, db: Path | None) ->
     config to a private dataset in your HF namespace (created on first push),
     ``--repo-id`` overriding the target.
     """
-    from cc_pushback.export import export as run_export
+    from cc_steer.export import export as run_export
 
     push_to = (repo_id or hf_repo_id()) if push else None
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
@@ -471,14 +471,14 @@ async def export(out: Path, repo_id: str | None, push: bool, db: Path | None) ->
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @coro
 async def pairs(jsonl: bool, db: Path | None) -> None:
     """Print the refined training pairs — the pipeline's deliverable.
 
-    Each pair is one atomic complaint: a faithful re-synthesis of what Claude did,
-    the verbatim user excerpt, and the distilled one-sentence complaint.
+    Each pair is one atomic direction: a faithful re-synthesis of what Claude did,
+    the verbatim user excerpt, and the distilled one-sentence direction.
     """
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         rows = await store.pairs()
@@ -486,7 +486,7 @@ async def pairs(jsonl: bool, db: Path | None) -> None:
         if jsonl:
             click.echo(json.dumps(row | {"project": project_label(str(row["origin_path"] or ""))}))
         else:
-            click.echo(f"[{row['category']}] {str(row['action'])[:80]} -> {str(row['complaint'])[:100]}")
+            click.echo(f"[{row['category']}] {str(row['action'])[:80]} -> {str(row['direction'])[:100]}")
 
 
 @main.command(name="view-samples")
@@ -494,7 +494,7 @@ async def pairs(jsonl: bool, db: Path | None) -> None:
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Database path. Defaults to ~/.cc-pushback/feedback.db.",
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model for the claude CLI summary.")
 @click.option("--port", type=int, default=0, show_default=True, help="Port to serve on; 0 picks a free one.")

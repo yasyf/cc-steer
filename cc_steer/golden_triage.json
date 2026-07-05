@@ -88,7 +88,7 @@
     "source_kind": "transcript_message",
     "text": "go ahwad and commit and push all. also, what litellm timeouts? we arent supposed to be using litellm anymore",
     "expected": "steering",
-    "note": "mixed: directive plus litellm correction; adjudicated: opus 2/3 pushback, the litellm clause faults prior work (mixed rule)"
+    "note": "mixed: directive plus litellm correction; adjudicated: opus 2/3 steering, the litellm clause faults prior work (mixed rule)"
   },
   {
     "dedup_key": "b715713fa7200e44e319e6f7415432b875b80da2787b303b745328f8fb204e1b",
@@ -303,7 +303,7 @@
   {
     "dedup_key": "1371a631231d44f7862716c2e67db35dee439b74f059f2824b4bfc3bdb9cfdb4",
     "source_kind": "plan_review",
-    "text": "tkae a look at the code in cc-pushback, are there things that should now be lifted to cc-transcript because we could use them for this task?",
+    "text": "tkae a look at the code in cc-steer, are there things that should now be lifted to cc-transcript because we could use them for this task?",
     "expected": "noise",
     "note": "exploratory assignment, no critique"
   },
@@ -347,7 +347,7 @@
     "source_kind": "plan_review",
     "text": "```\nCOMMENT_KINDS: dict[str, tuple[str, ...]] = {\r     \"py\": (\"comment\",), \"ts\": (\"comment\",), \"tsx\": (\"comment\",), \"js\": (\"comment\",),\r     \"jsx\": (\"comment\",), \"go\": (\"comment\",), \"bash\": (\"comment\",),\r     \"rs\": (\"line_comment\", \"block_comment\"), \"java\": (\"line_comment\", \"block_comment\"),\r }\r\n```\n\ninstead of this, why not just search for the union of comment, line_comment, and block_comment regardless of the language. make that fix in theotehr place too\n\n> - Not Clause/NlpSignal: match_clause (nlp.py:92-101) anchors on a noun lemma hit — tombstone objects are unpredictable identifiers\r (\"fetchUsers\", \"retry logic\"), so the shipped Clause unit can't fire; bending it verb-anchored would be public-type surgery for one hook.\n\nlets design NlpSignal/Clause to properly mtch use cases like this, dont worry about backwards compat, do the right thing, eitehr changing the abstraction or introducing a new option\n\n> A custom @on handler (not bare llm_nudge — its prompt is static; we need the suspect comments and the edit's old/new text interpolated\r into the judge prompt)\n\nwhat is missing to be able to do llm_nudge with this? we should improve the framework",
     "expected": "steering",
-    "note": "polite question-form design pushback opening with a quoted plan excerpt"
+    "note": "polite question-form design steering opening with a quoted plan excerpt"
   },
   {
     "dedup_key": "e6599df8e446b4e4eb26251d8164ddb3f9f43da1b842088e7fdc54eb0ebc7f7d",

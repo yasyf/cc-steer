@@ -7,7 +7,7 @@ import cc_transcript.discovery
 import pytest
 from spawnllm.backends.base import BackendUnavailable
 
-from cc_pushback.store import FeedbackStore
+from cc_steer.store import FeedbackStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator

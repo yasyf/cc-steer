@@ -1,7 +1,7 @@
 """Deterministic synthetic candidate rows for the build_prompt byte fixture.
 
 Running this module as a script regenerates ``tests/fixtures/build_prompt_2_0.txt``
-from the current :func:`cc_pushback.triage.build_prompt`; the regression test in
+from the current :func:`cc_steer.triage.build_prompt`; the regression test in
 ``tests/test_triage.py`` asserts the rendering reproduces the file byte-for-byte.
 The fixture covers every rendering branch of the window pipeline: a denial
 candidate whose trigger turn carries a >1500-char Edit rendered unclipped under the
@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING
 import anyio
 import cc_transcript.discovery
 
-from cc_pushback.detectors import detect
-from cc_pushback.triage import AUDIT_PROMPT, JUDGE_PROMPT, build_prompt
+from cc_steer.detectors import detect
+from cc_steer.triage import AUDIT_PROMPT, JUDGE_PROMPT, build_prompt
 from tests.builders import (
     SESSION,
     assistant_text,
@@ -56,7 +56,7 @@ def session_entries() -> list[dict[str, Any]]:
         assistant_tool_use(
             "t2", "Edit", {"file_path": "/repo/app.py", "old_string": "old_line()", "new_string": LONG_EDIT}
         ),
-        denial_result("t2", said="no, stop — " + long_text("complaint", 40)),
+        denial_result("t2", said="no, stop — " + long_text("direction", 40)),
         user_text(long_text("after", 150)),
     ]
 

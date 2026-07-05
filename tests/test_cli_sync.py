@@ -8,24 +8,24 @@ import cc_transcript.judge
 import pytest
 from click.testing import CliRunner
 
-import cc_pushback.cli
-import cc_pushback.enrich
-import cc_pushback.export
-import cc_pushback.refine
-from cc_pushback.cli import main
-from cc_pushback.enrich import EnrichReport
-from cc_pushback.export import ExportReport
-from cc_pushback.refine import RefineReport
-from cc_pushback.triage import TriageReport
+import cc_steer.cli
+import cc_steer.enrich
+import cc_steer.export
+import cc_steer.refine
+from cc_steer.cli import main
+from cc_steer.enrich import EnrichReport
+from cc_steer.export import ExportReport
+from cc_steer.refine import RefineReport
+from cc_steer.triage import TriageReport
 from tests.builders import assistant_tool_use, denial_result, user_text, write_transcript
 
 if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
-HF_REPO_ID = "yasyf/cc-pushback-traces"
+HF_REPO_ID = "yasyf/cc-steer-traces"
 
 pytestmark = pytest.mark.integration
 
@@ -47,28 +47,28 @@ class StageCase:
 STAGES = (
     StageCase(
         "triage",
-        cc_pushback.cli,
+        cc_steer.cli,
         "run_triage",
         changed=TriageReport(judged=3, failed=1, pending=2),
         unchanged=TriageReport(judged=0, failed=1, pending=2),
     ),
     StageCase(
         "audit",
-        cc_pushback.cli,
+        cc_steer.cli,
         "run_audit",
         changed=TriageReport(judged=2, failed=0, pending=0),
         unchanged=TriageReport(judged=0, failed=2, pending=0),
     ),
     StageCase(
         "refine",
-        cc_pushback.refine,
+        cc_steer.refine,
         "refine",
         changed=RefineReport(refined=2, pairs=5, failed=0, pending=1),
         unchanged=RefineReport(refined=0, pairs=0, failed=1, pending=3),
     ),
     StageCase(
         "enrich",
-        cc_pushback.enrich,
+        cc_steer.enrich,
         "enrich",
         changed=EnrichReport(corrections=2, skipped=1, pending=0),
         unchanged=EnrichReport(corrections=0, skipped=3, pending=4),
@@ -84,9 +84,9 @@ def export_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[Export
         calls.append(ExportCall(out, push_to))
         return ExportReport(counts={"traces": {"train": 2, "test": 1}}, out=out, pushed=push_to is not None)
 
-    monkeypatch.setattr(cc_pushback.export, "export", record)
-    monkeypatch.setattr(cc_pushback.cli, "DATASET_DIR", tmp_path)
-    monkeypatch.setattr(cc_pushback.cli, "hf_repo_id", lambda: HF_REPO_ID)
+    monkeypatch.setattr(cc_steer.export, "export", record)
+    monkeypatch.setattr(cc_steer.cli, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(cc_steer.cli, "hf_repo_id", lambda: HF_REPO_ID)
     return calls
 
 
@@ -159,7 +159,7 @@ def test_stage_sync_fires_only_when_the_pass_changed_data(
     async def stage(store: FeedbackStore, **kwargs: object) -> TriageReport | RefineReport | EnrichReport:
         return report
 
-    monkeypatch.setattr(cc_pushback.cli, "claude_available", lambda: True)
+    monkeypatch.setattr(cc_steer.cli, "claude_available", lambda: True)
     monkeypatch.setattr(cc_transcript.judge, "resolved_model", lambda tier: "stub-model")
     monkeypatch.setattr(case.module, case.attribute, stage)
     result = runner.invoke(main, [case.command, "--db", str(db)])
@@ -183,7 +183,7 @@ def test_export_without_push_never_resolves_the_hf_user(
     def offline() -> str:
         raise AssertionError("hf_repo_id must not be called without --push")
 
-    monkeypatch.setattr(cc_pushback.cli, "hf_repo_id", offline)
+    monkeypatch.setattr(cc_steer.cli, "hf_repo_id", offline)
     result = runner.invoke(main, ["export", "--db", str(db), "--out", str(tmp_path / "ds")])
     assert result.exit_code == 0, result.output
     assert export_calls == [ExportCall(tmp_path / "ds", None)]
@@ -195,7 +195,7 @@ def test_push_failure_exits_nonzero(
     async def explode(store: FeedbackStore, *, out: Path, push_to: str | None = None) -> ExportReport:
         raise RuntimeError("hub push failed")
 
-    monkeypatch.setattr(cc_pushback.export, "export", explode)
+    monkeypatch.setattr(cc_steer.export, "export", explode)
     result = runner.invoke(main, ["scan", "--transcripts", str(transcripts), "--db", str(db)])
     assert result.exit_code != 0
     assert isinstance(result.exception, RuntimeError)
@@ -205,8 +205,8 @@ def test_view_samples_refuses_an_empty_corpus(runner: CliRunner, db: Path, monke
     async def never(*_: object, **__: object) -> NoReturn:
         raise AssertionError("build_summary must not run without samples")
 
-    monkeypatch.setattr(cc_pushback.cli, "claude_available", lambda: True)
-    monkeypatch.setattr(cc_pushback.cli, "build_summary", never)
+    monkeypatch.setattr(cc_steer.cli, "claude_available", lambda: True)
+    monkeypatch.setattr(cc_steer.cli, "build_summary", never)
     result = runner.invoke(main, ["view-samples", "--db", str(db)])
     assert result.exit_code != 0
     assert "no judged samples to serve" in result.output

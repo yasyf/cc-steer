@@ -6,7 +6,7 @@ This module reads those findings, anchors each findings file to the transcript
 session whose event time-range sits closest to the file mtime (containment first,
 nearest edge otherwise), and lifts each surviving finding into a
 :class:`~cc_transcript.mining.FeedbackCandidate` that flows into the same store as
-transcript pushback. Review metadata that the candidate model has no field for
+transcript steering. Review metadata that the candidate model has no field for
 rides in the candidate's ``payload``.
 """
 

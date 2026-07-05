@@ -8,24 +8,24 @@ from cc_transcript.ids import EventUuid, SessionId
 from cc_transcript.mining import FEEDBACK_DDL as BASE_FEEDBACK_DDL
 from cc_transcript.mining import DedupKey
 
-from cc_pushback.detectors import detect
-from cc_pushback.refine import RefinedPair, Refinement
-from cc_pushback.store import FEEDBACK_DDL, TRIAGE_DDL
-from cc_pushback.triage import JUDGE, Verdict
+from cc_steer.detectors import detect
+from cc_steer.refine import RefinedPair, Refinement
+from cc_steer.store import FEEDBACK_DDL, TRIAGE_DDL
+from cc_steer.triage import JUDGE, Verdict
 from tests.builders import assistant_tool_use, denial_result, interrupt_result, parse, user_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from cc_pushback.models import FeedbackCandidate
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.models import FeedbackCandidate
+    from cc_steer.store import FeedbackStore
 
 pytestmark = pytest.mark.anyio
 
 FILE = "/repo/projects/session.jsonl"
 
 # The expected TRIAGE_DDL, frozen verbatim. TRIAGE_DDL is composed from the judge
-# package's verdicts_ddl() (pinned to cc-pushback's column names) plus
+# package's verdicts_ddl() (pinned to cc-steer's column names) plus
 # TRIAGE_VIEWS_DDL; this byte-for-byte equality pins the composed schema, fidelity
 # column included.
 ORIGINAL_TRIAGE_DDL = """
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS triage (
   prompt_version INTEGER NOT NULL,
   model TEXT NOT NULL,
   category TEXT NOT NULL,
-  is_pushback INTEGER NOT NULL,
+  is_steering INTEGER NOT NULL,
   what_claude_did TEXT NOT NULL,
   confidence REAL NOT NULL,
   rationale TEXT NOT NULL,
@@ -64,20 +64,21 @@ SELECT * FROM (
   FROM triage t
   WHERE t.role = 'auditor'
 ) WHERE rn = 1;
-DROP VIEW IF EXISTS accepted_pushback;
-CREATE VIEW accepted_pushback AS
+DROP VIEW IF EXISTS accepted_steering;
+CREATE VIEW accepted_steering AS
 SELECT
   e.id AS event_id,
   e.dedup_key,
   e.source_kind,
   e.text,
   e.context_json,
+  e.payload_json,
   t.category,
   t.what_claude_did,
   e.origin_path
 FROM feedback_events e
 JOIN latest_judge t ON t.dedup_key = e.dedup_key
-WHERE t.is_pushback = 1;
+WHERE t.is_steering = 1;
 """
 
 
@@ -104,11 +105,11 @@ def verdict(category: str, *, confidence: float = 0.9) -> Verdict:
     )
 
 
-def refinement(*complaints: str) -> Refinement:
+def refinement(*directions: str) -> Refinement:
     return Refinement(
         pairs=[
-            RefinedPair(action="ran a tool", complaint_verbatim=text, complaint=f"distilled: {text}")
-            for text in (complaints or ("stop that",))
+            RefinedPair(action="ran a tool", direction_verbatim=text, direction=f"distilled: {text}")
+            for text in (directions or ("stop that",))
         ]
     )
 
@@ -231,7 +232,7 @@ async def test_unjudged_honors_version_model_and_limit(store: FeedbackStore) -> 
 
 
 @pytest.mark.integration
-async def test_accepted_pushback_filters_noise_and_latest_judge_wins(store: FeedbackStore) -> None:
+async def test_accepted_steering_filters_noise_and_latest_judge_wins(store: FeedbackStore) -> None:
     keys = await seeded_keys(store)
     await store.record_verdict(
         keys[0], verdict("unwanted_action"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
@@ -252,7 +253,7 @@ async def test_accepted_pushback_filters_noise_and_latest_judge_wins(store: Feed
 
 
 @pytest.mark.integration
-async def test_auditor_only_event_is_not_accepted_pushback(store: FeedbackStore) -> None:
+async def test_auditor_only_event_is_not_accepted_steering(store: FeedbackStore) -> None:
     key = (await seeded_keys(store))[0]
     await store.record_verdict(
         key, verdict("wrong_approach"), role="auditor", prompt_version=1, model="opus", fidelity="full"
@@ -276,7 +277,7 @@ async def test_record_refinement_is_idempotent(store: FeedbackStore) -> None:
     rows = await store.pairs()
     assert len(rows) == 2
     assert [int(row["pair_index"]) for row in rows] == [0, 1]
-    assert {str(row["complaint_verbatim"]) for row in rows} == {"use a generator", "stop hardcoding"}
+    assert {str(row["direction_verbatim"]) for row in rows} == {"use a generator", "stop hardcoding"}
 
 
 @pytest.mark.integration
@@ -317,17 +318,17 @@ async def test_candidates_reports_status_pair_count_auditor_and_flip(store: Feed
     assert len(rows) == len(keys)
 
     accepted = rows[keys[0]]
-    assert accepted["is_pushback"] == 1 and accepted["judge_version"] == 2  # latest judge (v2) wins
+    assert accepted["is_steering"] == 1 and accepted["judge_version"] == 2  # latest judge (v2) wins
     assert accepted["pair_count"] == 2
-    assert accepted["flipped"] == 1  # noise (v1) -> pushback (v2)
-    assert accepted["auditor_is_pushback"] == 0  # auditor disagreed, called it noise
+    assert accepted["flipped"] == 1  # noise (v1) -> steering (v2)
+    assert accepted["auditor_is_steering"] == 0  # auditor disagreed, called it noise
 
     noise = rows[keys[1]]
-    assert noise["is_pushback"] == 0 and noise["pair_count"] is None
-    assert noise["flipped"] == 0 and noise["auditor_is_pushback"] is None
+    assert noise["is_steering"] == 0 and noise["pair_count"] is None
+    assert noise["flipped"] == 0 and noise["auditor_is_steering"] is None
 
     for row in (rows[key] for key in keys[2:]):
-        assert row["is_pushback"] is None and row["pair_count"] is None and row["flipped"] == 0
+        assert row["is_steering"] is None and row["pair_count"] is None and row["flipped"] == 0
 
 
 @pytest.mark.integration
@@ -349,7 +350,7 @@ async def test_lineage_returns_all_verdicts_and_latest_pairs(store: FeedbackStor
     verdicts = [(str(v["role"]), int(str(v["prompt_version"]))) for v in lineage["verdicts"]]
     assert verdicts == [("auditor", 2), ("judge", 1), ("judge", 2)]
     assert [int(str(p["pair_index"])) for p in lineage["pairs"]] == [0, 1]
-    assert {str(p["complaint_verbatim"]) for p in lineage["pairs"]} == {"x", "y"}
+    assert {str(p["direction_verbatim"]) for p in lineage["pairs"]} == {"x", "y"}
     assert await store.lineage("nope") == {}
 
 
@@ -362,7 +363,7 @@ async def test_refined_pairs_latest_generation_wins(store: FeedbackStore) -> Non
     await store.record_refinement(key, refinement("a", "b"), prompt_version=1, model="sonnet")
     await store.record_refinement(key, refinement("c"), prompt_version=2, model="sonnet")
     rows = await store.pairs()
-    assert [str(row["complaint_verbatim"]) for row in rows] == ["c"]
+    assert [str(row["direction_verbatim"]) for row in rows] == ["c"]
     assert rows[0]["prompt_version"] == 2
     assert rows[0]["category"] == "wrong_approach"
     assert rows[0]["action"] == "ran a tool"
@@ -398,7 +399,7 @@ def correction_for(row: Mapping[str, object]) -> Correction:
     return Correction(
         ts_ms=1,
         session_id=SessionId(str(row["session_id"])),
-        source="cc-pushback",
+        source="cc-steer",
         anchor_uuid=EventUuid(str(row["event_uuid"])),
         incorrect_digest=None,
         incorrect_file="/a.py",
@@ -422,8 +423,8 @@ async def test_unenriched_surfaces_refined_pairs_lacking_a_ledger_correction(sto
         "refine_model",
         "pair_index",
         "action",
-        "complaint",
-        "complaint_verbatim",
+        "direction",
+        "direction_verbatim",
         "source_kind",
         "session_id",
         "event_uuid",

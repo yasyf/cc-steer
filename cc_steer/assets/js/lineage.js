@@ -4,8 +4,8 @@ import { esc, diffPane } from "./dom.js";
 // `/api/lineage/{key}` endpoint returns. The markup and class names mirror the
 // shared stylesheet (base.css) exactly.
 
-function goldenLabel(isPushback) {
-  return isPushback ? "pushback" : "noise";
+function goldenLabel(isSteering) {
+  return isSteering ? "steering" : "noise";
 }
 
 function metaChips(meta) {
@@ -29,7 +29,7 @@ function verdictHtml(v) {
     `<span class="badge cat-${esc(v.category)}">${esc(v.category)}</span>` +
     `<span class="chip">${esc(v.role)} v${v.prompt_version} · ${esc(v.model)}</span>` +
     `<span class="chip">conf ${v.confidence.toFixed(2)}</span>` +
-    `<span class="chip">${goldenLabel(v.is_pushback)}</span>${flag}</div>` +
+    `<span class="chip">${goldenLabel(v.is_steering)}</span>${flag}</div>` +
     `<pre class="vsum">${esc(v.what_claude_did)}</pre>` +
     `<pre class="vrat">${esc(v.rationale)}</pre></div>`;
 }
@@ -58,8 +58,8 @@ function refinerHtml(refiner) {
     `<div class="pair"><div class="vhead"><span class="chip">pair ${p.pair_index}</span>` +
     `<span class="chip">v${p.prompt_version} · ${esc(p.model)}</span></div>` +
     `<pre class="paction">${esc(p.action)}</pre>` +
-    `<blockquote class="pverbatim">${esc(p.complaint_verbatim)}</blockquote>` +
-    `<pre class="pcomplaint">${esc(p.complaint)}</pre>` +
+    `<blockquote class="pverbatim">${esc(p.direction_verbatim)}</blockquote>` +
+    `<pre class="pdirection">${esc(p.direction)}</pre>` +
     `${p.evidence ? evidenceHtml(p.evidence) : ""}</div>`).join("");
   return `<div class="orig"><pre>${highlightSpans(refiner.original, refiner.spans)}</pre></div>${cards}`;
 }

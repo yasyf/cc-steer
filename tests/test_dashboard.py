@@ -11,10 +11,10 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import firm
 from cc_transcript.mining.confidence import to_payload
 
-from cc_pushback.dashboard import build_app, language_of, serialize_lineage
-from cc_pushback.evaluate import GoldenRow
-from cc_pushback.refine import RefinedPair, Refinement
-from cc_pushback.report import (
+from cc_steer.dashboard import build_app, language_of, serialize_lineage
+from cc_steer.evaluate import GoldenRow
+from cc_steer.refine import RefinedPair, Refinement
+from cc_steer.report import (
     EvidenceRow,
     Lineage,
     RefinedPairRow,
@@ -24,23 +24,23 @@ from cc_pushback.report import (
     corpus_stats,
     golden_status,
 )
-from cc_pushback.triage import JUDGE, Verdict
+from cc_steer.triage import JUDGE, Verdict
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 pytestmark = pytest.mark.anyio
 
 
-def vrow(role: str, version: int, category: str, *, is_pushback: bool) -> VerdictRow:
+def vrow(role: str, version: int, category: str, *, is_steering: bool) -> VerdictRow:
     return VerdictRow(
         role=role,
         prompt_version=version,
         model="sonnet" if role == JUDGE else "opus",
         category=category,
-        is_pushback=is_pushback,
+        is_steering=is_steering,
         what_claude_did="vendored the dep",
         confidence=0.9,
         rationale="faults the vendoring",
@@ -50,7 +50,7 @@ def vrow(role: str, version: int, category: str, *, is_pushback: bool) -> Verdic
 
 def prow(index: int, verbatim: str) -> RefinedPairRow:
     return RefinedPairRow(
-        pair_index=index, action="vendored the dep", complaint_verbatim=verbatim, complaint=f"c{index}",
+        pair_index=index, action="vendored the dep", direction_verbatim=verbatim, direction=f"c{index}",
         prompt_version=1, model="sonnet",
     )
 
@@ -83,19 +83,19 @@ def lineage(
     return Lineage(sample=sample, dedup_key="k1", verdicts=tuple(verdicts), pairs=tuple(pairs))
 
 
-def test_verdict_row_from_row_coerces_pushback_to_bool() -> None:
+def test_verdict_row_from_row_coerces_steering_to_bool() -> None:
     row = {
         "role": "judge", "prompt_version": 2, "model": "sonnet", "category": "wrong_approach",
-        "is_pushback": 1, "what_claude_did": "did x", "confidence": 0.8, "rationale": "r",
+        "is_steering": 1, "what_claude_did": "did x", "confidence": 0.8, "rationale": "r",
         "judged_at": "2026-01-01T00:00:00",
     }
     verdict = VerdictRow.from_row(row)
-    assert verdict.is_pushback is True and verdict.prompt_version == 2
+    assert verdict.is_steering is True and verdict.prompt_version == 2
 
 
 def pair_row(**overrides: object) -> dict[str, object]:
     return {
-        "pair_index": 1, "action": "a", "complaint_verbatim": "v", "complaint": "c",
+        "pair_index": 1, "action": "a", "direction_verbatim": "v", "direction": "c",
         "prompt_version": 1, "model": "sonnet", "session_id": "s", "event_uuid": "u1",
     } | overrides
 
@@ -103,7 +103,7 @@ def pair_row(**overrides: object) -> dict[str, object]:
 def git_correction(*, correction_origin: Origin | None = "git") -> Correction:
     has_fix = correction_origin is not None
     return Correction(
-        ts_ms=1, session_id=SessionId("s"), source="cc-pushback", anchor_uuid=EventUuid("u1"),
+        ts_ms=1, session_id=SessionId("s"), source="cc-steer", anchor_uuid=EventUuid("u1"),
         incorrect_digest=None, incorrect_file="/repo/a.py", incorrect_old="bad", incorrect_new="worse",
         correction_origin=correction_origin,
         correction_old="worse" if has_fix else None,
@@ -113,7 +113,7 @@ def git_correction(*, correction_origin: Origin | None = "git") -> Correction:
 
 def test_refined_pair_row_from_row_carries_no_evidence_by_default() -> None:
     pair = RefinedPairRow.from_row(pair_row())
-    assert pair.pair_index == 1 and pair.complaint_verbatim == "v"
+    assert pair.pair_index == 1 and pair.direction_verbatim == "v"
     assert pair.evidence is None
 
 
@@ -153,9 +153,9 @@ def test_language_of(path: str | None, language: str | None) -> None:
     ("verdicts", "flipped"),
     [
         pytest.param([], False, id="no-judge"),
-        pytest.param([vrow(JUDGE, 1, "status_update", is_pushback=False)], False, id="single-judge"),
+        pytest.param([vrow(JUDGE, 1, "status_update", is_steering=False)], False, id="single-judge"),
         pytest.param(
-            [vrow(JUDGE, 1, "status_update", is_pushback=False), vrow(JUDGE, 2, "wrong_approach", is_pushback=True)],
+            [vrow(JUDGE, 1, "status_update", is_steering=False), vrow(JUDGE, 2, "wrong_approach", is_steering=True)],
             True,
             id="side-change-across-versions",
         ),
@@ -167,44 +167,44 @@ def test_lineage_flipped(verdicts: list[VerdictRow], flipped: bool) -> None:
 
 def test_lineage_final_is_latest_judge_version() -> None:
     lin = lineage(
-        [vrow(JUDGE, 1, "status_update", is_pushback=False), vrow(JUDGE, 2, "wrong_approach", is_pushback=True)]
+        [vrow(JUDGE, 1, "status_update", is_steering=False), vrow(JUDGE, 2, "wrong_approach", is_steering=True)]
     )
     assert lin.final is not None and lin.final.category == "wrong_approach"
 
 
 @pytest.mark.parametrize(
-    ("auditor_pushback", "agreement"),
+    ("auditor_steering", "agreement"),
     [
         pytest.param(True, "agree", id="agree"),
         pytest.param(False, "disagree", id="disagree"),
         pytest.param(None, None, id="unaudited"),
     ],
 )
-def test_lineage_agreement(auditor_pushback: bool | None, agreement: str | None) -> None:
-    verdicts = [vrow(JUDGE, 1, "wrong_approach", is_pushback=True)]
-    if auditor_pushback is not None:
-        verdicts.append(vrow("auditor", 1, "wrong_approach", is_pushback=auditor_pushback))
+def test_lineage_agreement(auditor_steering: bool | None, agreement: str | None) -> None:
+    verdicts = [vrow(JUDGE, 1, "wrong_approach", is_steering=True)]
+    if auditor_steering is not None:
+        verdicts.append(vrow("auditor", 1, "wrong_approach", is_steering=auditor_steering))
     assert lineage(verdicts).agreement == agreement
 
 
 def test_golden_status() -> None:
     gold = GoldenRow(dedup_key="k1", source_kind="transcript_message", text="t", expected=True, note="n")
     golden_map = {"k1": gold}
-    pushback = vrow(JUDGE, 1, "wrong_approach", is_pushback=True)
-    noise = vrow(JUDGE, 1, "status_update", is_pushback=False)
-    assert golden_status("k1", pushback, golden_map) == "pass"
+    steering = vrow(JUDGE, 1, "wrong_approach", is_steering=True)
+    noise = vrow(JUDGE, 1, "status_update", is_steering=False)
+    assert golden_status("k1", steering, golden_map) == "pass"
     assert golden_status("k1", noise, golden_map) == "fail"
-    assert golden_status("other", pushback, golden_map) is None
+    assert golden_status("other", steering, golden_map) is None
     assert golden_status("k1", None, golden_map) is None
 
 
 def test_serialize_lineage_shapes_five_stages_and_keeps_raw_text() -> None:
     lin = lineage(
-        [vrow(JUDGE, 1, "status_update", is_pushback=False), vrow(JUDGE, 2, "wrong_approach", is_pushback=True)],
+        [vrow(JUDGE, 1, "status_update", is_steering=False), vrow(JUDGE, 2, "wrong_approach", is_steering=True)],
         [prow(0, "dont vendor")],
         text="<script>alert(1)</script> dont vendor it",
     )
-    auditor = lin.verdicts + (vrow("auditor", 2, "status_update", is_pushback=False),)
+    auditor = lin.verdicts + (vrow("auditor", 2, "status_update", is_steering=False),)
     lin = Lineage(sample=lin.sample, dedup_key=lin.dedup_key, verdicts=auditor, pairs=lin.pairs)
     data = serialize_lineage(lin, {})
 
@@ -212,8 +212,8 @@ def test_serialize_lineage_shapes_five_stages_and_keeps_raw_text() -> None:
     assert [verdict["prompt_version"] for verdict in data["judge"]] == [1, 2]
     assert all(verdict["flipped"] for verdict in data["judge"])  # judge side changed v1 -> v2
     assert data["judge"][-1]["category"] == "wrong_approach"
-    assert data["auditor"]["agreement"] == "disagree"  # auditor noise vs final pushback
-    assert data["refiner"]["spans"] == ["dont vendor"]  # the complaint the client highlights in the original
+    assert data["auditor"]["agreement"] == "disagree"  # auditor noise vs final steering
+    assert data["refiner"]["spans"] == ["dont vendor"]  # the direction the client highlights in the original
     assert data["refiner"]["pairs"][0]["evidence"] is None  # unenriched pair, no diff
     assert data["golden"] is None
     assert data["detector"]["context"]["turns"][0]["is_trigger"] is True
@@ -224,7 +224,7 @@ def test_serialize_lineage_shapes_five_stages_and_keeps_raw_text() -> None:
 def test_serialize_lineage_keeps_the_full_untruncated_diff() -> None:
     long_call = "danger(" + "x" * 900 + ")"
     pair = RefinedPairRow(
-        pair_index=0, action="vendored the dep", complaint_verbatim="dont vendor", complaint="c0",
+        pair_index=0, action="vendored the dep", direction_verbatim="dont vendor", direction="c0",
         prompt_version=1, model="sonnet",
         evidence=EvidenceRow(
             file_path="/repo/a.py",
@@ -233,7 +233,7 @@ def test_serialize_lineage_keeps_the_full_untruncated_diff() -> None:
             source="git",
         ),
     )
-    data = serialize_lineage(lineage([vrow(JUDGE, 1, "wrong_approach", is_pushback=True)], [pair]), {})
+    data = serialize_lineage(lineage([vrow(JUDGE, 1, "wrong_approach", is_steering=True)], [pair]), {})
     evidence = data["refiner"]["pairs"][0]["evidence"]
     assert evidence["file_path"] == "/repo/a.py" and evidence["source"] == "git"
     assert evidence["incorrect"]["old"] == f"if x < 1:\n    {long_call}"  # full, untruncated, unescaped
@@ -277,7 +277,7 @@ async def seed(store: FeedbackStore) -> None:
     await store.record_verdict(
         "k3", verdict("status_update"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
     )
-    pair = RefinedPair(action="vendored it", complaint_verbatim="dont vendor it", complaint="do not vendor")
+    pair = RefinedPair(action="vendored it", direction_verbatim="dont vendor it", direction="do not vendor")
     await store.record_refinement("k1", Refinement(pairs=[pair]), prompt_version=1, model="sonnet")
 
 
@@ -289,7 +289,7 @@ def k1_correction(
     source: Origin | None = "git",
 ) -> Correction:
     return Correction(
-        ts_ms=1, session_id=SessionId("s"), source="cc-pushback", anchor_uuid=EventUuid("u0"),
+        ts_ms=1, session_id=SessionId("s"), source="cc-steer", anchor_uuid=EventUuid("u0"),
         incorrect_digest=None, incorrect_file=file, incorrect_old=incorrect[0], incorrect_new=incorrect[1],
         correction_origin=source,
         correction_old=None if correct is None else correct[0],
@@ -298,7 +298,7 @@ def k1_correction(
 
 
 def enrich_k1(correction: Correction) -> None:
-    """Grounds k1's pushback anchor (session ``s``, uuid ``u0``) in the shared ledger."""
+    """Grounds k1's steering anchor (session ``s``, uuid ``u0``) in the shared ledger."""
     CorrectionLog.open().append(correction)
 
 
@@ -316,8 +316,8 @@ async def test_api_pairs_returns_atomic_rows(store: FeedbackStore) -> None:
     assert len(body["pairs"]) == 1
     pair = body["pairs"][0]
     assert pair["dedup_key"] == "k1" and pair["category"] == "wrong_approach"
-    assert pair["complaint"] == "do not vendor" and pair["project"] == "proj"
-    assert pair["complaint_verbatim"] == "dont vendor it"
+    assert pair["direction"] == "do not vendor" and pair["project"] == "proj"
+    assert pair["direction_verbatim"] == "dont vendor it"
     assert pair["evidence"] is None  # unenriched pair, card unchanged
     assert pair["language"] is None  # no evidence, no language facet value
 
@@ -350,7 +350,7 @@ async def test_api_pairs_no_ledger_correction_keeps_evidence_none(store: Feedbac
     async with await client(store) as http:
         pair = (await http.get("/api/pairs")).json()["pairs"][0]
     assert pair["evidence"] is None
-    assert pair["complaint_verbatim"] == "dont vendor it"  # the card payload is otherwise unchanged
+    assert pair["direction_verbatim"] == "dont vendor it"  # the card payload is otherwise unchanged
 
 
 async def test_api_lineage_shows_the_full_diff(store: FeedbackStore) -> None:
@@ -384,7 +384,7 @@ async def test_api_lineage_renders_detail_and_404s(store: FeedbackStore) -> None
     assert ok.status_code == 200
     data = ok.json()
     assert data["detector"]["context"]["turns"][0]["is_trigger"] is True
-    assert data["refiner"]["pairs"][0]["complaint"] == "do not vendor"
+    assert data["refiner"]["pairs"][0]["direction"] == "do not vendor"
     assert data["judge"][0]["category"] == "wrong_approach"
     assert missing.status_code == 404
 

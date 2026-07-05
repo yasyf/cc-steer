@@ -1,8 +1,8 @@
-"""cc-pushback's detector policy: map neutral mining facts to feedback candidates.
+"""cc-steer's detector policy: map neutral mining facts to feedback candidates.
 
 The fact-recognition mechanism lives in :mod:`cc_transcript.mining`; this module
-injects cc-pushback's policy — its filter spec, its trigger-absence
-disqualification, and its review formats (carried by :data:`PUSHBACK_MINING_SPEC`'s
+injects cc-steer's policy — its filter spec, its trigger-absence
+disqualification, and its review formats (carried by :data:`STEERING_MINING_SPEC`'s
 :class:`~cc_transcript.mining.ReviewSpec`) — and maps each surviving
 :class:`MiningSignal` from a single :func:`~cc_transcript.mining.mine` pass to a
 :class:`FeedbackCandidate` whose durable
@@ -21,8 +21,8 @@ from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef
 from cc_transcript.mining import FeedbackCandidate, MiningSpec, dedup_key, mine
 
-from cc_pushback.formats import review_spec
-from cc_pushback.spec import PUSHBACK_SPEC
+from cc_steer.formats import review_spec
+from cc_steer.spec import STEERING_SPEC
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -34,13 +34,13 @@ if TYPE_CHECKING:
 type Detector = Callable[[Sequence[TranscriptEvent]], list[FeedbackCandidate]]
 
 DEFAULT_BEFORE = 6
-PUSHBACK_MINING_SPEC = MiningSpec(review=review_spec())
+STEERING_MINING_SPEC = MiningSpec(review=review_spec())
 
 
 def human_authored(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool:
     match sig.evidence["provenance"]:
         case "typed":
-            return keep(events[sig.event_index], PUSHBACK_SPEC)
+            return keep(events[sig.event_index], STEERING_SPEC)
         case "surfaced":
             return True
     raise AssertionError(sig.evidence["provenance"])
@@ -51,9 +51,9 @@ def survives(events: Sequence[TranscriptEvent], sig: MiningSignal) -> bool:
         case "review_comment":
             return human_authored(events, sig)
         case "transcript_message":
-            return keep(events[sig.event_index], PUSHBACK_SPEC) and sig.trigger_index is not None
+            return keep(events[sig.event_index], STEERING_SPEC) and sig.trigger_index is not None
         case "plan_reentry":
-            return keep(events[sig.event_index], PUSHBACK_SPEC)
+            return keep(events[sig.event_index], STEERING_SPEC)
         case _:
             return True
 
@@ -135,7 +135,7 @@ def candidates_from(events: Sequence[TranscriptEvent], signals: Iterable[MiningS
 
 
 def for_detectors(events: Sequence[TranscriptEvent], detectors: frozenset[str]) -> list[FeedbackCandidate]:
-    return candidates_from(events, (sig for sig in mine(events, PUSHBACK_MINING_SPEC) if sig.detector in detectors))
+    return candidates_from(events, (sig for sig in mine(events, STEERING_MINING_SPEC) if sig.detector in detectors))
 
 
 def transcript_messages(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
@@ -159,4 +159,4 @@ def detect(events: Sequence[TranscriptEvent]) -> list[FeedbackCandidate]:
     Returns:
         Every feedback candidate the detectors found, in detector order.
     """
-    return candidates_from(events, mine(events, PUSHBACK_MINING_SPEC))
+    return candidates_from(events, mine(events, STEERING_MINING_SPEC))

@@ -11,16 +11,16 @@ from cc_transcript.corrections import Correction, CorrectionLog
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import DedupKey
 
-from cc_pushback.export import export, split_of
-from cc_pushback.refine import RefinedPair, Refinement
-from cc_pushback.triage import AUDIT_VERSION, JUDGE, PROMPT_VERSION, Verdict
+from cc_steer.export import export, split_of
+from cc_steer.refine import RefinedPair, Refinement
+from cc_steer.triage import AUDIT_VERSION, JUDGE, PROMPT_VERSION, Verdict
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cc_transcript.context import Role
 
-    from cc_pushback.store import FeedbackStore
+    from cc_steer.store import FeedbackStore
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
 
@@ -56,7 +56,7 @@ def verdict(category: str, *, what: str) -> Verdict:
     return Verdict.model_validate({"category": category, "what_claude_did": what, "confidence": 0.9, "rationale": "r"})
 
 
-def correction(uuid: str, *, ts_ms: int, source: str = "cc-pushback", grounded: bool = True) -> Correction:
+def correction(uuid: str, *, ts_ms: int, source: str = "cc-steer", grounded: bool = True) -> Correction:
     return Correction(
         ts_ms=ts_ms,
         session_id=SessionId(TRAIN_SESSION),
@@ -184,8 +184,8 @@ async def seed(store: FeedbackStore) -> None:
     )
     stale = Refinement(
         pairs=[
-            RefinedPair(action="stale a", complaint_verbatim="stale", complaint="stale"),
-            RefinedPair(action="stale b", complaint_verbatim="stale", complaint="stale"),
+            RefinedPair(action="stale a", direction_verbatim="stale", direction="stale"),
+            RefinedPair(action="stale b", direction_verbatim="stale", direction="stale"),
         ]
     )
     await store.record_refinement(DedupKey("k1"), stale, prompt_version=1, model="sonnet")
@@ -193,8 +193,8 @@ async def seed(store: FeedbackStore) -> None:
         pairs=[
             RefinedPair(
                 action="vendored the lib",
-                complaint_verbatim="no dont vendor it",
-                complaint="do not vendor dependencies",
+                direction_verbatim="no dont vendor it",
+                direction="do not vendor dependencies",
             ),
         ]
     )
@@ -252,7 +252,7 @@ async def test_traces_grounded_row_carries_full_lineage(out: Path) -> None:
             {"role": "user", "content": "no dont vendor it"},
             {"role": "assistant", "content": "removed the vendored copy"},
         ],
-        "is_pushback": True,
+        "is_steering": True,
         "category": "wrong_approach",
         "confidence": 0.9,
         "judge_rationale": "r",
@@ -263,8 +263,8 @@ async def test_traces_grounded_row_carries_full_lineage(out: Path) -> None:
             {
                 "pair_index": 0,
                 "action": "vendored the lib",
-                "complaint_verbatim": "no dont vendor it",
-                "complaint": "do not vendor dependencies",
+                "direction_verbatim": "no dont vendor it",
+                "direction": "do not vendor dependencies",
             }
         ],
         "evidence": [
@@ -306,7 +306,7 @@ async def test_traces_grounded_row_carries_full_lineage(out: Path) -> None:
 
 async def test_traces_noise_row_has_empty_pairs_and_evidence(out: Path) -> None:
     trace = {row["id"]: row for row in rows(out, "traces", "train")}["k2"]
-    assert trace["is_pushback"] is False and trace["category"] == "status_update"
+    assert trace["is_steering"] is False and trace["category"] == "status_update"
     assert trace["pairs"] == [] and trace["evidence"] == []
     assert trace["auditor_category"] is None
 
@@ -326,7 +326,7 @@ async def test_traces_review_comment_meta_carries_file_line_and_format(out: Path
     }
 
 
-async def test_sft_contract_speaks_the_verbatim_pushback(out: Path) -> None:
+async def test_sft_contract_speaks_the_verbatim_steering(out: Path) -> None:
     row = rows(out, "sft", "train")[0]
     assert set(row) == {"prompt", "completion", "id", "category"}
     assert row["id"] == "k1" and row["category"] == "wrong_approach"
@@ -369,7 +369,7 @@ async def test_dpo_dedupes_ledger_evidence_shared_by_dual_detected_events(out: P
     assert [row["id"] for row in rows(out, "dpo", "train")] == ["k1"]
 
 
-async def test_kto_contract_labels_no_pushback_as_desirable(out: Path) -> None:
+async def test_kto_contract_labels_no_steering_as_desirable(out: Path) -> None:
     kto = {row["id"]: row for row in rows(out, "kto", "train")}
     assert set(kto["k1"]) == {"prompt", "completion", "label", "id", "category"}
     assert kto["k1"]["label"] is False  # the user pushed back: undesirable
@@ -401,7 +401,7 @@ async def test_dataset_card_documents_configs_categories_and_splits(out: Path) -
     assert "int(sha256(session_id), 16) % 10 == 0" in card
     assert "3 train / 1 test" in card
     assert f"judge v{PROMPT_VERSION}" in card and f"auditor v{AUDIT_VERSION}" in card
-    assert "2 pushback vs 2 noise (50% pushback)" in card
+    assert "2 steering vs 2 noise (50% steering)" in card
 
 
 async def test_export_survives_a_corpus_with_zero_judged_events(store: FeedbackStore, tmp_path: Path) -> None:
@@ -412,7 +412,7 @@ async def test_export_survives_a_corpus_with_zero_judged_events(store: FeedbackS
         assert rows(report.out, config, "train") == [] and rows(report.out, config, "test") == []
     card = (report.out / "README.md").read_text()
     assert "0 train / 0 test" in card
-    assert "0 pushback vs 0 noise at" in card
+    assert "0 steering vs 0 noise at" in card
 
 
 async def test_export_push_uploads_every_config_and_the_card(
