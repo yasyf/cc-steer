@@ -19,13 +19,13 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "anyio>=4.4",
-    "cc-transcript>=8,<9",
+    "cc-transcript>=8.1,<9",
     "click>=8",
     "datasets>=3.2",
     "fastapi>=0.115",
     "huggingface-hub>=0.27",
     "pydantic>=2",
-    "spawnllm>=0.5.1,<0.6",
+    "spawnllm>=0.5.4,<0.6",
     "uvicorn>=0.30",
 ]
 
@@ -108,5 +108,5 @@ select = ["E", "F", "I", "UP"]
 
 [dependency-groups]
 docs = [
-    "great-docs>=0.13,<0.14",
+    "great-docs>=0.14",
 ]
