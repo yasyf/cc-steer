@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0]
+
 ### Added
 - New `export` command ships the steering lineage as a HuggingFace dataset.
   The canonical `traces` config carries one row per judged event, and three
