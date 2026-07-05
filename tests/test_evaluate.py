@@ -83,7 +83,7 @@ def test_load_golden_maps_labels_to_bool(tmp_path: Path) -> None:
 @pytest.mark.integration
 async def test_evaluate_end_to_end(store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     await seed(store)
-    rows = await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model="sonnet")
+    rows = await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION)
     keys = [DedupKey(str(row["dedup_key"])) for row in rows]
     accepted, rejected = keys[0], keys[1]
     await store.record_verdict(
@@ -133,7 +133,7 @@ async def test_evaluate_end_to_end(store: FeedbackStore, tmp_path: Path, monkeyp
 @pytest.mark.integration
 async def test_flip_report_counts_only_side_changes(store: FeedbackStore) -> None:
     await seed(store)
-    rows = await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet")
+    rows = await store.unjudged(role=JUDGE, prompt_version=1)
     keys = [DedupKey(str(row["dedup_key"])) for row in rows]
     flipper, stayer = keys[0], keys[1]
     await store.record_verdict(

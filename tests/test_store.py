@@ -40,9 +40,10 @@ CREATE TABLE IF NOT EXISTS triage (
   what_claude_did TEXT NOT NULL,
   confidence REAL NOT NULL,
   rationale TEXT NOT NULL,
+  canonical_key TEXT,
   fidelity TEXT NOT NULL CHECK(fidelity IN ('full','summary')),
   judged_at TEXT NOT NULL,
-  UNIQUE(dedup_key, role, prompt_version, model)
+  UNIQUE(dedup_key, role, prompt_version)
 );
 CREATE INDEX IF NOT EXISTS idx_triage_dedup ON triage(dedup_key);
 DROP VIEW IF EXISTS training_pairs;
@@ -95,7 +96,7 @@ def test_feedback_ddl_extends_the_platform_table_with_origin_path() -> None:
 
 async def seeded_keys(store: FeedbackStore) -> list[DedupKey]:
     await store.record_file_scan(FILE, 1.0, sample_candidates())
-    rows = await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet")
+    rows = await store.unjudged(role=JUDGE, prompt_version=1)
     return [DedupKey(str(row["dedup_key"])) for row in rows]
 
 
@@ -218,17 +219,30 @@ async def test_record_verdict_is_idempotent(store: FeedbackStore) -> None:
 
 
 @pytest.mark.integration
-async def test_unjudged_honors_version_model_and_limit(store: FeedbackStore) -> None:
+async def test_unjudged_honors_version_and_limit(store: FeedbackStore) -> None:
     keys = await seeded_keys(store)
     await store.record_verdict(
         keys[0], verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
     )
-    remaining = await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet")
+    remaining = await store.unjudged(role=JUDGE, prompt_version=1)
     assert keys[0] not in {str(row["dedup_key"]) for row in remaining}
     assert len(remaining) == len(keys) - 1
-    assert len(await store.unjudged(role=JUDGE, prompt_version=2, model="sonnet")) == len(keys)
-    assert len(await store.unjudged(role=JUDGE, prompt_version=1, model="haiku")) == len(keys)
-    assert len(await store.unjudged(role=JUDGE, prompt_version=1, model="sonnet", limit=1)) == 1
+    assert len(await store.unjudged(role=JUDGE, prompt_version=2)) == len(keys)
+    assert len(await store.unjudged(role=JUDGE, prompt_version=1, limit=1)) == 1
+
+
+@pytest.mark.integration
+async def test_verdict_identity_ignores_model(store: FeedbackStore) -> None:
+    key = (await seeded_keys(store))[0]
+    await store.record_verdict(
+        key, verdict("wrong_approach"), role=JUDGE, prompt_version=1, model="sonnet", fidelity="full"
+    )
+    # model is provenance, not identity: a second verdict at the same
+    # (dedup_key, role, prompt_version) upserts in place instead of adding a row.
+    await store.record_verdict(key, verdict("new_task"), role=JUDGE, prompt_version=1, model="haiku", fidelity="full")
+    cur = await store.store.conn.execute("SELECT model, category FROM triage WHERE dedup_key = ?", (key,))
+    assert [(row["model"], row["category"]) async for row in cur] == [("sonnet", "wrong_approach")]
+    assert key not in {str(row["dedup_key"]) for row in await store.unjudged(role=JUDGE, prompt_version=1)}
 
 
 @pytest.mark.integration

@@ -4,7 +4,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-07-05
+
+### Changed
+- Raised the `cc-transcript` floor to 9.0.0. Verdict identity drops `model`: a
+  triage verdict is now unique per `(dedup_key, role, prompt_version)`, with
+  `model` kept as provenance only, so switching the judge backend no longer
+  re-judges the whole corpus. The `triage` table gains a `canonical_key`
+  column; steering triage names no durable rule, so it stays null.
 
 ## [0.9.0]
 

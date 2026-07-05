@@ -276,6 +276,11 @@ class Verdict(BaseModel):
         """Alias satisfying the judge package's ``VerdictLike`` protocol."""
         return self.what_claude_did
 
+    @property
+    def canonical_key(self) -> str | None:
+        """Satisfies the judge package's ``VerdictLike`` protocol; steering triage names no durable rule."""
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class TriageReport:
@@ -400,9 +405,7 @@ async def triage(
         The pass's judged/failed/pending counts.
     """
     model = resolved_model(tier)
-    rows = await store.unjudged(
-        role=JUDGE, prompt_version=PROMPT_VERSION, model=model, limit=limit, refresh_summary=refresh_summary
-    )
+    rows = await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, limit=limit, refresh_summary=refresh_summary)
     fidelities: dict[str, Fidelity] = {}
     judged, failed = await run_verdicts(
         rows,
@@ -411,7 +414,7 @@ async def triage(
         persist_verdict(store, role=JUDGE, prompt_version=PROMPT_VERSION, model=model, fidelities=fidelities),
         concurrency=concurrency,
     )
-    pending = len(await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, model=model))
+    pending = len(await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION))
     return TriageReport(judged=judged, failed=failed, pending=pending)
 
 

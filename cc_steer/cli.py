@@ -202,11 +202,7 @@ async def triage(
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        pending = len(
-            await store.unjudged(
-                role=JUDGE, prompt_version=PROMPT_VERSION, model=resolved_model(tier), refresh_summary=refresh_summary
-            )
-        )
+        pending = len(await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION, refresh_summary=refresh_summary))
         click.echo(f"pending: {pending} rows at prompt v{PROMPT_VERSION} ({resolved_model(tier)})")
         report = await run_triage(
             store, tier=tier, limit=limit, concurrency=concurrency, refresh_summary=refresh_summary

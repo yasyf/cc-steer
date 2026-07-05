@@ -19,11 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # TEMPORARY: satisfies the ../cc-transcript path override in pyproject.toml
-      # (unreleased cc-transcript v8) — drop alongside the override.
-      - name: Clone cc-transcript sibling
-        run: git clone --depth 1 https://github.com/yasyf/cc-transcript ../cc-transcript
-
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0
         with:
@@ -44,8 +39,5 @@ jobs:
           uv build
           rm -rf .wheel-smoke
           uv venv --seed .wheel-smoke
-          # TEMPORARY: cc-transcript>=8 is not on PyPI yet — seed it from the
-          # sibling clone so the wheel's dependencies resolve.
-          uv pip install --python .wheel-smoke/bin/python ../cc-transcript
           uv pip install --python .wheel-smoke/bin/python dist/*.whl
           .wheel-smoke/bin/cc-steer --help
