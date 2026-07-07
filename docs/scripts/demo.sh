@@ -6,11 +6,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-out="$(mktemp -t cc-steer-demo)"
-trap 'rm -f "$out"' EXIT
+raw="$(mktemp -t cc-steer-demo)"
+out="${raw}.ansi"
+trap 'rm -f "$raw" "$out"' EXIT
 
-printf '$ uvx cc-steer stats\n' >"$out"
-uvx cc-steer stats >>"$out"
+printf '$ uvx cc-steer stats\n' >"$raw"
+env -u UV_EXCLUDE_NEWER uvx cc-steer stats >>"$raw"
+
+# click.echo emits no ANSI codes, so colorize the key: value layout with bat.
+bat --plain --color=always --language yaml "$raw" >"$out"
 
 freeze "$out" \
   --language ansi \
