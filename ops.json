@@ -1,1 +1,1 @@
-{"v":1,"lamport":1,"ops":[{"kind":"create_log","nonce":"9371d6e2e89362dd280eab5c3d342239","title":"cc-steer pipeline runs","tags":["pipeline"],"anchors":[]}]}
+{"v":1,"lamport":2,"ops":[{"kind":"append_entry","text":"scan: scanned 407 files, 52 new rows | triage: judged 5 (0 failed), 47 pending | refine: refined 2 into 3 pairs (0 failed), 0 pending | enrich: enriched 5 (+0 corrections), 3030 pending | export: traces 4421  sft 3527  dpo 543  kto 4421"}]}
