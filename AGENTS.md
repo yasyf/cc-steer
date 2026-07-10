@@ -1,4 +1,4 @@
-<!-- cc-guides 0.1.8 src=AGENTS.src.md | GENERATED — do not edit: change AGENTS.src.md and run 'cc-guides render'. Everything below is in force. -->
+<!-- cc-guides 0.1.11 src=.claude/fragments/AGENTS.md fragments=cc-skills@a91b043bdbd2 | GENERATED — do not edit: edit .claude/fragments/AGENTS.md/ and run 'cc-guides render'. Everything below is in force. -->
 # cc-steer Development Guide
 
 Learn your steering style from the corrections, directions, and choices you've given Claude Code, and replicate it with a language model. Published to PyPI as `cc-steer`; the CLI is `cc-steer`, run as `uvx cc-steer`.

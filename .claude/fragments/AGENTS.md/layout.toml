@@ -1,0 +1,5 @@
+fragments = [
+  "cc-steer-development-guide",
+  "cc-skills:ccx",
+  "python-style",
+]
