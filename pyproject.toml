@@ -19,7 +19,7 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "anyio>=4.4",
-    "cc-transcript>=9,<10",
+    "cc-transcript>=10,<11",
     "click>=8",
     "datasets>=3.2",
     "fastapi>=0.115",

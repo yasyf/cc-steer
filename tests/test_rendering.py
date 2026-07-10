@@ -6,9 +6,11 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_steer.rendering import (
     DRAFT_CHAR_CAP,
     NO_STEER,
+    ask_block,
     context_turns,
     gate_text,
     strip_think,
+    structural_asks,
     tail_messages,
     truncated,
     watcher_prompt,
@@ -112,3 +114,62 @@ def test_strip_think_removes_the_template_scaffold() -> None:
     assert strip_think("<think>\n\n</think>\n\nNO_STEER") == "NO_STEER"
     assert strip_think("<think>plan</think>do the thing") == "do the thing"
     assert strip_think("plain steer") == "plain steer"
+
+
+CLIPPED_ASK = (
+    "assistant: on it\n"
+    "AskUserQuestion([{'question': 'Which corpus should the clean baseline re-scan cover?', "
+    "'header': 'Corpus', 'multiSelect': False, 'options': [{'label': 'Local only'}, "
+    "{'label': 'Local + remote mirror (Recommended)'}, {'label': 'Remote onl…(+312ch))"
+)
+
+
+def test_ask_block_is_the_canonical_shape() -> None:
+    block = ask_block(
+        "Which corpus?", header="Corpus", options=("Local only", "Both"), recommended="Both"
+    )
+    assert block == "[assistant asked: Corpus] Which corpus?\n- Local only\n- Both\n(recommended: Both)"
+    assert ask_block("Bare question") == "[assistant asked] Bare question"
+
+
+def test_structural_asks_rewrites_a_clipped_fragment() -> None:
+    rewritten = structural_asks(CLIPPED_ASK)
+    assert "AskUserQuestion(" not in rewritten
+    expected_head = "assistant: on it\n[assistant asked: Corpus] Which corpus should the clean baseline re-scan cover?"
+    assert rewritten.startswith(expected_head)
+    assert "- Local only" in rewritten
+    assert "- Local + remote mirror" in rewritten
+    assert "(recommended: Local + remote mirror)" in rewritten
+    assert "Remote onl" not in rewritten  # the option the clip cut mid-string is dropped
+
+
+def test_structural_asks_leaves_plain_text_and_unparseable_fragments_alone() -> None:
+    assert structural_asks("assistant: no questions here") == "assistant: no questions here"
+    assert structural_asks("AskUserQuestion(<clipped before any field>") == "AskUserQuestion(<clipped before any field>"
+
+
+def test_structural_asks_handles_multi_question_asks() -> None:
+    fragment = (
+        "AskUserQuestion([{'question': 'First?', 'header': 'A', 'options': [{'label': 'x'}]}, "
+        "{'question': 'Second?', 'header': 'B', 'options': [{'label': 'y'}]}])"
+    )
+    rewritten = structural_asks(fragment)
+    assert "[assistant asked: A] First?" in rewritten
+    assert "[assistant asked: B] Second?" in rewritten
+    # option-to-question association is ambiguous under the clip; options are omitted
+    assert "- x" not in rewritten
+
+
+def test_watcher_prompt_v2_rewrites_asks_and_v1_stays_raw() -> None:
+    window = ContextWindow(
+        anchor=EventRef(SessionId("s"), EventUuid("a0")),
+        before=(TurnRef(role="assistant", refs=(), preview=CLIPPED_ASK, tool_digests=()),),
+        trigger=None,
+        after=(),
+        fidelity="full",
+        preview_chars=200,
+    )
+    assert watcher_prompt(window)[0]["content"] == CLIPPED_ASK
+    assert watcher_prompt(window, render_version=1)[0]["content"] == CLIPPED_ASK
+    v2 = watcher_prompt(window, render_version=2)[0]["content"]
+    assert "[assistant asked: Corpus]" in v2 and "AskUserQuestion(" not in v2

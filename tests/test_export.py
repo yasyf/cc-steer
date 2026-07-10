@@ -11,7 +11,7 @@ from cc_transcript.corrections import Correction, CorrectionLog
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import DedupKey
 
-from cc_steer.export import export, split_of
+from cc_steer.export import ask_message_of, export, split_of, watcher_negative, watcher_positive
 from cc_steer.refine import RefinedPair, Refinement
 from cc_steer.triage import AUDIT_VERSION, JUDGE, PROMPT_VERSION, Verdict
 
@@ -459,3 +459,92 @@ async def test_export_push_failure_propagates_after_local_write(
     for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
         assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
     assert (dataset_dir / "README.md").is_file()
+
+
+def trace_for(
+    *,
+    source_kind: str = "question_answer",
+    meta: dict[str, object] | None = None,
+    context: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": "k-qa",
+        "session_id": TRAIN_SESSION,
+        "event_uuid": "u9",
+        "project": "p",
+        "occurred_at": "2026-01-01T00:00:00",
+        "cc_version": "2.0.1",
+        "source_kind": source_kind,
+        "context": context if context is not None else [{"role": "assistant", "content": ""}],
+        "agent_action": None,
+        "what_claude_did": "asked a question",
+        "user_message": "Per-scope files + ATTACH (Recommended)",
+        "aftermath": [],
+        "is_steering": True,
+        "category": "direction",
+        "confidence": 0.9,
+        "judge_rationale": "r",
+        "judge_model": "opus",
+        "fidelity": "full",
+        "auditor_category": None,
+        "pairs": [{"action": "a", "direction": "use per-scope files with ATTACH", "quote": "q"}],
+        "evidence": [],
+        "split": "train",
+        "meta": json.dumps(
+            {"signal": SIGNAL}
+            | (
+                meta
+                if meta is not None
+                else {
+                    "question": "How should the db attach?",
+                    "header": "Storage",
+                    "recommended_pick": "Per-scope files + ATTACH",
+                }
+            )
+        ),
+    }
+
+
+class TestWatcherV2:
+    def test_qa_positive_appends_the_payload_ask_block(self) -> None:
+        row = watcher_positive(trace_for())
+        assert row["source_kind"] == "question_answer"
+        assert row["session_id"] == TRAIN_SESSION
+        ask = row["prompt"][-1]
+        assert ask["role"] == "assistant"
+        assert ask["content"].startswith("[assistant asked: Storage] How should the db attach?")
+        assert "(recommended: Per-scope files + ATTACH)" in ask["content"]
+
+    def test_the_users_pick_never_reaches_the_prompt(self) -> None:
+        pick = "THE SECRET PICK"
+        trace = trace_for(meta={"question": "Q?", "picked_labels": [pick], "option_pick": pick})
+        row = watcher_positive(trace)
+        assert all(pick not in m["content"] for m in row["prompt"])
+
+    def test_positive_rewrites_clipped_ask_previews_in_context(self) -> None:
+        preview = "AskUserQuestion([{'question': 'Pick one?', 'header': 'H', 'options': [{'label': 'a…(+50ch))"
+        context = [{"role": "assistant", "content": preview}]
+        row = watcher_positive(trace_for(source_kind="transcript_message", meta={}, context=context))
+        assert row["prompt"][0]["content"] == "[assistant asked: H] Pick one?"
+        # the context already carries the ask, so nothing is appended
+        assert len(row["prompt"]) == 1
+
+    def test_qa_without_payload_question_appends_nothing(self) -> None:
+        row = watcher_positive(trace_for(meta={}))
+        assert row["prompt"] == [{"role": "assistant", "content": ""}]
+        assert ask_message_of(trace_for(meta={})) is None
+
+    def test_negative_carries_source_kind_and_session_id(self) -> None:
+        sample = {
+            "sample_key": "s1",
+            "kind": "random_negative",
+            "offset_turns": 0,
+            "category": "",
+            "source_kind": "",
+            "session_id": TRAIN_SESSION,
+            "window_json": window(TRAIN_SESSION, "u5", before=(turn("assistant", "did a thing"),)),
+        }
+        row = watcher_negative(sample)
+        assert row is not None
+        assert (row["source_kind"], row["session_id"]) == ("", TRAIN_SESSION)
+        assert row["label"] is False

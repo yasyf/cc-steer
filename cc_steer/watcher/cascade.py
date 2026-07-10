@@ -209,7 +209,7 @@ class Cascade:
         text = gate_text(window)
         if (score := self.gate.score(text)) < self.config.gate_threshold:
             return None
-        prompt = watcher_prompt(window)
+        prompt = watcher_prompt(window, render_version=self.config.render_version)
         drafted = await self.drafter.draft(prompt)
         draft = steer_or_none(drafted.text)
         exemplars: list[Exemplar] = []

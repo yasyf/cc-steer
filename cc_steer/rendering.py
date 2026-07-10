@@ -86,9 +86,89 @@ def context_turns(window: ContextWindow) -> tuple[TurnRef, ...]:
     return window.before
 
 
-def watcher_prompt(window: ContextWindow) -> list[Message]:
-    """The generative watcher's prompt: the context turns as chat messages."""
-    return messages(context_turns(window))
+def watcher_prompt(window: ContextWindow, *, render_version: int = 1) -> list[Message]:
+    """The generative watcher's prompt: the context turns as chat messages.
+
+    ``render_version`` is the training contract a watcher model was built on,
+    carried in its registry metadata: v1 is the raw capture-time previews; v2
+    rewrites ``AskUserQuestion(...)`` preview fragments into structural ask
+    blocks (:func:`structural_asks`). Promoting a model flips the live
+    rendering with it — never change versions independently of the model.
+    """
+    rendered = messages(context_turns(window))
+    if render_version >= 2:
+        return structural_ask_messages(rendered)
+    return rendered
+
+
+# The capture-time preview of an AskUserQuestion turn is the tool call's
+# clipped single-line repr: ``AskUserQuestion([{'question': ..., 'header': ...,
+# 'options': [{'label': ...}, ...]}])``, possibly ending in clip()'s
+# ``…(+Nch)`` marker. Field regexes tolerate the clip: whatever survived is
+# rendered, whatever was cut is dropped.
+_ASK_FRAGMENT = re.compile(r"AskUserQuestion\(.*", re.MULTILINE)
+_ASK_QUESTION = re.compile(r"'question':\s*'((?:[^'\\]|\\.)*)'")
+_ASK_HEADER = re.compile(r"'header':\s*'((?:[^'\\]|\\.)*)'")
+_ASK_LABEL = re.compile(r"'label':\s*'((?:[^'\\]|\\.)*)'")
+_RECOMMENDED_SUFFIX = " (Recommended)"
+
+
+def ask_block(question: str, *, header: str = "", options: Sequence[str] = (), recommended: str = "") -> str:
+    """The canonical structural rendering of one assistant ask.
+
+    The single formatter both render paths share — the preview rewrite
+    (:func:`structural_asks`) and the export's payload-derived block — so the
+    watcher sees one shape for "the assistant asked the user something"
+    regardless of which side rendered it. Never pass the user's pick; the
+    answer is the training label.
+    """
+    tag = f"[assistant asked: {header}]" if header else "[assistant asked]"
+    lines = [f"{tag} {question}".rstrip()]
+    lines.extend(f"- {option}" for option in options)
+    if recommended:
+        lines.append(f"(recommended: {recommended})")
+    return "\n".join(lines)
+
+
+def structural_asks(content: str) -> str:
+    """Rewrite every ``AskUserQuestion(...)`` preview fragment into ask blocks.
+
+    Tolerant of the capture-time clip: fields that survived render, fields
+    that were cut are omitted, and a fragment with no recoverable question is
+    left untouched.
+    """
+    return _ASK_FRAGMENT.sub(_rewrite_fragment, content)
+
+
+def structural_ask_messages(rendered: Sequence[Message]) -> list[Message]:
+    return [{"role": message["role"], "content": structural_asks(message["content"])} for message in rendered]
+
+
+def _rewrite_fragment(match: re.Match[str]) -> str:
+    fragment = match.group(0)
+    questions = [_unescape(text) for text in _ASK_QUESTION.findall(fragment)]
+    if not questions:
+        return fragment
+    headers = [_unescape(text) for text in _ASK_HEADER.findall(fragment)]
+    labels = [_unescape(text) for text in _ASK_LABEL.findall(fragment)]
+    options = [label.removesuffix(_RECOMMENDED_SUFFIX) for label in labels]
+    recommended = next(
+        (label.removesuffix(_RECOMMENDED_SUFFIX) for label in labels if label.endswith(_RECOMMENDED_SUFFIX)), ""
+    )
+    blocks = [
+        ask_block(
+            question,
+            header=headers[index] if index < len(headers) else "",
+            options=options if len(questions) == 1 else (),
+            recommended=recommended if len(questions) == 1 else "",
+        )
+        for index, question in enumerate(questions)
+    ]
+    return "\n".join(blocks)
+
+
+def _unescape(text: str) -> str:
+    return text.replace("\\'", "'").replace("\\\\", "\\")
 
 
 def gate_text(window: ContextWindow) -> str:

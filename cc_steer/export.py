@@ -30,11 +30,13 @@ from cc_steer.rendering import (
     NO_STEER,
     Message,
     agent_action_of,
+    ask_block,
     assistant_message,
     gate_text,
     messages,
     render_edit,
     split_of,
+    structural_ask_messages,
     watcher_prompt,
 )
 from cc_steer.report import project_label
@@ -52,6 +54,10 @@ __all__ = ["ExportReport", "export"]
 
 SPLITS = ("train", "test")
 REVIEW_META_KEYS = ("file", "line_start", "line_end", "format")
+# The assistant-authored half of a question_answer payload — the ask the
+# watcher may be conditioned on. The user's pick (picked_labels/option_pick)
+# is the label and must never join model input.
+ASK_META_KEYS = ("question", "header", "recommended_pick")
 DPO_SIDES = ("faulted_old", "faulted_new", "correcting_old", "correcting_new")
 
 TRACES_QUERY = """
@@ -262,6 +268,8 @@ class WatcherRow(TypedDict):
     label: bool
     id: str
     category: str
+    source_kind: str
+    session_id: str
     split: str
 
 
@@ -323,6 +331,7 @@ def trace_meta(row: Row) -> str:
     return json.dumps(
         {"signal": payload["signal"]}
         | {key: payload[key] for key in REVIEW_META_KEYS if key in payload}
+        | {key: payload[key] for key in ASK_META_KEYS if key in payload}
         | {
             "prompt_version": PROMPT_VERSION,
             "audit_version": AUDIT_VERSION,
@@ -426,15 +435,44 @@ def gate_row(row: Row) -> GateRow | None:
     }
 
 
+def ask_message_of(trace: Trace) -> Message | None:
+    """The payload-derived structural ask for a question_answer trace, or None.
+
+    Recovers the assistant's question for captures whose window never carried
+    it (the empty-context defect: the ask lives only in the label-bearing
+    trigger turn). Only assistant-authored fields render — question, header,
+    recommended pick — never the user's answer.
+    """
+    if trace["source_kind"] != "question_answer":
+        return None
+    meta = json.loads(trace["meta"])
+    question = str(meta.get("question") or "")
+    if not question:
+        return None
+    recommended = meta.get("recommended_pick")
+    block = ask_block(
+        question,
+        header=str(meta.get("header") or ""),
+        recommended=str(recommended) if recommended else "",
+    )
+    return {"role": "assistant", "content": block}
+
+
 def watcher_positive(trace: Trace) -> WatcherRow:
     direction = "\n".join(pair["direction"] for pair in trace["pairs"]) or trace["user_message"]
+    prompt = structural_ask_messages(trace["context"])
+    ask = ask_message_of(trace)
+    if ask is not None and not any("[assistant asked" in message["content"] for message in prompt):
+        prompt = [*prompt, ask]
     return {
-        "prompt": trace["context"],
+        "prompt": prompt,
         "completion": assistant_message(direction),
         "verbatim": trace["user_message"],
         "label": True,
         "id": trace["id"],
         "category": trace["category"],
+        "source_kind": trace["source_kind"],
+        "session_id": trace["session_id"],
         "split": trace["split"],
     }
 
@@ -445,12 +483,14 @@ def watcher_negative(row: Row) -> WatcherRow | None:
     except (ValueError, KeyError):
         return None
     return {
-        "prompt": watcher_prompt(window),
+        "prompt": watcher_prompt(window, render_version=2),
         "completion": assistant_message(NO_STEER),
         "verbatim": "",
         "label": False,
         "id": str(row["sample_key"]),
         "category": str(row["category"]),
+        "source_kind": str(row["source_kind"]),
+        "session_id": str(row["session_id"]),
         "split": split_of(str(row["session_id"])),
     }
 
@@ -557,6 +597,8 @@ def config_features() -> dict[str, Features]:
                 "completion": message(),
                 "verbatim": Value("string"),
                 "label": Value("bool"),
+                "source_kind": Value("string"),
+                "session_id": Value("string"),
                 "split": Value("string"),
             }
             | keys
