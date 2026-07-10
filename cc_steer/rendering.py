@@ -110,6 +110,8 @@ _ASK_FRAGMENT = re.compile(r"AskUserQuestion\(.*", re.MULTILINE)
 _ASK_QUESTION = re.compile(r"'question':\s*'((?:[^'\\]|\\.)*)'")
 _ASK_HEADER = re.compile(r"'header':\s*'((?:[^'\\]|\\.)*)'")
 _ASK_LABEL = re.compile(r"'label':\s*'((?:[^'\\]|\\.)*)'")
+_ASK_PARTIAL_QUESTION = re.compile(r"'question':\s*'((?:[^'\\]|\\.)*)$")
+_CLIP_TAIL = re.compile(r"…\(\+\d+ch\)\)*$")
 _RECOMMENDED_SUFFIX = " (Recommended)"
 
 
@@ -148,6 +150,10 @@ def _rewrite_fragment(match: re.Match[str]) -> str:
     fragment = match.group(0)
     questions = [_unescape(text) for text in _ASK_QUESTION.findall(fragment)]
     if not questions:
+        # The clip cut the (first) question mid-string: salvage what survived.
+        partial = _ASK_PARTIAL_QUESTION.search(_CLIP_TAIL.sub("", fragment))
+        if partial is not None and partial.group(1).strip():
+            return ask_block(f"{_unescape(partial.group(1))}…")
         return fragment
     headers = [_unescape(text) for text in _ASK_HEADER.findall(fragment)]
     labels = [_unescape(text) for text in _ASK_LABEL.findall(fragment)]

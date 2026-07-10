@@ -148,6 +148,12 @@ def test_structural_asks_leaves_plain_text_and_unparseable_fragments_alone() -> 
     assert structural_asks("AskUserQuestion(<clipped before any field>") == "AskUserQuestion(<clipped before any field>"
 
 
+def test_structural_asks_salvages_a_question_the_clip_cut_mid_string() -> None:
+    fragment = "AskUserQuestion([{'question': 'The lineage dashboard already exists. What does updated web…(+1262ch))"
+    rewritten = structural_asks(fragment)
+    assert rewritten == "[assistant asked] The lineage dashboard already exists. What does updated web…"
+
+
 def test_structural_asks_handles_multi_question_asks() -> None:
     fragment = (
         "AskUserQuestion([{'question': 'First?', 'header': 'A', 'options': [{'label': 'x'}]}, "
