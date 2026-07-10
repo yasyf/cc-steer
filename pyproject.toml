@@ -24,12 +24,25 @@ dependencies = [
     "datasets>=3.2",
     "fastapi>=0.115",
     "huggingface-hub>=0.27",
+    "numpy>=2",
     "pydantic>=2",
     "spawnllm>=0.5.4,<0.6",
     "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
+embed = [
+    "python-dotenv>=1.0",
+    "sentence-transformers>=3",
+    "voyageai>=0.3.7",
+]
+gate = [
+    "scikit-learn>=1.5",
+]
+mlx = [
+    "mlx-lm>=0.31.3",
+    "transformers>=5.12,<5.13",
+]
 dev = [
     "pytest>=8.0",
     "ty>=0.0.44",
@@ -55,6 +68,9 @@ build-backend = "uv_build"
 # scope lock resolution to the platforms it actually supports.
 [tool.uv]
 environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+
+[tool.uv.sources]
+cc-transcript = { path = "../cc-transcript", editable = true }
 
 [tool.uv.build-backend]
 module-name = "cc_steer"

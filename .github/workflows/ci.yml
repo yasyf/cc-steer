@@ -25,8 +25,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache-dependency-glob: uv.lock
 
-      - name: Sync (dev)
-        run: uv sync --extra dev
+      - name: Sync (dev + gate)
+        run: uv sync --extra dev --extra gate
 
       - name: Type check (ty)
         run: uv run ty check cc_steer

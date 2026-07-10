@@ -220,6 +220,8 @@ async def out(store: FeedbackStore, tmp_path: Path) -> Path:
         "sft": {"train": 1, "test": 1},
         "dpo": {"train": 1, "test": 0},
         "kto": {"train": 3, "test": 1},
+        "gate": {"train": 0, "test": 0},
+        "watcher": {"train": 1, "test": 1},
     }
     assert report.pushed is False
     return report.out
@@ -406,9 +408,10 @@ async def test_dataset_card_documents_configs_categories_and_splits(out: Path) -
 
 async def test_export_survives_a_corpus_with_zero_judged_events(store: FeedbackStore, tmp_path: Path) -> None:
     report = await export(store, out=tmp_path / "dataset")
-    assert report.counts == {config: {"train": 0, "test": 0} for config in ("traces", "sft", "dpo", "kto")}
+    configs = ("traces", "sft", "dpo", "kto", "gate", "watcher")
+    assert report.counts == {config: {"train": 0, "test": 0} for config in configs}
     assert report.pushed is False
-    for config in ("traces", "sft", "dpo", "kto"):
+    for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
         assert rows(report.out, config, "train") == [] and rows(report.out, config, "test") == []
     card = (report.out / "README.md").read_text()
     assert "0 train / 0 test" in card
@@ -429,8 +432,8 @@ async def test_export_push_uploads_every_config_and_the_card(
     await seed(store)
     report = await export(store, out=tmp_path / "dataset", push_to="u/r")
     assert report.pushed is True
-    assert len(pushes) == 4
-    assert {push["config_name"] for push in pushes} == {"traces", "sft", "dpo", "kto"}
+    assert len(pushes) == 6
+    assert {push["config_name"] for push in pushes} == {"traces", "sft", "dpo", "kto", "gate", "watcher"}
     assert all(push["repo_id"] == "u/r" and push["private"] is True for push in pushes)
     assert uploads == [
         {
@@ -453,6 +456,6 @@ async def test_export_push_failure_propagates_after_local_write(
     dataset_dir = tmp_path / "dataset"
     with pytest.raises(RuntimeError, match="hub is down"):
         await export(store, out=dataset_dir, push_to="u/r")
-    for config in ("traces", "sft", "dpo", "kto"):
+    for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
         assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
     assert (dataset_dir / "README.md").is_file()

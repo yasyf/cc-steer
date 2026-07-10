@@ -31,10 +31,12 @@ if TYPE_CHECKING:
     from cc_transcript.corrections import CorrectionLog
     from cc_transcript.mining import DedupKey, FeedbackCandidate
 
+    from cc_steer.negatives import GateSample
     from cc_steer.refine import Refinement
 
 __all__ = [
     "FEEDBACK_DDL",
+    "GATE_DDL",
     "REFINE_DDL",
     "TRIAGE_DDL",
     "FeedbackStore",
@@ -148,6 +150,47 @@ INSERT OR IGNORE INTO refinement (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+GATE_DDL = """
+CREATE TABLE IF NOT EXISTS gate_sample (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sample_key TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  dedup_key TEXT,
+  session_id TEXT NOT NULL,
+  anchor_uuid TEXT NOT NULL,
+  occurred_at TEXT,
+  offset_turns INTEGER NOT NULL DEFAULT 0,
+  window_json TEXT NOT NULL,
+  seed INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gate_sample_kind ON gate_sample(kind);
+CREATE INDEX IF NOT EXISTS idx_gate_sample_session ON gate_sample(session_id);
+CREATE TABLE IF NOT EXISTS exemplar_embedding (
+  dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
+  model TEXT NOT NULL,
+  text_digest TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  vector BLOB NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(dedup_key, model)
+);
+"""
+
+INSERT_GATE_SAMPLE = """
+INSERT OR IGNORE INTO gate_sample (
+  sample_key, kind, dedup_key, session_id, anchor_uuid, occurred_at, offset_turns, window_json, seed, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+INSERT_EMBEDDING = """
+INSERT INTO exemplar_embedding (dedup_key, model, text_digest, dim, vector, created_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(dedup_key, model) DO UPDATE SET
+  text_digest = excluded.text_digest, dim = excluded.dim,
+  vector = excluded.vector, created_at = excluded.created_at
+"""
+
 CANDIDATES_QUERY = f"""
 WITH judge_flip AS (
   SELECT dedup_key, COUNT(DISTINCT is_steering) > 1 AS flipped
@@ -239,7 +282,7 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     @classmethod
     async def open(cls, path: Path) -> Self:
         """Opens (creating if needed) the feedback database at ``path``."""
-        return cls(await FileStateStore.open(path, extra_schema=FEEDBACK_DDL + TRIAGE_DDL + REFINE_DDL))
+        return cls(await FileStateStore.open(path, extra_schema=FEEDBACK_DDL + TRIAGE_DDL + REFINE_DDL + GATE_DDL))
 
     async def record_file_scan(self, path: str, mtime: float, candidates: Sequence[FeedbackCandidate]) -> int:
         """Records a scanned file and its candidates in one transaction.
@@ -327,6 +370,70 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
                     for index, pair in enumerate(refinement.pairs)
                 ],
             )
+
+    async def record_gate_samples(self, samples: Sequence[GateSample]) -> int:
+        """Records gate training samples idempotently, keyed by ``sample_key``.
+
+        Args:
+            samples: The samples to persist; re-inserting an existing key is a no-op.
+
+        Returns:
+            The number of newly inserted samples.
+        """
+        created_at = now()
+        async with self.store.transaction() as conn:
+            before = conn.total_changes
+            await conn.executemany(
+                INSERT_GATE_SAMPLE,
+                [
+                    (
+                        sample.sample_key,
+                        sample.kind,
+                        sample.dedup_key,
+                        sample.session_id,
+                        sample.anchor_uuid,
+                        sample.occurred_at,
+                        sample.offset_turns,
+                        sample.window_json,
+                        sample.seed,
+                        created_at,
+                    )
+                    for sample in samples
+                ],
+            )
+            return conn.total_changes - before
+
+    async def gate_samples(self, *, kind: str | None = None) -> list[dict[str, object]]:
+        """Returns gate samples, oldest first, optionally restricted to one kind."""
+        query = "SELECT * FROM gate_sample" + (" WHERE kind = ?" if kind else "") + " ORDER BY id"
+        cur = await self.store.conn.execute(query, (kind,) if kind else ())
+        return [dict(row) async for row in cur]
+
+    async def gate_sample_stats(self) -> Mapping[str, int]:
+        """Returns gate sample counts keyed by kind."""
+        cur = await self.store.conn.execute("SELECT kind, COUNT(*) AS n FROM gate_sample GROUP BY kind ORDER BY kind")
+        return {str(row["kind"]): int(row["n"]) async for row in cur}
+
+    async def negative_sessions(self) -> set[str]:
+        """Returns the sessions that already carry random-negative samples."""
+        cur = await self.store.conn.execute(
+            "SELECT DISTINCT session_id FROM gate_sample WHERE kind = 'random_negative'"
+        )
+        return {str(row["session_id"]) async for row in cur}
+
+    async def record_embeddings(self, rows: Sequence[tuple[str, str, str, int, bytes]]) -> None:
+        """Upserts exemplar embeddings as ``(dedup_key, model, text_digest, dim, vector)`` rows."""
+        created_at = now()
+        async with self.store.transaction() as conn:
+            await conn.executemany(INSERT_EMBEDDING, [(*row, created_at) for row in rows])
+
+    async def embeddings(self, *, model: str) -> list[dict[str, object]]:
+        """Returns every stored exemplar embedding for ``model``, oldest first."""
+        cur = await self.store.conn.execute(
+            "SELECT dedup_key, text_digest, dim, vector FROM exemplar_embedding WHERE model = ? ORDER BY rowid",
+            (model,),
+        )
+        return [dict(row) async for row in cur]
 
     async def unenriched(self, log: CorrectionLog, *, limit: int | None = None) -> list[dict[str, object]]:
         """Returns refined pairs whose steering anchor carries no shared-ledger correction.

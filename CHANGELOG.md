@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- The live steering watcher: `cc-steer watch --shadow` tails open Claude Code
+  sessions and runs a staged cascade — a cheap stage-1 gate over the flattened
+  context window, a stage-2 drafting model, and an optional stage-3
+  exemplar-conditioned refiner — on every turn a session completes and goes
+  quiet. Proposals (abstentions included) land in a local shadow ledger at
+  `~/.cc-steer/shadow.db`; no session is ever touched. `cc-steer shadow report`
+  joins the ledger against the interventions users actually made
+  (time-within-session, tunable window) and reports hit/nuisance rates,
+  per-stage abstention, per-category hit counts, and the drafter's
+  sentinel-probability distribution; `--journal-repo` appends the summary to a
+  cc-notes log.
+- A file-based model registry under `~/.cc-steer/models` (immutable version
+  dirs, atomic `current` promotion, rollback, pruning) with `cc-steer models
+  list/promote/rollback`, serving two components: the lab-trained lexical
+  `gate` (TF-IDF + calibrated logistic regression behind the `gate` extra) and
+  the lab-trained LoRA `watcher`.
+- The two-stage local watcher, E2's winner, behind the new `mlx` extra:
+  `MlxDrafter` serves the registered QLoRA adapter over the 4-bit base with
+  score-based sentinel abstention — abstain iff first-token P(NO_STEER) ≥ the
+  promoted threshold (precision-first budget point by default), generate with
+  the sentinel banned otherwise — never greedy string-match. `watch` gains
+  `--drafter auto|spawn|mlx`, `--stage2-threshold`, and `--refiner
+  auto|spawn|none`; with the mlx drafter, stage 3 defaults to none and a fired
+  draft ships as the steer. Proposals carry the new `sentinel_prob` column.
+  The drafter's input reproduces the training rendering byte-for-byte
+  (`tail_messages` under `DRAFT_CHAR_CAP`, shared with the lab by identity
+  import), and every promoted watcher version pins its `render_version`.
+- Exemplar retrieval (`embed` extra): a Voyage-embedded index over accepted
+  steering moments with MMR selection, feeding the stage-3 refiner; capture
+  hooks, launchd wiring, negatives sampling, and the nightly pipeline runner
+  that journals each pass via cc-notes.
+
+### Changed
+- The cascade's `Drafter` protocol returns a `Draft` (text plus optional
+  `sentinel_prob`) instead of a bare string, and `Cascade.refiner` is optional
+  (`None` ships fired drafts as-is) — the seam E9's rewrite-only refiner slots
+  into.
+
 ## [0.10.0] - 2026-07-05
 
 ### Changed

@@ -13,7 +13,6 @@ HuggingFace repo.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +26,17 @@ from huggingface_hub import HfApi
 
 from cc_steer.enrich import SOURCE
 from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
+from cc_steer.rendering import (
+    NO_STEER,
+    Message,
+    agent_action_of,
+    assistant_message,
+    gate_text,
+    messages,
+    render_edit,
+    split_of,
+    watcher_prompt,
+)
 from cc_steer.report import project_label
 from cc_steer.triage import AUDIT_VERSION, PROMPT_VERSION, STEERING_CATEGORIES
 
@@ -34,7 +44,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from aiosqlite import Row
-    from cc_transcript.context import TurnRef
     from cc_transcript.corrections import Correction
 
     from cc_steer.store import FeedbackStore
@@ -75,6 +84,15 @@ LATEST_PAIRS_QUERY = """
 SELECT dedup_key, pair_index, action, direction_verbatim, direction
 FROM latest_refinement
 ORDER BY dedup_key, pair_index
+"""
+
+GATE_SAMPLES_QUERY = """
+SELECT g.sample_key, g.kind, g.offset_turns, g.session_id, g.window_json,
+  COALESCE(e.source_kind, '') AS source_kind, COALESCE(j.category, '') AS category
+FROM gate_sample g
+LEFT JOIN feedback_events e ON e.dedup_key = g.dedup_key
+LEFT JOIN latest_judge j ON j.dedup_key = g.dedup_key
+ORDER BY g.id
 """
 
 CATEGORIES = {
@@ -174,12 +192,9 @@ CONFIG_USES = {
     "sft": "TRL conversational prompt-completion: context + agent action → the user's verbatim steering.",
     "dpo": "TRL explicit-prompt preference: the correcting edit (`chosen`) over the faulted edit (`rejected`).",
     "kto": "TRL unpaired preference over every judged event; the only view that uses the noise negatives.",
+    "gate": "Turn-level steer/no-steer classification text for the always-on gate, with rewound positive windows.",
+    "watcher": "Context + agent action → steering direction or the `NO_STEER` sentinel, for the generative watcher.",
 }
-
-
-class Message(TypedDict):
-    role: str
-    content: str
 
 
 class Pair(TypedDict):
@@ -228,6 +243,28 @@ class Trace(TypedDict):
     meta: str
 
 
+class GateRow(TypedDict):
+    id: str
+    text: str
+    label: bool
+    kind: str
+    offset_turns: int
+    source_kind: str
+    category: str
+    session_id: str
+    split: str
+
+
+class WatcherRow(TypedDict):
+    prompt: list[Message]
+    completion: list[Message]
+    verbatim: str
+    label: bool
+    id: str
+    category: str
+    split: str
+
+
 class SftRow(TypedDict):
     prompt: list[Message]
     completion: list[Message]
@@ -264,26 +301,6 @@ class ExportReport:
     counts: Mapping[str, Mapping[str, int]]
     out: Path
     pushed: bool
-
-
-def split_of(session_id: str) -> str:
-    return "test" if int(hashlib.sha256(session_id.encode()).hexdigest(), 16) % 10 == 0 else "train"
-
-
-def messages(turns: Sequence[TurnRef]) -> list[Message]:
-    return [{"role": turn.role, "content": turn.preview} for turn in turns]
-
-
-def assistant_message(content: str) -> list[Message]:
-    return [{"role": "assistant", "content": content}]
-
-
-def agent_action_of(window: ContextWindow) -> str | None:
-    return next((turn.preview for turn in reversed(window.before) if turn.role == "assistant"), None)
-
-
-def render_edit(file: str, old: str, new: str) -> str:
-    return f"{file}\n```old\n{old}\n```\n```new\n{new}\n```"
 
 
 def evidence_entry(correction: Correction) -> Evidence:
@@ -391,13 +408,77 @@ def dpo_split(traces: Sequence[Trace]) -> list[DpoRow]:
     )
 
 
-def config_rows(traces: list[Trace]) -> dict[str, Mapping[str, Sequence[Mapping[str, object]]]]:
+def gate_row(row: Row) -> GateRow | None:
+    try:
+        window = ContextWindow.from_json(str(row["window_json"]))
+    except (ValueError, KeyError):
+        return None
+    return {
+        "id": str(row["sample_key"]),
+        "text": gate_text(window),
+        "label": str(row["kind"]) == "positive_window",
+        "kind": str(row["kind"]),
+        "offset_turns": int(row["offset_turns"]),
+        "source_kind": str(row["source_kind"]),
+        "category": str(row["category"]),
+        "session_id": str(row["session_id"]),
+        "split": split_of(str(row["session_id"])),
+    }
+
+
+def watcher_positive(trace: Trace) -> WatcherRow:
+    direction = "\n".join(pair["direction"] for pair in trace["pairs"]) or trace["user_message"]
+    return {
+        "prompt": trace["context"],
+        "completion": assistant_message(direction),
+        "verbatim": trace["user_message"],
+        "label": True,
+        "id": trace["id"],
+        "category": trace["category"],
+        "split": trace["split"],
+    }
+
+
+def watcher_negative(row: Row) -> WatcherRow | None:
+    try:
+        window = ContextWindow.from_json(str(row["window_json"]))
+    except (ValueError, KeyError):
+        return None
+    return {
+        "prompt": watcher_prompt(window),
+        "completion": assistant_message(NO_STEER),
+        "verbatim": "",
+        "label": False,
+        "id": str(row["sample_key"]),
+        "category": str(row["category"]),
+        "split": split_of(str(row["session_id"])),
+    }
+
+
+def watcher_rows(traces: Sequence[Trace], gate_samples: Sequence[Row]) -> list[WatcherRow]:
+    positives = [watcher_positive(trace) for trace in traces if trace["is_steering"]]
+    negatives = [
+        rendered
+        for row in gate_samples
+        if str(row["kind"]) != "positive_window" and int(row["offset_turns"]) == 0
+        if (rendered := watcher_negative(row)) is not None
+    ]
+    return [*positives, *negatives]
+
+
+def config_rows(
+    traces: list[Trace], gate_samples: Sequence[Row] = ()
+) -> dict[str, Mapping[str, Sequence[Mapping[str, object]]]]:
     by_split = {split: [trace for trace in traces if trace["split"] == split] for split in SPLITS}
+    gate = [row for row in (gate_row(sample) for sample in gate_samples) if row is not None]
+    watcher = watcher_rows(traces, gate_samples)
     return {
         "traces": by_split,
         "sft": {split: [sft_row(t) for t in ts if t["is_steering"]] for split, ts in by_split.items()},
         "dpo": {split: dpo_split(ts) for split, ts in by_split.items()},
         "kto": {split: [kto_row(t) for t in ts] for split, ts in by_split.items()},
+        "gate": {split: [row for row in gate if row["split"] == split] for split in SPLITS},
+        "watcher": {split: [row for row in watcher if row["split"] == split] for split in SPLITS},
     }
 
 
@@ -457,6 +538,29 @@ def config_features() -> dict[str, Features]:
         "sft": Features({"prompt": message(), "completion": message()} | keys),
         "dpo": Features({"prompt": message(), "chosen": message(), "rejected": message()} | keys),
         "kto": Features({"prompt": message(), "completion": message(), "label": Value("bool")} | keys),
+        "gate": Features(
+            {
+                "id": Value("string"),
+                "text": Value("string"),
+                "label": Value("bool"),
+                "kind": Value("string"),
+                "offset_turns": Value("int64"),
+                "source_kind": Value("string"),
+                "category": Value("string"),
+                "session_id": Value("string"),
+                "split": Value("string"),
+            }
+        ),
+        "watcher": Features(
+            {
+                "prompt": message(),
+                "completion": message(),
+                "verbatim": Value("string"),
+                "label": Value("bool"),
+                "split": Value("string"),
+            }
+            | keys
+        ),
     }
 
 
@@ -526,8 +630,10 @@ async def export(store: FeedbackStore, *, out: Path, push_to: str | None = None)
         The export's per-config, per-split row counts.
     """
     traces = await load_traces(store)
+    gate_cur = await store.store.conn.execute(GATE_SAMPLES_QUERY)
+    gate_samples = [row async for row in gate_cur]
     features = config_features()
-    by_config = config_rows(traces)
+    by_config = config_rows(traces, gate_samples)
     built = {
         config: DatasetDict(
             {

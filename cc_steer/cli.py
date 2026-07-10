@@ -13,10 +13,14 @@ import anyio
 import click
 from cc_transcript import CLAUDE_PROJECTS_DIR
 
+from cc_steer import hooks as hook_wiring
+from cc_steer import launchd, registry
 from cc_steer.claude import claude_available
 from cc_steer.dashboard import build_app
 from cc_steer.evaluate import evaluate, flip_report
+from cc_steer.journal import Journal
 from cc_steer.models import STEERING_SOURCE_KINDS, SourceKind
+from cc_steer.pipeline import ENRICH_LIMIT, REFINE_LIMIT, TRIAGE_LIMIT, run_pipeline
 from cc_steer.report import Sample, build_summary, golden_label, project_label
 from cc_steer.scan import scan as run_scan
 from cc_steer.serve import serve
@@ -55,6 +59,13 @@ def hf_repo_id() -> str:
     from huggingface_hub import HfApi
 
     return f"{HfApi().whoami()['name']}/cc-steer-traces"
+
+
+def _mlx_importable() -> bool:
+    """Whether the ``mlx`` extra is installed."""
+    import importlib.util
+
+    return importlib.util.find_spec("mlx_lm") is not None
 
 
 async def sync_dataset(store: FeedbackStore) -> None:
@@ -483,6 +494,605 @@ async def pairs(jsonl: bool, db: Path | None) -> None:
             click.echo(json.dumps(row | {"project": project_label(str(row["origin_path"] or ""))}))
         else:
             click.echo(f"[{row['category']}] {str(row['action'])[:80]} -> {str(row['direction'])[:100]}")
+
+
+@main.command(name="sample-negatives")
+@click.option("--seed", type=int, default=1, show_default=True, help="Deterministic sampling seed.")
+@click.option("--sessions", type=int, default=400, show_default=True, help="Maximum transcripts to parse this pass.")
+@click.option("--per-session", type=int, default=20, show_default=True, help="Random negatives per transcript.")
+@click.option("--resample", is_flag=True, help="Revisit sessions that already carry random samples.")
+@click.option(
+    "--transcripts",
+    "transcripts",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Transcript roots to mine. Defaults to ~/.claude/projects plus the mirror corpus.",
+)
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def sample_negatives_(
+    seed: int, sessions: int, per_session: int, resample: bool, transcripts: tuple[Path, ...], db: Path | None
+) -> None:
+    """Sample gate training windows: rewound positives, hard and random negatives.
+
+    Positive windows and hard negatives are recomputed from the judged corpus and
+    deduped by key; random negatives parse a budgeted, seed-deterministic batch of
+    transcripts that carry none yet, excluding anything near a detected event, so
+    repeated passes extend coverage. No LLM calls.
+    """
+    from cc_steer.negatives import sample_negatives as run_sample
+    from cc_steer.pipeline import scan_roots
+
+    roots = transcripts or scan_roots()
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await run_sample(
+            store, roots, seed=seed, sessions=sessions, per_session=per_session, resample=resample
+        )
+        click.echo(
+            "  ".join(f"{kind} +{count}" for kind, count in report.inserted.items())
+            + f" ({report.sessions_sampled} transcripts parsed)"
+        )
+        totals = await store.gate_sample_stats()
+        click.echo("total: " + "  ".join(f"{kind} {count}" for kind, count in totals.items()))
+
+
+@main.command(name="index")
+@click.option(
+    "--model", default="voyage-4-large", show_default=True, help="Embedding model for the exemplar index."
+)
+@click.option("--batch", type=int, default=32, show_default=True, help="Encode batch size.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def index_(model: str, batch: int, db: Path | None) -> None:
+    """Embed the accepted steering exemplars for the frontier refiner's retrieval.
+
+    Incremental by content digest — only exemplars whose rendered context changed
+    re-embed. Train-split events only, so evaluation retrieval is never
+    contaminated. Requires the ``embed`` extra.
+    """
+    from cc_steer.exemplars import build_index
+
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await build_index(store, model=model, batch=batch)
+        click.echo(f"embedded {report.embedded}, current {report.current}, eligible {report.total}")
+
+
+@main.group(name="hooks")
+def hooks_group() -> None:
+    """Manage the global SessionEnd hook that feeds continual collection."""
+
+
+@hooks_group.command(name="install")
+@click.option(
+    "--prefix",
+    default=hook_wiring.DEFAULT_PREFIX,
+    show_default=True,
+    help="Command prefix the hook invokes cc-steer with.",
+)
+@click.option(
+    "--settings",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Settings file. Defaults to ~/.claude/settings.json.",
+)
+def hooks_install(prefix: str, settings: Path | None) -> None:
+    """Wire an async SessionEnd scan into the user-level Claude Code settings.
+
+    Every session on the machine then feeds the store incrementally as it ends;
+    the LLM stages and the HF sync stay with the scheduled pipeline. Idempotent:
+    re-running updates the one cc-steer-owned group in place and preserves every
+    other hook untouched.
+    """
+    result = hook_wiring.install(settings, prefix=prefix)
+    click.echo(f"{result}: {hook_wiring.scan_command(prefix)!r} on {hook_wiring.EVENT}")
+
+
+@hooks_group.command(name="uninstall")
+@click.option(
+    "--settings",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Settings file. Defaults to ~/.claude/settings.json.",
+)
+def hooks_uninstall(settings: Path | None) -> None:
+    """Remove the SessionEnd scan hook, leaving every other hook untouched."""
+    click.echo(hook_wiring.uninstall(settings))
+
+
+@hooks_group.command(name="status")
+@click.option(
+    "--settings",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Settings file. Defaults to ~/.claude/settings.json.",
+)
+def hooks_status(settings: Path | None) -> None:
+    """Show the scan command currently wired at SessionEnd, if any."""
+    command = hook_wiring.installed_command(settings)
+    click.echo(f"installed: {command!r}" if command else "not installed")
+
+
+@main.group(name="models")
+def models_group() -> None:
+    """Inspect and flip the registry of lab-trained model versions."""
+
+
+@models_group.command(name="list")
+@click.argument("component", required=False)
+def models_list(component: str | None) -> None:
+    """List registered versions, oldest first; the promoted one is marked ``*``.
+
+    With no COMPONENT, every component in the registry is listed.
+    """
+    names = [component] if component else registry.components()
+    if not names:
+        click.echo("no registered models")
+        return
+    for name in names:
+        promoted = registry.current(name)
+        rows = registry.versions(name)
+        if not rows:
+            click.echo(f"{name}: no registered versions")
+            continue
+        for info in rows:
+            marker = " *" if promoted is not None and info.version == promoted.version else ""
+            metrics = info.metadata.get("metrics")
+            pr_auc = f"  pr_auc={value:.4f}" if isinstance(metrics, dict) and (value := metrics.get("pr_auc")) else ""
+            click.echo(f"{name} {info.version}{marker}{pr_auc}")
+
+
+@models_group.command(name="promote")
+@click.argument("component")
+@click.argument("version")
+def models_promote(component: str, version: str) -> None:
+    """Atomically point ``current`` at VERSION (full name or its ``v<NNN>`` prefix)."""
+    try:
+        registry.promote(component, version)
+    except registry.RegistryError as error:
+        raise click.ClickException(str(error)) from error
+    promoted = registry.current(component)
+    assert promoted is not None
+    click.echo(f"promoted {component} {promoted.version}")
+
+
+@models_group.command(name="rollback")
+@click.argument("component")
+def models_rollback(component: str) -> None:
+    """Flip ``current`` back to the version registered before it."""
+    try:
+        info = registry.rollback(component)
+    except registry.RegistryError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"rolled back {component} to {info.version}")
+
+
+@main.group(name="pipeline")
+def pipeline_group() -> None:
+    """Run the collection stages as one budgeted, schedulable pass."""
+
+
+@pipeline_group.command(name="run")
+@click.option("--weekly", is_flag=True, help="Also run the auditor and the mechanical eval this pass.")
+@click.option("--auto-weekly", is_flag=True, help="Treat Sunday runs as weekly; the launchd agent's mode.")
+@click.option("--push/--no-push", default=True, show_default=True, help="Push the export to HuggingFace.")
+@click.option("--triage-limit", type=int, default=TRIAGE_LIMIT, show_default=True, help="Judge at most this many.")
+@click.option("--refine-limit", type=int, default=REFINE_LIMIT, show_default=True, help="Refine at most this many.")
+@click.option("--enrich-limit", type=int, default=ENRICH_LIMIT, show_default=True, help="Enrich at most this many.")
+@click.option("--concurrency", type=int, default=8, show_default=True, help="Maximum concurrent claude subshells.")
+@click.option(
+    "--journal-repo",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository whose cc-notes journal records this pass.",
+)
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def pipeline_run(
+    weekly: bool,
+    auto_weekly: bool,
+    push: bool,
+    triage_limit: int,
+    refine_limit: int,
+    enrich_limit: int,
+    concurrency: int,
+    journal_repo: Path | None,
+    db: Path | None,
+) -> None:
+    """Run one budgeted pass over every stage: scan, triage, refine, enrich, export.
+
+    A weekly pass adds the auditor and the mechanical eval before the export. A
+    stage failure is recorded and skipped past so later stages still run, a
+    failed HF push downgrades to a local-only export, and with ``--journal-repo``
+    the pass appends its one-line summary to that repo's cc-notes journal. Exits
+    nonzero when any stage failed.
+    """
+    from datetime import date
+
+    if not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
+    is_weekly = weekly or (auto_weekly and date.today().weekday() == 6)
+    push_to = None
+    if push:
+        try:
+            push_to = hf_repo_id()
+        except Exception as error:  # noqa: BLE001 — no HF auth downgrades to a local export
+            click.echo(f"push disabled (HF auth unavailable: {type(error).__name__})", err=True)
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await run_pipeline(
+            store,
+            out=DATASET_DIR,
+            push_to=push_to,
+            weekly=is_weekly,
+            triage_limit=triage_limit,
+            refine_limit=refine_limit,
+            enrich_limit=enrich_limit,
+            concurrency=concurrency,
+        )
+    for outcome in report.outcomes:
+        click.echo(("FAIL " if not outcome.ok else "") + f"{outcome.stage}: {outcome.summary}")
+    if journal_repo is not None:
+        line = ("weekly | " if is_weekly else "") + report.summary_line()
+        if not Journal(journal_repo).append(line):
+            click.echo("journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
+    if report.failed:
+        raise click.ClickException(f"stages failed: {', '.join(report.failed)}")
+
+
+@pipeline_group.command(name="install-launchd")
+@click.option(
+    "--prefix",
+    default=hook_wiring.DEFAULT_PREFIX,
+    show_default=True,
+    help="Command prefix the agent invokes cc-steer with.",
+)
+@click.option(
+    "--journal-repo",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository whose cc-notes journal records each pass.",
+)
+@click.option("--hour", type=int, default=3, show_default=True, help="Local hour the nightly pass fires at.")
+@click.option(
+    "--retrain/--no-retrain",
+    "retrain",
+    default=True,
+    show_default=True,
+    help="Also install the weekly gate-retrain agent, run through the lab checkout.",
+)
+@click.option(
+    "--lab",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    show_default="~/Code/cc-steer-lab",
+    help="The cc-steer-lab checkout the retrain agent runs harness.retrain in.",
+)
+@click.option("--retrain-hour", type=int, default=4, show_default=True, help="Local hour the Sunday retrain fires at.")
+def pipeline_install_launchd(
+    prefix: str, journal_repo: Path | None, hour: int, retrain: bool, lab: Path | None, retrain_hour: int
+) -> None:
+    """Schedule the pass nightly — plus the weekly model retrain — via macOS LaunchAgents.
+
+    The pipeline agent covers both collection cadences: it runs ``pipeline run
+    --auto-weekly``, so the Sunday pass folds in the auditor and eval. The
+    retrain agent runs the lab's ``harness.retrain`` every Sunday, refreshing
+    the promoted gate model when the training data moved (``--no-retrain``
+    skips it). Logs land under ``~/.cc-steer/logs/``. Re-running replaces the
+    agents in place.
+    """
+    path = launchd.install(prefix, journal_repo, hour=hour)
+    click.echo(f"installed {launchd.LABEL} ({path}): nightly {hour:02d}:00, weekly audit on Sundays")
+    if not retrain:
+        return
+    lab_dir = lab or launchd.LAB_DIR
+    if not lab_dir.is_dir():
+        raise click.ClickException(f"no cc-steer-lab checkout at {lab_dir}; pass --lab or --no-retrain")
+    retrain_path = launchd.install_retrain(lab_dir, hour=retrain_hour)
+    click.echo(f"installed {launchd.RETRAIN_LABEL} ({retrain_path}): Sundays {retrain_hour:02d}:00, gate retrain")
+
+
+@pipeline_group.command(name="uninstall-launchd")
+def pipeline_uninstall_launchd() -> None:
+    """Unload and remove the nightly pipeline and weekly retrain LaunchAgents."""
+    click.echo(f"{launchd.LABEL}: " + ("removed" if launchd.uninstall() else "not installed"))
+    click.echo(f"{launchd.RETRAIN_LABEL}: " + ("removed" if launchd.uninstall_retrain() else "not installed"))
+
+
+@main.command(name="watch")
+@click.option(
+    "--shadow/--live",
+    "shadow_mode",
+    default=True,
+    show_default=True,
+    help="Delivery mode; live delivery is not yet implemented.",
+)
+@click.option(
+    "--root",
+    "roots",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Transcript roots to tail. Defaults to ~/.claude/projects.",
+)
+@click.option(
+    "--gate",
+    "gate_kind",
+    type=click.Choice(["heuristic", "lexical"]),
+    default=None,
+    show_default="lexical when a gate model is promoted, else heuristic",
+    help="Stage-1 gate: the lab-trained lexical model (from the registry) or the turn-floor heuristic.",
+)
+@click.option(
+    "--gate-threshold",
+    type=float,
+    default=None,
+    show_default="the trained threshold (lexical) or 0.5 (heuristic)",
+    help="Stage-1 gate score below which a turn is suppressed.",
+)
+@click.option(
+    "--drafter",
+    "drafter_kind",
+    type=click.Choice(["auto", "spawn", "mlx"]),
+    default="auto",
+    show_default=True,
+    help="Stage-2 drafter: the local trained watcher (mlx) or the claude CLI (spawn); "
+    "auto picks mlx when a watcher model is promoted and the mlx extra is installed.",
+)
+@click.option(
+    "--stage2-threshold",
+    type=float,
+    default=None,
+    show_default="the promoted watcher's budget threshold",
+    help="Local drafter abstain threshold on P(NO_STEER); ignored for the spawn drafter.",
+)
+@click.option(
+    "--refiner",
+    "refiner_kind",
+    type=click.Choice(["auto", "spawn", "none"]),
+    default="auto",
+    show_default=True,
+    help="Stage 3: the claude CLI refiner or none (a fired draft ships as-is); "
+    "auto disables it for the mlx drafter (two-stage, per E2) and keeps it for spawn.",
+)
+@click.option(
+    "--debounce",
+    type=float,
+    default=2.0,
+    show_default=True,
+    help="Seconds a session must stay quiet before its last completed turn is evaluated.",
+)
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@click.option(
+    "--shadow-db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Shadow ledger path. Defaults to ~/.cc-steer/shadow.db.",
+)
+@coro
+async def watch_(
+    shadow_mode: bool,
+    roots: tuple[Path, ...],
+    gate_kind: str | None,
+    gate_threshold: float | None,
+    drafter_kind: str,
+    stage2_threshold: float | None,
+    refiner_kind: str,
+    debounce: float,
+    db: Path | None,
+    shadow_db: Path | None,
+) -> None:
+    """Tail live transcripts and run the steering cascade in shadow mode.
+
+    Every open session is followed as it writes; each time one goes quiet
+    after completing a turn, the cascade — stage-1 gate, drafting model,
+    optional exemplar-conditioned refiner — decides whether the user would have
+    steered right there. Stage 1 defaults to the promoted lexical gate from the
+    model registry, thresholded at its trained 2 fires/100 turns budget
+    (``--gate-threshold`` overrides); without a promoted version it falls back
+    to the turn-floor heuristic. Stage 2 defaults to the promoted local watcher
+    (the mlx extra) when one exists, abstaining at its trained budget threshold
+    on P(NO_STEER); stage 3 is then disabled — the E2-validated two-stage
+    configuration — unless ``--refiner spawn`` re-enables it. Proposals land in
+    the shadow ledger (``cc-steer shadow report`` measures them); no session is
+    ever touched. Exemplar retrieval needs the ``embed`` extra and a built
+    index (``cc-steer index``); without an index the watcher still runs, with
+    stage 3 unconditioned. Runs until interrupted.
+    """
+    from cc_steer.exemplars import load_index, query_encoder
+    from cc_steer.watcher.cascade import Cascade, Drafter, Gate, HeuristicGate, Refiner, SpawnDrafter, SpawnRefiner
+    from cc_steer.watcher.daemon import Watcher
+    from cc_steer.watcher.delivery import ShadowDelivery
+    from cc_steer.watcher.gate import LexicalGate
+    from cc_steer.watcher.types import CascadeConfig
+
+    if not shadow_mode:
+        raise click.ClickException("live delivery is not yet implemented; run without --live to shadow")
+    if gate_kind is None:
+        gate_kind = "lexical" if registry.current("gate") is not None else "heuristic"
+        if gate_kind == "heuristic":
+            click.echo("no promoted gate model; falling back to the heuristic gate", err=True)
+    if drafter_kind == "auto":
+        drafter_kind = "mlx" if registry.current("watcher") is not None and _mlx_importable() else "spawn"
+        if drafter_kind == "spawn":
+            click.echo("no promoted watcher model (or mlx extra missing); drafting via the claude CLI", err=True)
+    if refiner_kind == "auto":
+        refiner_kind = "none" if drafter_kind == "mlx" else "spawn"
+    if (drafter_kind == "spawn" or refiner_kind == "spawn") and not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
+
+    drafter: Drafter
+    stage2_model = "medium"
+    render_version = 1
+    if drafter_kind == "mlx":
+        from cc_steer.watcher.drafter_mlx import MlxDrafter
+
+        try:
+            mlx_drafter = MlxDrafter(threshold=stage2_threshold)
+        except RuntimeError as error:
+            raise click.ClickException(str(error)) from error
+        drafter = mlx_drafter
+        stage2_model = mlx_drafter.base_model
+        stage2_threshold = mlx_drafter.threshold
+        render_version = mlx_drafter.render_version
+        click.echo(
+            f"drafter: mlx {mlx_drafter.version.version} "
+            f"(P(NO_STEER) abstain threshold {mlx_drafter.threshold:.4f} [{mlx_drafter.operating_point}], "
+            f"render v{render_version})"
+        )
+    else:
+        drafter = SpawnDrafter(model=stage2_model)
+        stage2_threshold = None
+        click.echo("drafter: spawn (claude CLI, medium tier)")
+
+    gate: Gate
+    if gate_kind == "lexical":
+        try:
+            lexical = LexicalGate()
+        except RuntimeError as error:
+            raise click.ClickException(str(error)) from error
+        gate = lexical
+        resolved_gate_threshold = gate_threshold if gate_threshold is not None else lexical.threshold
+        gate_banner = f"gate: lexical {lexical.version.version} (threshold {resolved_gate_threshold:.4f})"
+    else:
+        resolved_gate_threshold = gate_threshold if gate_threshold is not None else 0.5
+        gate_banner = f"gate: heuristic (threshold {resolved_gate_threshold})"
+    config = CascadeConfig(
+        gate_threshold=resolved_gate_threshold,
+        stage2_model=stage2_model,
+        stage2_threshold=stage2_threshold,
+        drafter_kind=drafter_kind,
+        render_version=render_version,
+    )
+    if gate_kind != "lexical":
+        gate = HeuristicGate(min_turns=config.min_turns)
+    click.echo(gate_banner)
+
+    refiner: Refiner | None = SpawnRefiner(tier=config.stage3_tier) if refiner_kind == "spawn" else None
+    click.echo(f"refiner: {refiner_kind}" + (" (fired drafts ship as-is)" if refiner is None else ""))
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        encoder = None
+        if refiner is not None:
+            keys, _ = await load_index(store, model=config.embed_model)
+            if keys:
+                try:
+                    encoder = query_encoder(config.embed_model)
+                except RuntimeError as error:
+                    raise click.ClickException(str(error)) from error
+            else:
+                click.echo(
+                    "retrieval disabled: the exemplar index is empty — run `cc-steer index` to enable it", err=True
+                )
+        cascade = Cascade(
+            gate=gate,
+            drafter=drafter,
+            refiner=refiner,
+            store=store,
+            config=config,
+            encoder=encoder,
+        )
+        async with await ShadowDelivery.open(shadow_db) as delivery:
+            watcher = Watcher(cascade, delivery, roots=roots or (CLAUDE_PROJECTS_DIR,), debounce_s=debounce)
+            click.echo(
+                f"watching {len(watcher.roots)} root(s) in shadow mode; "
+                f"proposals land in {shadow_db or ShadowDelivery.default_path()}"
+            )
+            await watcher.run()
+
+
+@main.group(name="shadow")
+def shadow_group() -> None:
+    """Analyze the live watcher's shadow-mode proposals."""
+
+
+@shadow_group.command(name="report")
+@click.option(
+    "--window",
+    type=int,
+    default=30,
+    show_default=True,
+    help="Minutes after a proposal within which a real intervention counts as a hit.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the summary as JSON.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@click.option(
+    "--shadow-db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Shadow ledger path. Defaults to ~/.cc-steer/shadow.db.",
+)
+@click.option(
+    "--journal-repo",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository whose cc-notes journal records this report.",
+)
+@coro
+async def shadow_report(
+    window: int, as_json: bool, db: Path | None, shadow_db: Path | None, journal_repo: Path | None
+) -> None:
+    """Join shadow proposals against the interventions users actually made.
+
+    Feedback events carry no turn index, so the join is time within a session:
+    a steer is a HIT when the same session shows a real feedback event within
+    ``--window`` minutes after the proposal fired, and a nuisance candidate
+    otherwise. Also reports stage-2/3 abstention rates, per-category hit
+    counts, the drafter's sentinel-probability distribution, proposals per
+    session, and the sessions that produced proposals. No LLM calls.
+    """
+    from cc_steer.watcher.delivery import ShadowDelivery
+    from cc_steer.watcher.shadow import intervention_rows, summarize
+
+    async with await ShadowDelivery.open(shadow_db) as ledger:
+        proposals = await ledger.proposals()
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        interventions = await intervention_rows(store)
+    summary = summarize(proposals, interventions, window_minutes=window)
+    payload = dataclasses.asdict(summary) | {"proposals_per_session": summary.proposals_per_session}
+    if as_json:
+        click.echo(json.dumps(payload))
+        return
+    click.echo(f"sessions with proposals: {summary.sessions}")
+    per = f" ({summary.proposals_per_session:.1f}/session)" if summary.sessions else ""
+    click.echo(f"proposals: {summary.proposals}{per}")
+    stage2 = f" ({summary.stage2_abstained / summary.proposals:.0%})" if summary.proposals else ""
+    click.echo(f"stage-2 abstained: {summary.stage2_abstained}/{summary.proposals}{stage2}")
+    drafted = summary.proposals - summary.stage2_abstained
+    stage3 = f" ({summary.stage3_abstained / drafted:.0%})" if drafted else ""
+    click.echo(f"stage-3 abstained: {summary.stage3_abstained}/{drafted}{stage3}")
+    click.echo(f"steers: {summary.steers} — hits {summary.hits}, nuisance {summary.nuisance} ({window}m window)")
+    if summary.hit_categories:
+        by_count = sorted(summary.hit_categories.items(), key=lambda item: -item[1])
+        click.echo("hit categories: " + ", ".join(f"{category} {count}" for category, count in by_count))
+    if (stats := summary.sentinel_probs) is not None:
+        deciles = " ".join(f"{p:.3f}" for p in stats.deciles)
+        click.echo(f"sentinel P(NO_STEER): n={stats.n} mean={stats.mean:.3f} deciles=[{deciles}]")
+    if journal_repo is not None:
+        line = f"shadow report | {json.dumps(payload, sort_keys=True)}"
+        if not Journal(journal_repo, title="cc-steer shadow reports", tag="shadow").append(line):
+            click.echo("journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
 
 
 @main.command(name="view-samples")
