@@ -26,8 +26,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import anyio.to_thread
-
 from cc_steer import registry
 from cc_steer.rendering import DRAFT_CHAR_CAP, NO_STEER, strip_think, tail_messages
 from cc_steer.watcher.cascade import DRAFT_SYSTEM, flattened
@@ -89,13 +87,18 @@ class MlxDrafter:
         self.model, self.tokenizer = loaded[0], loaded[1]
 
     async def draft(self, prompt: list[Message]) -> Draft:
-        """One score-based decision over the rendered window, off the event loop.
+        """One score-based decision over the rendered window.
 
         The tail-capped flattening is the training contract — never plain
-        ``flattened(prompt)``.
+        ``flattened(prompt)``. Inference runs synchronously on the caller's
+        thread: MLX streams are bound to the thread that first touched the
+        model, so a worker-thread hop dies with "no Stream(cpu, 0) in current
+        thread". Blocking the daemon loop for the ~seconds a decision takes is
+        fine — sessions are evaluated one at a time and ingest buffers in the
+        transcript files.
         """
         context_tail = flattened(tail_messages(prompt, DRAFT_CHAR_CAP))
-        return await anyio.to_thread.run_sync(self.decide, context_tail)
+        return self.decide(context_tail)
 
     def decide(self, context_tail: str) -> Draft:
         """Abstain (``NO_STEER``) iff P(NO_STEER) >= threshold, else a sentinel-suppressed steer."""
