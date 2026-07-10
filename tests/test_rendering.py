@@ -179,3 +179,13 @@ def test_watcher_prompt_v2_rewrites_asks_and_v1_stays_raw() -> None:
     assert watcher_prompt(window, render_version=1)[0]["content"] == CLIPPED_ASK
     v2 = watcher_prompt(window, render_version=2)[0]["content"]
     assert "[assistant asked: Corpus]" in v2 and "AskUserQuestion(" not in v2
+
+
+def test_structural_asks_handles_double_quoted_repr_values() -> None:
+    fragment = (
+        "AskUserQuestion([{'question': \"What should the task 'diagram' depict?\", 'header': 'Diagram', "
+        "'options': [{'label': 'Flow diagram per workf…(+90ch))"
+    )
+    rewritten = structural_asks(fragment)
+    assert rewritten.startswith("[assistant asked: Diagram] What should the task 'diagram' depict?")
+    assert "AskUserQuestion(" not in rewritten

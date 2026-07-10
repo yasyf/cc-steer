@@ -104,13 +104,22 @@ def watcher_prompt(window: ContextWindow, *, render_version: int = 1) -> list[Me
 # The capture-time preview of an AskUserQuestion turn is the tool call's
 # clipped single-line repr: ``AskUserQuestion([{'question': ..., 'header': ...,
 # 'options': [{'label': ...}, ...]}])``, possibly ending in clip()'s
-# ``…(+Nch)`` marker. Field regexes tolerate the clip: whatever survived is
+# ``…(+Nch)`` marker. Values repr with either quote (double when the text
+# holds an apostrophe). Field regexes tolerate the clip: whatever survived is
 # rendered, whatever was cut is dropped.
 _ASK_FRAGMENT = re.compile(r"AskUserQuestion\(.*", re.MULTILINE)
-_ASK_QUESTION = re.compile(r"'question':\s*'((?:[^'\\]|\\.)*)'")
-_ASK_HEADER = re.compile(r"'header':\s*'((?:[^'\\]|\\.)*)'")
-_ASK_LABEL = re.compile(r"'label':\s*'((?:[^'\\]|\\.)*)'")
-_ASK_PARTIAL_QUESTION = re.compile(r"'question':\s*'((?:[^'\\]|\\.)*)$")
+
+
+def _field(name: str, *, closed: bool = True) -> re.Pattern[str]:
+    single = r"'((?:[^'\\]|\\.)*)" + ("'" if closed else "$")
+    double = r'"((?:[^"\\]|\\.)*)' + ('"' if closed else "$")
+    return re.compile(rf"'{name}':\s*(?:{single}|{double})")
+
+
+_ASK_QUESTION = _field("question")
+_ASK_HEADER = _field("header")
+_ASK_LABEL = _field("label")
+_ASK_PARTIAL_QUESTION = _field("question", closed=False)
 _CLIP_TAIL = re.compile(r"…\(\+\d+ch\)\)*$")
 _RECOMMENDED_SUFFIX = " (Recommended)"
 
@@ -148,15 +157,15 @@ def structural_ask_messages(rendered: Sequence[Message]) -> list[Message]:
 
 def _rewrite_fragment(match: re.Match[str]) -> str:
     fragment = match.group(0)
-    questions = [_unescape(text) for text in _ASK_QUESTION.findall(fragment)]
+    questions = _matches(_ASK_QUESTION, fragment)
     if not questions:
         # The clip cut the (first) question mid-string: salvage what survived.
-        partial = _ASK_PARTIAL_QUESTION.search(_CLIP_TAIL.sub("", fragment))
-        if partial is not None and partial.group(1).strip():
-            return ask_block(f"{_unescape(partial.group(1))}…")
+        salvaged = _matches(_ASK_PARTIAL_QUESTION, _CLIP_TAIL.sub("", fragment))
+        if salvaged and salvaged[0].strip():
+            return ask_block(f"{salvaged[0]}…")
         return fragment
-    headers = [_unescape(text) for text in _ASK_HEADER.findall(fragment)]
-    labels = [_unescape(text) for text in _ASK_LABEL.findall(fragment)]
+    headers = _matches(_ASK_HEADER, fragment)
+    labels = _matches(_ASK_LABEL, fragment)
     options = [label.removesuffix(_RECOMMENDED_SUFFIX) for label in labels]
     recommended = next(
         (label.removesuffix(_RECOMMENDED_SUFFIX) for label in labels if label.endswith(_RECOMMENDED_SUFFIX)), ""
@@ -173,8 +182,12 @@ def _rewrite_fragment(match: re.Match[str]) -> str:
     return "\n".join(blocks)
 
 
+def _matches(pattern: re.Pattern[str], fragment: str) -> list[str]:
+    return [_unescape(single or double) for single, double in pattern.findall(fragment)]
+
+
 def _unescape(text: str) -> str:
-    return text.replace("\\'", "'").replace("\\\\", "\\")
+    return text.replace("\\'", "'").replace('\\"', '"').replace("\\\\", "\\")
 
 
 def gate_text(window: ContextWindow) -> str:
