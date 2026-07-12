@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -105,3 +106,19 @@ async def test_draft_feeds_decide_the_tail_capped_training_rendering(
     assert result == Draft("steer text", 0.1)
     assert seen == [flattened(tail_messages(prompt, DRAFT_CHAR_CAP))]
     assert len(seen[0]) < DRAFT_CHAR_CAP + 100
+
+
+async def test_draft_runs_inference_on_the_caller_thread(
+    tmp_path: Path, fake_mlx: FakeMlxLm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_watcher(tmp_path)
+    drafter = MlxDrafter(root=tmp_path)
+    ran_on: list[int] = []
+
+    def fake_decide(context_tail: str) -> Draft:
+        ran_on.append(threading.get_ident())
+        return Draft("steer text", 0.1)
+
+    monkeypatch.setattr(drafter, "decide", fake_decide)
+    await drafter.draft([{"role": "user", "content": "hi"}, {"role": "assistant", "content": "there"}])
+    assert ran_on == [threading.get_ident()]
