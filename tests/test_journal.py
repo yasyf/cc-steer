@@ -33,7 +33,7 @@ def test_append_finds_existing_log_by_title(tmp_path: Path, monkeypatch: pytest.
     assert journal.append("first") is True
     assert journal.append("second") is True
     appends = [argv for argv in calls if argv[1:3] == ["log", "append"]]
-    assert [argv[3] for argv in appends] == ["bbb", "bbb"]
+    assert [argv[3:] for argv in appends] == [["bbb", "--entry", "first"], ["bbb", "--entry", "second"]]
     assert sum(argv[1:3] == ["log", "list"] for argv in calls) == 1
 
 
@@ -44,9 +44,9 @@ def test_append_creates_log_when_missing(tmp_path: Path, monkeypatch: pytest.Mon
     assert Journal(tmp_path).append("entry") is True
     add = next(argv for argv in calls if argv[1:3] == ["log", "add"])
     assert add[3] == "cc-steer pipeline runs"
-    assert "--tag" in add
+    assert add[add.index("--label") + 1] == "pipeline"
     append = next(argv for argv in calls if argv[1:3] == ["log", "append"])
-    assert append[3] == "fresh"
+    assert append[3:] == ["fresh", "--entry", "entry"]
 
 
 def test_append_degrades_when_binary_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -16,28 +16,28 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 PIPELINE_LOG_TITLE = "cc-steer pipeline runs"
-PIPELINE_LOG_TAG = "pipeline"
+PIPELINE_LOG_LABEL = "pipeline"
 
 
 class Journal:
     """Appends run summaries to one cc-notes log, found or created by title."""
 
-    def __init__(self, repo: Path, *, title: str = PIPELINE_LOG_TITLE, tag: str = PIPELINE_LOG_TAG) -> None:
+    def __init__(self, repo: Path, *, title: str = PIPELINE_LOG_TITLE, label: str = PIPELINE_LOG_LABEL) -> None:
         self.repo = repo
         self.title = title
-        self.tag = tag
+        self.label = label
         self._log_id: str | None = None
 
     def append(self, text: str) -> bool:
         """Appends one entry, creating the log on first use. True when recorded."""
         if (log_id := self._resolve()) is None:
             return False
-        return self._run("log", "append", log_id, "-m", text) is not None
+        return self._run("log", "append", log_id, "--entry", text) is not None
 
     def _resolve(self) -> str | None:
         if self._log_id is not None:
             return self._log_id
-        if (listed := self._run("log", "list", "--json", "--tag", self.tag)) is not None:
+        if (listed := self._run("log", "list", "--json", "--label", self.label)) is not None:
             try:
                 logs = json.loads(listed or "[]")
             except json.JSONDecodeError:
@@ -46,7 +46,7 @@ class Journal:
                 if log.get("title") == self.title:
                     self._log_id = str(log["id"])
                     return self._log_id
-        if (added := self._run("log", "add", self.title, "--tag", self.tag, "--json")) is not None:
+        if (added := self._run("log", "add", self.title, "--label", self.label, "--json")) is not None:
             try:
                 self._log_id = str(json.loads(added)["id"])
             except (json.JSONDecodeError, KeyError):

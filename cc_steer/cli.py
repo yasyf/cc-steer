@@ -1103,7 +1103,7 @@ async def shadow_report(
         click.echo(f"sentinel P(NO_STEER): n={stats.n} mean={stats.mean:.3f} deciles=[{deciles}]")
     if journal_repo is not None:
         line = f"shadow report | {json.dumps(payload, sort_keys=True)}"
-        if not Journal(journal_repo, title="cc-steer shadow reports", tag="shadow").append(line):
+        if not Journal(journal_repo, title="cc-steer shadow reports", label="shadow").append(line):
             click.echo("journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
 
 
