@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from cc_steer.cli import main
 from cc_steer.store import FeedbackStore
 from cc_steer.watcher.delivery import ShadowDelivery
-from cc_steer.watcher.shadow import summarize
+from cc_steer.watcher.shadow import journal_shadow_report, payload_of, summarize
 from tests.test_delivery import make_proposal
 from tests.test_exemplars import TRAIN_SESSION, seed_steering
 
@@ -100,6 +100,35 @@ def test_sentinel_probs_summarize_over_scored_proposals() -> None:
     assert stats.mean == pytest.approx(0.55)
     assert len(stats.deciles) == 9
     assert stats.deciles[0] <= stats.deciles[-1]
+
+
+def test_payload_of_carries_the_derived_per_session_rate() -> None:
+    summary = summarize([proposal_row(), proposal_row(session="s2")], [])
+    payload = payload_of(summary)
+    assert payload["proposals"] == 2
+    assert payload["proposals_per_session"] == 1.0
+    assert payload["window_minutes"] == summary.window_minutes
+
+
+def test_journal_shadow_report_appends_one_sorted_json_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    recorded: list[tuple[Path, str, str, str]] = []
+
+    class FakeJournal:
+        def __init__(self, repo: Path, *, title: str, label: str) -> None:
+            self.repo, self.title, self.label = repo, title, label
+
+        def append(self, text: str) -> bool:
+            recorded.append((self.repo, self.title, self.label, text))
+            return True
+
+    monkeypatch.setattr("cc_steer.watcher.shadow.Journal", FakeJournal)
+    summary = summarize([proposal_row()], [intervention()])
+    assert journal_shadow_report(tmp_path, summary)
+    ((repo, title, label, text),) = recorded
+    assert (repo, title, label) == (tmp_path, "cc-steer shadow reports", "shadow")
+    prefix, _, body = text.partition(" | ")
+    assert prefix == "shadow report"
+    assert json.loads(body) == payload_of(summary)
 
 
 @pytest.mark.integration

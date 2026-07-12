@@ -723,6 +723,8 @@ async def pipeline_run(
     """
     from datetime import date
 
+    from cc_steer.watcher.shadow import journal_shadow_report, report_summary
+
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
     is_weekly = weekly or (auto_weekly and date.today().weekday() == 6)
@@ -749,6 +751,10 @@ async def pipeline_run(
         line = ("weekly | " if is_weekly else "") + report.summary_line()
         if not Journal(journal_repo).append(line):
             click.echo("journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
+        shadow = await report_summary(db, None)
+        click.echo(f"shadow: {shadow.steers} steers — hits {shadow.hits}, nuisance {shadow.nuisance}")
+        if not journal_shadow_report(journal_repo, shadow):
+            click.echo("shadow journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
     if report.failed:
         raise click.ClickException(f"stages failed: {', '.join(report.failed)}")
 
@@ -1074,15 +1080,10 @@ async def shadow_report(
     counts, the drafter's sentinel-probability distribution, proposals per
     session, and the sessions that produced proposals. No LLM calls.
     """
-    from cc_steer.watcher.delivery import ShadowDelivery
-    from cc_steer.watcher.shadow import intervention_rows, summarize
+    from cc_steer.watcher.shadow import journal_shadow_report, payload_of, report_summary
 
-    async with await ShadowDelivery.open(shadow_db) as ledger:
-        proposals = await ledger.proposals()
-    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        interventions = await intervention_rows(store)
-    summary = summarize(proposals, interventions, window_minutes=window)
-    payload = dataclasses.asdict(summary) | {"proposals_per_session": summary.proposals_per_session}
+    summary = await report_summary(db, shadow_db, window_minutes=window)
+    payload = payload_of(summary)
     if as_json:
         click.echo(json.dumps(payload))
         return
@@ -1101,10 +1102,8 @@ async def shadow_report(
     if (stats := summary.sentinel_probs) is not None:
         deciles = " ".join(f"{p:.3f}" for p in stats.deciles)
         click.echo(f"sentinel P(NO_STEER): n={stats.n} mean={stats.mean:.3f} deciles=[{deciles}]")
-    if journal_repo is not None:
-        line = f"shadow report | {json.dumps(payload, sort_keys=True)}"
-        if not Journal(journal_repo, title="cc-steer shadow reports", label="shadow").append(line):
-            click.echo("journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
+    if journal_repo is not None and not journal_shadow_report(journal_repo, summary):
+        click.echo("journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
 
 
 @main.command(name="view-samples")

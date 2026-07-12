@@ -11,16 +11,22 @@ nuisance candidate otherwise.
 from __future__ import annotations
 
 import dataclasses
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from cc_steer.journal import Journal
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
     from cc_steer.store import FeedbackStore
 
 WINDOW_MINUTES = 30
+REPORT_LOG_TITLE = "cc-steer shadow reports"
+REPORT_LOG_LABEL = "shadow"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +147,40 @@ def summarize(
         hit_categories=hit_categories,
         sentinel_probs=SentinelStats.from_probs(probs),
     )
+
+
+async def report_summary(
+    db: Path | None, shadow_db: Path | None, *, window_minutes: int = WINDOW_MINUTES
+) -> ShadowSummary:
+    """The shadow report over the on-disk ledgers — the one codepath behind the CLI and the nightly pipeline step.
+
+    Args:
+        db: Feedback store path; ``None`` uses the default.
+        shadow_db: Shadow ledger path; ``None`` uses the default.
+        window_minutes: The hit-join window.
+
+    Returns:
+        The :class:`ShadowSummary` at ``window_minutes``.
+    """
+    from cc_steer.store import FeedbackStore
+    from cc_steer.watcher.delivery import ShadowDelivery
+
+    async with await ShadowDelivery.open(shadow_db) as ledger:
+        proposals = await ledger.proposals()
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        interventions = await intervention_rows(store)
+    return summarize(proposals, interventions, window_minutes=window_minutes)
+
+
+def payload_of(summary: ShadowSummary) -> dict[str, object]:
+    """The summary as one JSON-able payload, including the derived per-session rate."""
+    return dataclasses.asdict(summary) | {"proposals_per_session": summary.proposals_per_session}
+
+
+def journal_shadow_report(journal_repo: Path, summary: ShadowSummary) -> bool:
+    """Appends one report line to the shadow journal log; True when recorded."""
+    line = f"shadow report | {json.dumps(payload_of(summary), sort_keys=True)}"
+    return Journal(journal_repo, title=REPORT_LOG_TITLE, label=REPORT_LOG_LABEL).append(line)
 
 
 async def intervention_rows(store: FeedbackStore) -> list[dict[str, object]]:
