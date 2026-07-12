@@ -1,1 +1,1 @@
-{"v":1,"lamport":2,"ops":[{"kind":"add_comment","body":"C2 complete (paired, exact stats per E8 audit): v001 0W/29T/0L p=1.0; winner 1W/10T/0L p=1.0 -\u003e stage 3 DROPPED. C3/E7 rerun skipped as moot: the rewrite preserves draft substance by design, so no retrieval config can flip same_direction; with stage 3 dropped the grid answers nothing (decision + rationale in results/E9/verdict.md + EXP E9-rewrite log)."}]}
+{"v":1,"lamport":3,"ops":[{"kind":"set_criterion_status","id":"8eb77932082171e1f7a9edcc13699ccc","status":"met"}]}
