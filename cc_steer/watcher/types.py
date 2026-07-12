@@ -42,6 +42,9 @@ class SteerProposal:
         steer: The stage-3 final steering message, or None on ``NO_STEER``.
         exemplar_keys: The dedup keys of the exemplars shown to stage 3.
         stage_versions: A JSON blob of the model ids and config the cascade ran with.
+        window_render: The exact flattened window text the cascade scored, so
+            replay reads the moment off the row instead of reconstructing it
+            from ``(session_id, anchor_uuid, turn_index)``.
     """
 
     session_id: str
@@ -53,6 +56,7 @@ class SteerProposal:
     steer: str | None
     exemplar_keys: tuple[str, ...]
     stage_versions: str
+    window_render: str
     sentinel_prob: float | None = None
 
 

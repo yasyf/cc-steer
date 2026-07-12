@@ -134,6 +134,13 @@ async def test_full_path_conditions_the_refiner_on_exemplars(store: FeedbackStor
     assert versions["retrieval"] is True
 
 
+async def test_proposal_carries_the_rendered_window(store: FeedbackStore) -> None:
+    window = live_window()
+    proposal = await cascade_for(store).evaluate(SESSION, turn_index=3, anchor_uuid="a1", window=window)
+    assert proposal is not None
+    assert proposal.window_render == gate_text(window)
+
+
 async def test_refiner_no_steer_keeps_the_draft(store: FeedbackStore) -> None:
     cascade = cascade_for(store, refiner=FakeRefiner(NO_STEER))
     proposal = await cascade.evaluate(SESSION, turn_index=3, anchor_uuid="a1", window=live_window())

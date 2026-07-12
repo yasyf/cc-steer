@@ -233,6 +233,7 @@ class Cascade:
             steer=steer,
             exemplar_keys=tuple(exemplar.dedup_key for exemplar in exemplars),
             stage_versions=self.stage_versions(),
+            window_render=text,
         )
 
     async def retrieve(self, query_text: str) -> list[Exemplar]:

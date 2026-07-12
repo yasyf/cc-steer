@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   sentinel_prob REAL,
   draft TEXT,
   steer TEXT,
+  window_render TEXT,
   exemplar_keys TEXT NOT NULL,
   stage_versions TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -42,9 +43,15 @@ CREATE TABLE IF NOT EXISTS proposals (
 INSERT_PROPOSAL = """
 INSERT OR IGNORE INTO proposals (
   session_id, anchor_uuid, turn_index, ts, gate_score, sentinel_prob, draft, steer,
-  exemplar_keys, stage_versions, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  window_render, exemplar_keys, stage_versions, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
+
+
+async def ensure_window_render(conn: aiosqlite.Connection) -> None:
+    cur = await conn.execute("PRAGMA table_info(proposals)")
+    if "window_render" not in {row["name"] async for row in cur}:
+        await conn.execute("ALTER TABLE proposals ADD COLUMN window_render TEXT")
 
 
 class SteerDelivery(Protocol):
@@ -80,6 +87,7 @@ class ShadowDelivery:
         conn = await aiosqlite.connect(str(target), isolation_level=None)
         conn.row_factory = aiosqlite.Row
         await conn.executescript(SHADOW_DDL)
+        await ensure_window_render(conn)
         return cls(conn)
 
     async def close(self) -> None:
@@ -110,6 +118,7 @@ class ShadowDelivery:
                 proposal.sentinel_prob,
                 proposal.draft,
                 proposal.steer,
+                proposal.window_render,
                 json.dumps(list(proposal.exemplar_keys)),
                 proposal.stage_versions,
                 now(),
