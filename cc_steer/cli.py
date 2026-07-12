@@ -782,20 +782,31 @@ async def pipeline_run(
     help="The cc-steer-lab checkout the retrain agent runs harness.retrain in.",
 )
 @click.option("--retrain-hour", type=int, default=4, show_default=True, help="Local hour the Sunday retrain fires at.")
+@click.option(
+    "--watch/--no-watch",
+    "watch",
+    default=True,
+    show_default=True,
+    help="Also install the always-on shadow watch daemon under KeepAlive.",
+)
 def pipeline_install_launchd(
-    prefix: str, journal_repo: Path | None, hour: int, retrain: bool, lab: Path | None, retrain_hour: int
+    prefix: str, journal_repo: Path | None, hour: int, retrain: bool, lab: Path | None, retrain_hour: int, watch: bool
 ) -> None:
-    """Schedule the pass nightly — plus the weekly model retrain — via macOS LaunchAgents.
+    """Schedule the pass nightly — plus the weekly model retrain and the shadow watcher — via macOS LaunchAgents.
 
     The pipeline agent covers both collection cadences: it runs ``pipeline run
     --auto-weekly``, so the Sunday pass folds in the auditor and eval. The
     retrain agent runs the lab's ``harness.retrain`` every Sunday, refreshing
     the promoted gate model when the training data moved (``--no-retrain``
-    skips it). Logs land under ``~/.cc-steer/logs/``. Re-running replaces the
-    agents in place.
+    skips it). The watch agent runs ``cc-steer watch`` continuously under
+    ``KeepAlive`` so a fail-fast crash respawns (``--no-watch`` skips it). Logs
+    land under ``~/.cc-steer/logs/``. Re-running replaces the agents in place.
     """
     path = launchd.install(prefix, journal_repo, hour=hour)
     click.echo(f"installed {launchd.LABEL} ({path}): nightly {hour:02d}:00, weekly audit on Sundays")
+    if watch:
+        watch_path = launchd.install_watch(prefix)
+        click.echo(f"installed {launchd.WATCH_LABEL} ({watch_path}): always-on shadow watcher (KeepAlive)")
     if not retrain:
         return
     lab_dir = lab or launchd.LAB_DIR
@@ -807,8 +818,9 @@ def pipeline_install_launchd(
 
 @pipeline_group.command(name="uninstall-launchd")
 def pipeline_uninstall_launchd() -> None:
-    """Unload and remove the nightly pipeline and weekly retrain LaunchAgents."""
+    """Unload and remove the nightly pipeline, weekly retrain, and shadow watch LaunchAgents."""
     click.echo(f"{launchd.LABEL}: " + ("removed" if launchd.uninstall() else "not installed"))
+    click.echo(f"{launchd.WATCH_LABEL}: " + ("removed" if launchd.uninstall_watch() else "not installed"))
     click.echo(f"{launchd.RETRAIN_LABEL}: " + ("removed" if launchd.uninstall_retrain() else "not installed"))
 
 
