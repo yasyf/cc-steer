@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import math
 import os
-import re
 import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -52,11 +52,15 @@ LIVE_OFF_ENV = "CC_STEER_LIVE_OFF"
 SHADOW_DB_ENV = "CC_STEER_SHADOW_DB"
 
 PROPOSAL_TAG = "cc-steer-proposal"
-PROPOSAL_SPAN_RE = re.compile(rf"<{PROPOSAL_TAG}\b[^>]*>.*?</{PROPOSAL_TAG}>\s*", re.DOTALL)
+OPEN_TAG = f"<{PROPOSAL_TAG}"
+CLOSE_TAG = f"</{PROPOSAL_TAG}>"
+
+STEER_MAX_CHARS = 500
+DELIVERY_MARKUP: tuple[str, ...] = (PROPOSAL_TAG, "hookSpecificOutput", "additionalContext")
 
 DEFAULT_TTL_MINUTES = 60
 
-State = Literal["queued", "delivered", "holdout", "mirror", "expired", "suppressed_budget"]
+State = Literal["queued", "delivered", "holdout", "mirror", "expired", "suppressed_budget", "suppressed_invalid"]
 
 DELIVERIES_DDL = """
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -106,6 +110,33 @@ def is_killed() -> bool:
     return bool(os.environ.get(LIVE_OFF_ENV)) or live_off_path().exists()
 
 
+def project_list(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise ValueError(f"allow_projects must be a list of nonempty absolute-path strings, got {raw!r}")
+    projects = tuple(os.path.realpath(p) for p in raw if isinstance(p, str) and p and os.path.isabs(p))
+    if len(projects) != len(raw):
+        raise ValueError(f"allow_projects must be a list of nonempty absolute-path strings, got {raw!r}")
+    return projects
+
+
+def positive_int(raw: object, name: str) -> int:
+    match raw:
+        case bool():
+            pass
+        case int() if raw > 0:
+            return raw
+    raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+
+
+def unit_fraction(raw: object) -> float:
+    match raw:
+        case bool():
+            pass
+        case int() | float() if math.isfinite(raw) and 0.0 <= raw <= 1.0:
+            return float(raw)
+    raise ValueError(f"holdout_frac must be a finite fraction in [0, 1], got {raw!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class LiveConfig:
     """The live-steering policy read from ``~/.cc-steer/live.toml``.
@@ -142,7 +173,9 @@ class LiveConfig:
         """Reads the policy from ``path`` (default :func:`live_config_path`); missing means shadow.
 
         Raises:
-            ValueError: The file is malformed or names an unknown mode.
+            ValueError: The file is malformed, names an unknown mode, or carries an
+                out-of-range value (a non-array ``allow_projects``, a relative or empty
+                project path, a non-positive knob, or a ``holdout_frac`` outside ``[0, 1]``).
         """
         target = path or live_config_path()
         if not target.exists():
@@ -152,12 +185,12 @@ class LiveConfig:
             raise ValueError(f"unknown live mode {mode!r}; expected one of {sorted(LIVE_MODES)}")
         return cls(
             mode=mode,
-            allow_projects=tuple(os.path.realpath(project) for project in data.get("allow_projects", ())),
-            cooldown_turns=int(data.get("cooldown_turns", 5)),
-            max_per_session=int(data.get("max_per_session", 5)),
-            max_live_per_day=int(data.get("max_live_per_day", 20)),
-            steer_ttl_minutes=int(data.get("steer_ttl_minutes", DEFAULT_TTL_MINUTES)),
-            holdout_frac=float(data.get("holdout_frac", 0.5)),
+            allow_projects=project_list(data.get("allow_projects", [])),
+            cooldown_turns=positive_int(data.get("cooldown_turns", 5), "cooldown_turns"),
+            max_per_session=positive_int(data.get("max_per_session", 5), "max_per_session"),
+            max_live_per_day=positive_int(data.get("max_live_per_day", 20), "max_live_per_day"),
+            steer_ttl_minutes=positive_int(data.get("steer_ttl_minutes", DEFAULT_TTL_MINUTES), "steer_ttl_minutes"),
+            holdout_frac=unit_fraction(data.get("holdout_frac", 0.5)),
         )
 
     def allows(self, project: str) -> bool:
@@ -212,9 +245,30 @@ def format_additional_context(proposal_id: int, steer: str) -> str:
     )
 
 
+def steer_deliverable(steer: str) -> bool:
+    """Whether a steer is safe to surface verbatim: one paragraph, within the length cap, no delivery markup."""
+    return (
+        len(steer) <= STEER_MAX_CHARS
+        and "\n\n" not in steer.strip()
+        and not any(marker in steer for marker in DELIVERY_MARKUP)
+    )
+
+
 def scrub_text(text: str) -> str:
-    """Strips every ``<cc-steer-proposal>`` span, leaving the user's authored text."""
-    return PROPOSAL_SPAN_RE.sub("", text)
+    """Strips every ``<cc-steer-proposal …>…</cc-steer-proposal>`` span by a linear index scan, no backtracking."""
+    out: list[str] = []
+    cursor = 0
+    while (start := text.find(OPEN_TAG, cursor)) != -1:
+        opener_end = text.find(">", start + len(OPEN_TAG))
+        close = text.find(CLOSE_TAG, opener_end + 1) if opener_end != -1 else -1
+        if opener_end == -1 or close == -1:
+            break
+        out.append(text[cursor:start])
+        cursor = close + len(CLOSE_TAG)
+        while cursor < len(text) and text[cursor] in " \t\r\n":
+            cursor += 1
+    out.append(text[cursor:])
+    return "".join(out)
 
 
 def scrub_event(event: TranscriptEvent) -> TranscriptEvent:
@@ -319,6 +373,14 @@ class MailboxDelivery:
             )
         ]
         return by_state | {"delivered_today": delivered_today}
+
+    async def expire_all_queued(self, *, at: datetime | None = None) -> int:
+        """Expires every queued delivery and returns how many — the backlog flush behind ``live off`` and a mode change."""
+        cur = await self.conn.execute(
+            "UPDATE deliveries SET state = 'expired', decided_at = ? WHERE state = 'queued'",
+            ((at or datetime.now(UTC)).isoformat(),),
+        )
+        return cur.rowcount
 
 
 class TeeDelivery:

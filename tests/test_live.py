@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 import pytest
 from cc_transcript import keep
 
+from cc_steer.detectors import detect
 from cc_steer.spec import STEERING_SPEC
 from cc_steer.watcher.delivery import ShadowDelivery
 from cc_steer.watcher.live import (
+    PROPOSAL_TAG,
     LiveConfig,
     MailboxDelivery,
     TeeDelivery,
@@ -16,8 +18,9 @@ from cc_steer.watcher.live import (
     is_killed,
     scrub_events,
     scrub_text,
+    steer_deliverable,
 )
-from tests.builders import parse, user_text
+from tests.builders import assistant_text, hook_context_attachment, parse, user_text
 from tests.test_delivery import make_proposal
 
 if TYPE_CHECKING:
@@ -59,6 +62,42 @@ def test_unknown_mode_crashes_loud(tmp_path: Path) -> None:
 def test_malformed_toml_crashes_loud(tmp_path: Path) -> None:
     with pytest.raises(Exception, match="."):
         LiveConfig.load(write_config(tmp_path / "live.toml", "mode = = =\n"))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'allow_projects = "/work/proj"\n',
+        'allow_projects = ["relative/path"]\n',
+        'allow_projects = ["/a", ""]\n',
+        'allow_projects = ["/a", 3]\n',
+        "holdout_frac = 1.5\n",
+        "holdout_frac = -0.1\n",
+        "holdout_frac = nan\n",
+        "holdout_frac = inf\n",
+        "cooldown_turns = 0\n",
+        "max_live_per_day = -3\n",
+        "steer_ttl_minutes = 0\n",
+        "max_per_session = 0\n",
+    ],
+    ids=[
+        "projects_bare_string",
+        "projects_relative",
+        "projects_empty",
+        "projects_nonstring",
+        "frac_above_one",
+        "frac_below_zero",
+        "frac_nan",
+        "frac_inf",
+        "cooldown_zero",
+        "budget_negative",
+        "ttl_zero",
+        "per_session_zero",
+    ],
+)
+def test_malformed_values_crash_loud(tmp_path: Path, body: str) -> None:
+    with pytest.raises(ValueError, match="."):
+        LiveConfig.load(write_config(tmp_path / "live.toml", f'mode = "mirror"\n{body}'))
 
 
 def test_config_round_trips_through_toml(tmp_path: Path) -> None:
@@ -116,6 +155,41 @@ def test_scrub_events_drops_a_pure_steer_turn_to_short() -> None:
 def test_scrub_events_leaves_untagged_events_untouched() -> None:
     original = parse([user_text("just a normal correction")])
     assert scrub_events(original) == original
+
+
+def test_scrub_text_strips_multiple_spans_linearly() -> None:
+    text = "<cc-steer-proposal id=1>one</cc-steer-proposal>\nkeep me\n<cc-steer-proposal id=2>two</cc-steer-proposal>\ntail"
+    assert scrub_text(text) == "keep me\ntail"
+
+
+def test_scrub_text_leaves_an_unterminated_opener_intact() -> None:
+    text = "before <cc-steer-proposal id=1>dangling opener never closed"
+    assert scrub_text(text) == text
+
+
+def test_injected_steer_attachment_never_mines_a_span_candidate() -> None:
+    steer_span = format_additional_context(7, "abstract the retry loop before you touch it")
+    events = scrub_events(
+        parse(
+            [
+                assistant_text("here is the initial approach"),
+                user_text("no, keep it inline and add a real test first"),
+                hook_context_attachment(steer_span),
+            ]
+        )
+    )
+    candidates = detect(events)
+    assert candidates, "the authored correction must survive mining"
+    assert all(PROPOSAL_TAG not in candidate.text for candidate in candidates)
+    assert any("keep it inline" in candidate.text for candidate in candidates)
+
+
+def test_steer_deliverable_rejects_markup_length_and_paragraphs() -> None:
+    assert steer_deliverable("run the linter before you push")
+    assert not steer_deliverable("a" * 501)
+    assert not steer_deliverable("first paragraph\n\nsecond paragraph")
+    assert not steer_deliverable("nested <cc-steer-proposal id=1>x</cc-steer-proposal>")
+    assert not steer_deliverable('{"hookSpecificOutput": {"additionalContext": "x"}}')
 
 
 def test_format_additional_context_carries_the_tag_and_instruction() -> None:

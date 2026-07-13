@@ -661,23 +661,32 @@ def live_on() -> None:
 
 
 @live_group.command(name="off")
-def live_off() -> None:
-    """Halt live delivery everywhere: touch the ``~/.cc-steer/live.off`` kill switch."""
-    from cc_steer.watcher.live import live_off_path
+@coro
+async def live_off() -> None:
+    """Halt live delivery everywhere: touch the ``~/.cc-steer/live.off`` kill switch and expire the backlog."""
+    from cc_steer.watcher.live import LiveConfig, MailboxDelivery, live_off_path
 
     (flag := live_off_path()).parent.mkdir(parents=True, exist_ok=True)
     flag.touch()
-    click.echo(f"live delivery OFF (kill switch set at {flag})")
+    async with await MailboxDelivery.open(config=LiveConfig.shadow()) as mailbox:
+        expired = await mailbox.expire_all_queued()
+    click.echo(f"live delivery OFF (kill switch set at {flag}); expired {expired} queued steer(s)")
 
 
 @live_group.command(name="mode")
 @click.argument("mode", type=click.Choice(["shadow", "mirror", "live_allow", "live_all"]))
-def live_mode(mode: str) -> None:
-    """Set the delivery mode in ``~/.cc-steer/live.toml`` (the live modes are a human-only escalation)."""
-    from cc_steer.watcher.live import LiveConfig
+@coro
+async def live_mode(mode: str) -> None:
+    """Set the delivery mode in ``~/.cc-steer/live.toml`` (the live modes are a human-only escalation).
+
+    The change expires every queued steer so a backlog built under the old policy never delivers under the new one.
+    """
+    from cc_steer.watcher.live import LiveConfig, MailboxDelivery
 
     path = dataclasses.replace(LiveConfig.load(), mode=mode).write()
-    click.echo(f"mode = {mode} written to {path}")
+    async with await MailboxDelivery.open(config=LiveConfig.shadow()) as mailbox:
+        expired = await mailbox.expire_all_queued()
+    click.echo(f"mode = {mode} written to {path}; expired {expired} queued steer(s)")
 
 
 @live_group.command(name="status")

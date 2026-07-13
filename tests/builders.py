@@ -85,6 +85,19 @@ def interrupt_result(tool_id: str, **overrides: Any) -> dict[str, Any]:
     return tool_result(tool_id, "[Request interrupted by user]", is_error=True, **overrides)
 
 
+def hook_context_attachment(*content: str, **overrides: Any) -> dict[str, Any]:
+    return envelope(
+        "attachment",
+        attachment={
+            "type": "hook_additional_context",
+            "hookName": "cc-steer",
+            "hookEvent": "UserPromptSubmit",
+            "content": list(content),
+        },
+        **overrides,
+    )
+
+
 def mode_entry(value: str, **overrides: Any) -> dict[str, Any]:
     return {"type": "mode", "mode": value, "sessionId": overrides.pop("sessionId", SESSION)}
 

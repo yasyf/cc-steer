@@ -27,6 +27,7 @@ from cc_steer.watcher.live import (
     format_additional_context,
     is_killed,
     shadow_db_path,
+    steer_deliverable,
     today_prefix,
 )
 
@@ -37,7 +38,7 @@ BUDGET_S = 0.2
 HOOK_EVENT = "UserPromptSubmit"
 
 SELECT_FRESHEST = """
-SELECT d.id, d.proposal_id, d.holdout, p.steer
+SELECT d.id, d.proposal_id, d.holdout, d.project, p.steer
 FROM deliveries d JOIN proposals p ON p.id = d.proposal_id
 WHERE d.session_id = ? AND d.state = 'queued'
 ORDER BY d.ts DESC, d.id DESC LIMIT 1
@@ -48,6 +49,13 @@ UPDATE deliveries SET state = 'expired', decided_at = ?
 WHERE session_id = ? AND state = 'queued' AND ttl <= ?
 """
 
+EXPIRE_OLDER = """
+UPDATE deliveries SET state = 'expired', decided_at = ?
+WHERE session_id = ? AND state = 'queued' AND id != ?
+"""
+
+CLAIM = "UPDATE deliveries SET state = ?, decided_at = ? WHERE id = ? AND state = 'queued'"
+
 
 def delivered_today(conn: sqlite3.Connection, at: datetime) -> int:
     return conn.execute(
@@ -56,12 +64,12 @@ def delivered_today(conn: sqlite3.Connection, at: datetime) -> int:
     ).fetchone()[0]
 
 
-def decide(config: LiveConfig, *, cwd: str, held_out: bool, delivered: int) -> tuple[State, bool]:
+def decide(config: LiveConfig, *, origin: str | None, cwd: str, held_out: bool, delivered: int) -> tuple[State, bool]:
     """The delivery verdict for one popped steer: the terminal state to record and whether to emit."""
     match config.mode:
-        case "mirror":
+        case "mirror" | "shadow":
             return ("mirror", False)
-        case "live_allow" if not config.allows(cwd):
+        case "live_allow" if not (origin and config.allows(cwd) and config.allows(os.path.realpath(origin))):
             return ("mirror", False)
         case "live_allow" | "live_all":
             if held_out:
@@ -69,19 +77,34 @@ def decide(config: LiveConfig, *, cwd: str, held_out: bool, delivered: int) -> t
             if delivered >= config.max_live_per_day:
                 return ("suppressed_budget", False)
             return ("delivered", True)
-        case "shadow":
-            return ("mirror", False)
 
 
 def resolve(conn: sqlite3.Connection, config: LiveConfig, *, session_id: str, cwd: str, at: datetime) -> str | None:
-    """Expires stale steers, pops the session's freshest queued one, records its verdict, returns the emission."""
+    """Under a write lock: expire stale and superseded steers, claim the session's freshest queued one, return its emission.
+
+    The whole verdict runs in one ``BEGIN IMMEDIATE`` transaction so concurrent hooks serialize; the
+    claim is conditional on the row still being ``queued`` and emits only when it wins that update, so two
+    racing prompts never surface the same steer twice.
+    """
     stamp = at.isoformat()
-    conn.execute(EXPIRE_STALE, (stamp, session_id, stamp))
-    if (row := conn.execute(SELECT_FRESHEST, (session_id,)).fetchone()) is None:
-        return None
-    state, emit = decide(config, cwd=cwd, held_out=bool(row["holdout"]), delivered=delivered_today(conn, at))
-    conn.execute("UPDATE deliveries SET state = ?, decided_at = ? WHERE id = ?", (state, stamp, row["id"]))
-    return format_additional_context(int(row["proposal_id"]), row["steer"]) if emit else None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(EXPIRE_STALE, (stamp, session_id, stamp))
+        if (row := conn.execute(SELECT_FRESHEST, (session_id,)).fetchone()) is None:
+            conn.execute("COMMIT")
+            return None
+        conn.execute(EXPIRE_OLDER, (stamp, session_id, row["id"]))
+        state, emit = decide(
+            config, origin=row["project"], cwd=cwd, held_out=bool(row["holdout"]), delivered=delivered_today(conn, at)
+        )
+        if emit and not steer_deliverable(row["steer"]):
+            state, emit = "suppressed_invalid", False
+        claimed = conn.execute(CLAIM, (state, stamp, row["id"])).rowcount == 1
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return format_additional_context(int(row["proposal_id"]), row["steer"]) if emit and claimed else None
 
 
 def additional_context() -> str | None:
@@ -107,14 +130,18 @@ def _budget_exceeded(signum: int, frame: FrameType | None) -> None:
 
 
 def run() -> None:
-    """The hook entrypoint: guard the budget, resolve fail-open, emit at most one context, exit 0."""
-    signal.signal(signal.SIGALRM, _budget_exceeded)
-    signal.setitimer(signal.ITIMER_REAL, BUDGET_S)
+    """The hook entrypoint: guard the budget, resolve fail-open, emit at most one context, exit 0.
+
+    One outer guard wraps the timer, the resolve, and the emit; the ``finally`` disarms the budget timer
+    and exits 0 no matter what — a broken hook degrades to a silent no-op, never a broken session.
+    """
     try:
-        context = additional_context()
+        signal.signal(signal.SIGALRM, _budget_exceeded)
+        signal.setitimer(signal.ITIMER_REAL, BUDGET_S)
+        if (context := additional_context()) is not None:
+            json.dump({"hookSpecificOutput": {"hookEventName": HOOK_EVENT, "additionalContext": context}}, sys.stdout)
     except BaseException:
-        context = None
-    signal.setitimer(signal.ITIMER_REAL, 0)
-    if context is not None:
-        json.dump({"hookSpecificOutput": {"hookEventName": HOOK_EVENT, "additionalContext": context}}, sys.stdout)
-    raise SystemExit(0)
+        pass
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        raise SystemExit(0)

@@ -18,6 +18,7 @@ from typing import Any
 DEFAULT_PREFIX = "uvx cc-steer"
 EVENT = "SessionEnd"
 LIVE_EVENT = "UserPromptSubmit"
+LIVE_TIMEOUT_S = 5
 
 type Owns = Callable[[dict[str, Any]], bool]
 
@@ -43,8 +44,11 @@ def hook_group(prefix: str = DEFAULT_PREFIX) -> dict[str, Any]:
 
 
 def live_group(prefix: str = DEFAULT_PREFIX) -> dict[str, Any]:
-    """The UserPromptSubmit steer group this module owns, run synchronously so context reaches the model."""
-    return {"hooks": [{"type": "command", "command": live_command(prefix)}]}
+    """The UserPromptSubmit steer group this module owns, run synchronously so context reaches the model.
+
+    The ``timeout`` hard-bounds a stuck hook at the harness level, backing the hook's own ~200ms budget.
+    """
+    return {"hooks": [{"type": "command", "command": live_command(prefix), "timeout": LIVE_TIMEOUT_S}]}
 
 
 def group_commands(group: dict[str, Any]) -> tuple[str, ...]:
