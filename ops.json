@@ -1,0 +1,1 @@
+{"v":1,"lamport":1,"ops":[{"kind":"create_task","nonce":"4afdfa686d983ac088b36b97115177d0","title":"Migrate stream-trade onto athome","description":"","type":"task","priority":2,"branch":"main","parent":"","labels":null},{"kind":"add_criterion","id":"6516e48fd00db177f9b43bb43bcff146","text":"suite green + fidelity bake-off passes + record-replay parity","script":""}]}
