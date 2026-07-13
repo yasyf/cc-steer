@@ -338,7 +338,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.4" },
-    { name = "cc-transcript", editable = "../cc-transcript" },
+    { name = "cc-transcript", specifier = ">=13,<14" },
     { name = "click", specifier = ">=8" },
     { name = "datasets", specifier = ">=3.2" },
     { name = "fastapi", specifier = ">=0.115" },
@@ -365,8 +365,8 @@ docs = [{ name = "great-docs", specifier = ">=0.14" }]
 
 [[package]]
 name = "cc-transcript"
-version = "10.2.0"
-source = { editable = "../cc-transcript" }
+version = "13.0.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "anyio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -375,31 +375,12 @@ dependencies = [
     { name = "tree-sitter", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "tree-sitter-bash", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "afinn", marker = "extra == 'sentiment'", specifier = ">=0.1" },
-    { name = "aiosqlite", specifier = ">=0.20" },
-    { name = "anyio", specifier = ">=4.4" },
-    { name = "click", specifier = ">=8.1" },
-    { name = "model2vec", marker = "extra == 'judge'", specifier = ">=0.8.2" },
-    { name = "numpy", marker = "extra == 'judge'", specifier = ">=1.26" },
-    { name = "orjson", specifier = ">=3.10" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
-    { name = "spacy", marker = "extra == 'sentiment'", specifier = ">=3.8" },
-    { name = "spawnllm", marker = "extra == 'llm'", specifier = ">=0.5.4,<0.6" },
-    { name = "sqlite-vec", marker = "extra == 'judge'", specifier = ">=0.1.9" },
-    { name = "tree-sitter", specifier = ">=0.26" },
-    { name = "tree-sitter-bash", specifier = ">=0.25" },
-    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.44" },
-]
-provides-extras = ["dev", "sentiment", "llm", "judge"]
-
-[package.metadata.requires-dev]
-docs = [
-    { name = "great-docs", specifier = ">=0.14" },
-    { name = "griffelib", specifier = ">=2.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/e1/81/e5033c0937c916d02621e6a51dd5d3f84386bb4d3683bdff3900f24b2fd8/cc_transcript-13.0.0.tar.gz", hash = "sha256:880eb7aeb9a80d3500a98d4478d23ead1c4e15c4202ceae83e72065d5d8f4f49", size = 11964847, upload-time = "2026-07-13T17:55:55.027Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/26/ed19f927875addba3d9290c36c18db142884f59b6c1db7db89b2c036ed1c/cc_transcript-13.0.0-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:4b633c730e5ef5453e62c7769793e766ca181f66df81c0a15336489989c07b13", size = 25383744, upload-time = "2026-07-13T17:55:42.889Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/9f/14303be3d007e57e8f2223b94d3a1e54f23038360f21557154880251d0da/cc_transcript-13.0.0-cp313-abi3-macosx_11_0_x86_64.whl", hash = "sha256:1ee39e89d2e567519fabb6c24cc62d304daaa83062f83209a1a3c6b06dbc91d5", size = 25382436, upload-time = "2026-07-13T17:55:46.095Z" },
+    { url = "https://files.pythonhosted.org/packages/97/1c/e667b49428a671b5a00f7383093f598fde134a455cc4039f6ed1c6e69e07/cc_transcript-13.0.0-cp313-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:1ea47a04ed93251a3d7a9d8551805c7c8df6b5ed2308e17cb3ee1d6063e0fe16", size = 25367101, upload-time = "2026-07-13T17:55:49.421Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/38/41a7cdf9ff7fcb2e850f4d5e8cb8eaec32f1c10200451c691d336c96cd37/cc_transcript-13.0.0-cp313-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:a3b9c6f5e367e6fb20acc6e9da6ba85937b3186d71d97572c46760cb0db8b219", size = 25483897, upload-time = "2026-07-13T17:55:52.216Z" },
 ]
 
 [[package]]
