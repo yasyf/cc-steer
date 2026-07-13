@@ -24,6 +24,7 @@ from cc_steer.refine import refine as run_refine
 from cc_steer.scan import scan as run_scan
 from cc_steer.triage import audit as run_audit
 from cc_steer.triage import triage as run_triage
+from cc_steer.watcher.reactions import attribute_reactions
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -157,6 +158,10 @@ async def run_pipeline(
             f"precision {precision}, contamination {contamination}"
         )
 
+    async def reactions_() -> str:
+        report = await attribute_reactions(store)
+        return report.summary_line() if report.total else "no delivered steers to attribute"
+
     async def export_() -> str:
         try:
             report = await run_export(store, out=out, push_to=push_to)
@@ -177,5 +182,6 @@ async def run_pipeline(
     if weekly:
         await stage("audit", audit_)
         await stage("eval", eval_)
+    await stage("reactions", reactions_)
     await stage("export", export_)
     return PipelineReport(outcomes=tuple(outcomes))

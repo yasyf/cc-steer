@@ -32,6 +32,8 @@ from cc_steer.triage import triage as run_triage
 if TYPE_CHECKING:
     from spawnllm import TModel
 
+    from cc_steer.watcher.live import ReactionKind
+
 SOURCE_KINDS = [*STEERING_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
 DATASET_DIR = Path.home() / ".cc-steer" / "dataset"
@@ -120,10 +122,14 @@ async def scan(
     closest session and recorded through the same idempotent insert. A pass that
     changes data syncs the dataset to HuggingFace; ``--no-sync`` skips it.
     """
+    from cc_steer.watcher.reactions import attribute_reactions
+
     roots = transcripts or (CLAUDE_PROJECTS_DIR,)
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         report = await run_scan(store, roots, findings_dirs=findings, full=full)
         click.echo(f"scanned {report.scanned} files, {report.inserted} new rows")
+        if (reactions := await attribute_reactions(store)).total:
+            click.echo(reactions.summary_line())
         if sync and report.inserted:
             await sync_dataset(store)
 
@@ -704,6 +710,51 @@ async def live_status() -> None:
     async with await MailboxDelivery.open(config=config) as mailbox:
         counts = await mailbox.counts()
     click.echo(f"delivered today: {counts.get('delivered_today', 0)}   " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if k != "delivered_today"))
+
+
+async def record_cli_reaction(proposal_id: int, kind: ReactionKind) -> int | None:
+    """Records an explicit ``cli_verb`` reaction for a known proposal; returns its delivery row id, if any.
+
+    Raises when the proposal id is unknown, so a mistyped id can never plant an
+    orphan reaction that a later autoincremented proposal would silently inherit.
+    """
+    from cc_steer.watcher.live import LiveConfig, MailboxDelivery
+
+    async with await MailboxDelivery.open(config=LiveConfig.shadow()) as mailbox:
+        if not await mailbox.proposal_exists(proposal_id):
+            raise click.ClickException(f"no proposal {proposal_id} in the shadow ledger")
+        delivery_id = await mailbox.delivery_id_for(proposal_id)
+        await mailbox.record_reaction(
+            proposal_id=proposal_id, delivery_id=delivery_id, kind=kind, source="cli_verb"
+        )
+    return delivery_id
+
+
+@live_group.command(name="accept")
+@click.argument("proposal_id", type=int)
+@coro
+async def live_accept(proposal_id: int) -> None:
+    """Mark PROPOSAL_ID accepted — an explicit positive reaction that outranks the attribution scan."""
+    await record_cli_reaction(proposal_id, "accepted")
+    click.echo(f"proposal {proposal_id}: accepted (cli_verb)")
+
+
+@live_group.command(name="dismiss")
+@click.argument("proposal_id", type=int)
+@coro
+async def live_dismiss(proposal_id: int) -> None:
+    """Mark PROPOSAL_ID dismissed — an explicit negative reaction that outranks the attribution scan."""
+    await record_cli_reaction(proposal_id, "dismissed")
+    click.echo(f"proposal {proposal_id}: dismissed (cli_verb)")
+
+
+@live_group.command(name="edit")
+@click.argument("proposal_id", type=int)
+@coro
+async def live_edit(proposal_id: int) -> None:
+    """Mark PROPOSAL_ID edited — an explicit corrected-positive reaction that outranks the attribution scan."""
+    await record_cli_reaction(proposal_id, "edited")
+    click.echo(f"proposal {proposal_id}: edited (cli_verb)")
 
 
 @main.command(name="inbox")

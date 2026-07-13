@@ -131,6 +131,18 @@ def test_journal_shadow_report_appends_one_sorted_json_line(monkeypatch: pytest.
     assert json.loads(body) == payload_of(summary)
 
 
+def test_a_delivered_proposal_scores_by_its_reaction_not_the_window() -> None:
+    proposals = [proposal_row() | {"id": 1}, proposal_row(session="s2") | {"id": 2}]
+    summary = summarize(proposals, [intervention(session="s2")], reactions={1: "accepted", 2: "ignored"})
+    assert (summary.steers, summary.hits, summary.nuisance) == (2, 1, 1)
+    assert summary.hit_categories == {"accepted": 1}
+
+
+def test_an_undelivered_proposal_keeps_the_window_join() -> None:
+    summary = summarize([proposal_row() | {"id": 1}], [intervention()], reactions={})
+    assert (summary.hits, summary.nuisance) == (1, 0)
+
+
 @pytest.mark.integration
 def test_watch_delivery_is_config_driven_not_a_live_flag() -> None:
     result = CliRunner().invoke(main, ["watch", "--live"])

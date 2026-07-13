@@ -32,6 +32,9 @@ def projects_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "claude-projects"
     root.mkdir()
     monkeypatch.setattr(cc_transcript.discovery, "CLAUDE_PROJECTS_DIR", root)
+    # Keep the shadow ledger's default path hermetic so a pass that resolves it
+    # (export's reactions read, the attribution scan) never touches the real db.
+    monkeypatch.setenv("CC_STEER_SHADOW_DB", str(tmp_path / "shadow.db"))
     # Redirect the shared corrections ledger into the tmp dir so it stays hermetic,
     # without overriding HOME (which would hide the LLM backend's CLI auth).
     ledger = tmp_path / "corrections.db"

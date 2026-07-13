@@ -14,6 +14,9 @@ from cc_transcript.mining import DedupKey
 from cc_steer.export import ask_message_of, export, split_of, watcher_negative, watcher_positive
 from cc_steer.refine import RefinedPair, Refinement
 from cc_steer.triage import AUDIT_VERSION, JUDGE, PROMPT_VERSION, Verdict
+from cc_steer.watcher.delivery import ShadowDelivery
+from cc_steer.watcher.live import LiveConfig, MailboxDelivery
+from tests.test_delivery import make_proposal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -459,6 +462,22 @@ async def test_export_push_failure_propagates_after_local_write(
     for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
         assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
     assert (dataset_dir / "README.md").is_file()
+
+
+async def test_export_adds_live_reaction_rows_to_watcher_and_gate(store: FeedbackStore, tmp_path: Path) -> None:
+    shadow_db = tmp_path / "shadow.db"
+    async with await ShadowDelivery.open(shadow_db) as delivery:
+        await delivery.deliver(make_proposal(session_id=TRAIN_SESSION, anchor_uuid="a1", steer="run the linter"))
+    async with await MailboxDelivery.open(shadow_db, config=LiveConfig.shadow()) as mailbox:
+        await mailbox.record_reaction(proposal_id=1, delivery_id=None, kind="accepted", source="cli_verb")
+    report = await export(store, out=tmp_path / "dataset", shadow_db=shadow_db)
+    [live] = [row for row in rows(report.out, "watcher", "train") if row["source_kind"] == "live_reaction"]
+    assert live["label"] is True and live["label_confidence"] == 0.9
+    assert live["completion"] == [{"role": "assistant", "content": "run the linter"}]
+    assert live["prompt"][0]["role"] == "user"
+    [gate] = [row for row in rows(report.out, "gate", "train") if row["source_kind"] == "live_reaction"]
+    assert (gate["label"], gate["label_confidence"]) == (True, 0.9)
+    assert gate["text"] == "<user>\nplease do step\n\n<assistant>\ndid step"
 
 
 def trace_for(

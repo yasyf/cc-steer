@@ -48,6 +48,11 @@ def stages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         stub("eval", SimpleNamespace(golden=SimpleNamespace(passed=57, total=57), precision=0.9, contamination=0.1)),
     )
     monkeypatch.setattr(
+        pipeline,
+        "attribute_reactions",
+        stub("reactions", SimpleNamespace(total=0, summary_line=lambda: "attributed 0 ")),
+    )
+    monkeypatch.setattr(
         pipeline, "run_export", stub("export", SimpleNamespace(counts={"sft": {"train": 9, "test": 1}}, pushed=True))
     )
     return calls
@@ -55,7 +60,7 @@ def stages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 async def test_nightly_runs_core_stages_in_order(store: FeedbackStore, stages: list[str], tmp_path: Path) -> None:
     report = await pipeline.run_pipeline(store, out=tmp_path, push_to="user/repo")
-    assert stages == ["scan", "triage", "refine", "enrich", "negatives", "export"]
+    assert stages == ["scan", "triage", "refine", "enrich", "negatives", "reactions", "export"]
     assert [outcome.stage for outcome in report.outcomes] == stages
     assert report.failed == ()
     assert "export: sft 10 pushed to user/repo" in report.summary_line()
@@ -63,7 +68,7 @@ async def test_nightly_runs_core_stages_in_order(store: FeedbackStore, stages: l
 
 async def test_weekly_adds_audit_and_eval(store: FeedbackStore, stages: list[str], tmp_path: Path) -> None:
     report = await pipeline.run_pipeline(store, out=tmp_path, push_to=None, weekly=True, audit_seed=7)
-    assert stages == ["scan", "triage", "refine", "enrich", "negatives", "audit", "eval", "export"]
+    assert stages == ["scan", "triage", "refine", "enrich", "negatives", "audit", "eval", "reactions", "export"]
     eval_outcome = next(outcome for outcome in report.outcomes if outcome.stage == "eval")
     assert eval_outcome.summary == "golden 57/57, precision 0.900, contamination 0.100"
 
@@ -77,7 +82,7 @@ async def test_stage_failure_is_isolated(
     monkeypatch.setattr(pipeline, "run_triage", boom)
     report = await pipeline.run_pipeline(store, out=tmp_path, push_to=None)
     assert report.failed == ("triage",)
-    assert stages == ["scan", "refine", "enrich", "negatives", "export"]
+    assert stages == ["scan", "refine", "enrich", "negatives", "reactions", "export"]
     triage_outcome = next(outcome for outcome in report.outcomes if outcome.stage == "triage")
     assert not triage_outcome.ok
     assert "RuntimeError" in triage_outcome.summary

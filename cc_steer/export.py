@@ -14,6 +14,7 @@ HuggingFace repo.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -202,6 +203,20 @@ CONFIG_USES = {
     "watcher": "Context + agent action → steering direction or the `NO_STEER` sentinel, for the generative watcher.",
 }
 
+MINED_CONFIDENCE = 1.0
+LIVE_SOURCE = "live_reaction"
+
+# reaction kind -> (label bucket, fire label, confidence); expired carries no label.
+LIVE_LABEL: dict[str, tuple[str, bool, float]] = {
+    "accepted": ("pos", True, 0.9),
+    "edited": ("pos-corrected", True, 0.7),
+    "diverged": ("pos-corrected", True, 0.5),
+    "dismissed": ("neg", False, 0.8),
+    "ignored": ("weak-neg", False, 0.3),
+}
+
+RENDER_BLOCK = re.compile(r"(?:\A|\n\n)<(user|assistant)>\n")
+
 
 class Pair(TypedDict):
     pair_index: int
@@ -259,6 +274,7 @@ class GateRow(TypedDict):
     category: str
     session_id: str
     split: str
+    label_confidence: float
 
 
 class WatcherRow(TypedDict):
@@ -271,6 +287,7 @@ class WatcherRow(TypedDict):
     source_kind: str
     session_id: str
     split: str
+    label_confidence: float
 
 
 class SftRow(TypedDict):
@@ -432,6 +449,7 @@ def gate_row(row: Row) -> GateRow | None:
         "category": str(row["category"]),
         "session_id": str(row["session_id"]),
         "split": split_of(str(row["session_id"])),
+        "label_confidence": MINED_CONFIDENCE,
     }
 
 
@@ -474,6 +492,7 @@ def watcher_positive(trace: Trace) -> WatcherRow:
         "source_kind": trace["source_kind"],
         "session_id": trace["session_id"],
         "split": trace["split"],
+        "label_confidence": MINED_CONFIDENCE,
     }
 
 
@@ -492,6 +511,7 @@ def watcher_negative(row: Row) -> WatcherRow | None:
         "source_kind": str(row["source_kind"]),
         "session_id": str(row["session_id"]),
         "split": split_of(str(row["session_id"])),
+        "label_confidence": MINED_CONFIDENCE,
     }
 
 
@@ -506,12 +526,88 @@ def watcher_rows(traces: Sequence[Trace], gate_samples: Sequence[Row]) -> list[W
     return [*positives, *negatives]
 
 
+def messages_from_render(render: str) -> list[Message]:
+    """Reconstructs the watcher prompt from a proposal's flattened ``window_render``.
+
+    The proposal ledger stores the cascade's exact flattened gate text, not a
+    structured window; this inverts :func:`~cc_steer.rendering.gate_text` back into
+    role-tagged chat messages so a live reaction trains on the moment the steer fired.
+    """
+    spans = list(RENDER_BLOCK.finditer(render))
+    if not spans:
+        return [{"role": "user", "content": render}] if render else []
+    return [
+        {
+            "role": span.group(1),
+            "content": render[span.end() : (spans[index + 1].start() if index + 1 < len(spans) else len(render))],
+        }
+        for index, span in enumerate(spans)
+    ]
+
+
+def live_completion(kind: str, steer: str, reply: str | None) -> str:
+    """The training target for a live reaction: the steer if accepted, the user's reply if corrected, else the sentinel."""
+    match kind:
+        case "accepted":
+            return steer
+        case "edited" | "diverged":
+            return reply or steer
+        case _:
+            return NO_STEER
+
+
+def live_watcher_row(reaction: Mapping[str, object], reply_texts: Mapping[str, str]) -> WatcherRow | None:
+    """One ``live_reaction`` watcher row: the proposal's moment labelled by how the user reacted."""
+    if (entry := LIVE_LABEL.get(str(reaction["kind"]))) is None:
+        return None
+    _, label, confidence = entry
+    session_id = str(reaction["session_id"])
+    reply = reply_texts.get(str(reaction["feedback_dedup_key"] or ""))
+    steer = str(reaction["steer"] or "")
+    return {
+        "prompt": messages_from_render(str(reaction["window_render"] or "")),
+        "completion": assistant_message(live_completion(str(reaction["kind"]), steer, reply)),
+        "verbatim": reply or steer,
+        "label": label,
+        "id": f"live:{reaction['proposal_id']}",
+        "category": str(reaction["kind"]),
+        "source_kind": LIVE_SOURCE,
+        "session_id": session_id,
+        "split": split_of(session_id),
+        "label_confidence": confidence,
+    }
+
+
+def live_gate_row(reaction: Mapping[str, object]) -> GateRow | None:
+    """One ``live_reaction`` gate row: the proposal's flattened window text with its fire label."""
+    if (entry := LIVE_LABEL.get(str(reaction["kind"]))) is None:
+        return None
+    _, label, confidence = entry
+    session_id = str(reaction["session_id"])
+    return {
+        "id": f"live:{reaction['proposal_id']}",
+        "text": str(reaction["window_render"] or ""),
+        "label": label,
+        "kind": LIVE_SOURCE,
+        "offset_turns": 0,
+        "source_kind": LIVE_SOURCE,
+        "category": str(reaction["kind"]),
+        "session_id": session_id,
+        "split": split_of(session_id),
+        "label_confidence": confidence,
+    }
+
+
 def config_rows(
-    traces: list[Trace], gate_samples: Sequence[Row] = ()
+    traces: list[Trace],
+    gate_samples: Sequence[Row] = (),
+    *,
+    live_watcher: Sequence[WatcherRow] = (),
+    live_gate: Sequence[GateRow] = (),
 ) -> dict[str, Mapping[str, Sequence[Mapping[str, object]]]]:
     by_split = {split: [trace for trace in traces if trace["split"] == split] for split in SPLITS}
-    gate = [row for row in (gate_row(sample) for sample in gate_samples) if row is not None]
-    watcher = watcher_rows(traces, gate_samples)
+    gate = [*(row for row in (gate_row(sample) for sample in gate_samples) if row is not None), *live_gate]
+    watcher = [*watcher_rows(traces, gate_samples), *live_watcher]
     return {
         "traces": by_split,
         "sft": {split: [sft_row(t) for t in ts if t["is_steering"]] for split, ts in by_split.items()},
@@ -589,6 +685,7 @@ def config_features() -> dict[str, Features]:
                 "category": Value("string"),
                 "session_id": Value("string"),
                 "split": Value("string"),
+                "label_confidence": Value("float64"),
             }
         ),
         "watcher": Features(
@@ -600,6 +697,7 @@ def config_features() -> dict[str, Features]:
                 "source_kind": Value("string"),
                 "session_id": Value("string"),
                 "split": Value("string"),
+                "label_confidence": Value("float64"),
             }
             | keys
         ),
@@ -649,13 +747,35 @@ async def load_traces(store: FeedbackStore) -> list[Trace]:
     return [trace_row(row, pairs_by_key.get(str(row["dedup_key"]), []), log) async for row in cur]
 
 
-async def export(store: FeedbackStore, *, out: Path, push_to: str | None = None) -> ExportReport:
+async def load_live_reactions(
+    store: FeedbackStore, shadow_db: Path | None
+) -> tuple[list[dict[str, object]], dict[str, str]]:
+    """The attributed reactions and the reply texts their corrected labels complete."""
+    from cc_steer.watcher.live import LiveConfig, MailboxDelivery, shadow_db_path
+
+    async with await MailboxDelivery.open(shadow_db or shadow_db_path(), config=LiveConfig.shadow()) as mailbox:
+        reactions = await mailbox.reactions()
+    keys = [key for row in reactions if (key := str(row["feedback_dedup_key"] or ""))]
+    if not keys:
+        return reactions, {}
+    cur = await store.store.conn.execute(
+        f"SELECT dedup_key, text FROM feedback_events WHERE dedup_key IN ({','.join('?' for _ in keys)})", keys
+    )
+    return reactions, {str(row["dedup_key"]): str(row["text"]) async for row in cur}
+
+
+async def export(
+    store: FeedbackStore, *, out: Path, push_to: str | None = None, shadow_db: Path | None = None
+) -> ExportReport:
     """Exports the judged corpus as a HuggingFace dataset: ``traces`` plus TRL views.
 
-    Reads the feedback store and the shared ``corrections`` ledger (both read-only)
-    and builds one row per judged event at the current judge prompt version — the
-    canonical ``traces`` config — then projects the TRL-ready ``sft``, ``dpo``, and
-    ``kto`` configs from the same rows. Every config is written as per-split parquet
+    Reads the feedback store, the shared ``corrections`` ledger, and the shadow
+    ledger's attributed reactions (all read-only) and builds one row per judged
+    event at the current judge prompt version — the canonical ``traces`` config —
+    then projects the TRL-ready ``sft``, ``dpo``, and ``kto`` configs from the same
+    rows. Delivered-steer reactions add ``live_reaction`` rows to ``watcher`` and
+    ``gate``, each carrying a ``label_confidence`` (mined rows carry ``1.0``). Every
+    config is written as per-split parquet
     under ``out/<config>/<split>.parquet`` next to a generated dataset card at
     ``out/README.md``; with ``push_to``, every config is also pushed to that private
     HuggingFace repo and the card uploaded. Splits are a deterministic group split
@@ -667,6 +787,7 @@ async def export(store: FeedbackStore, *, out: Path, push_to: str | None = None)
         out: The directory to write the parquet files and dataset card into.
         push_to: The HuggingFace dataset repo to push every config to as a
             private dataset; None skips the push.
+        shadow_db: The shadow ledger to read reactions from; None uses the default.
 
     Returns:
         The export's per-config, per-split row counts.
@@ -674,8 +795,14 @@ async def export(store: FeedbackStore, *, out: Path, push_to: str | None = None)
     traces = await load_traces(store)
     gate_cur = await store.store.conn.execute(GATE_SAMPLES_QUERY)
     gate_samples = [row async for row in gate_cur]
+    reactions, reply_texts = await load_live_reactions(store, shadow_db)
     features = config_features()
-    by_config = config_rows(traces, gate_samples)
+    by_config = config_rows(
+        traces,
+        gate_samples,
+        live_watcher=[row for r in reactions if (row := live_watcher_row(r, reply_texts)) is not None],
+        live_gate=[row for r in reactions if (row := live_gate_row(r)) is not None],
+    )
     built = {
         config: DatasetDict(
             {

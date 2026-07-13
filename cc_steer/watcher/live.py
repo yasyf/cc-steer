@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Self
 
 import aiosqlite
-from cc_transcript.mining.store import now
 from cc_transcript.models import UserEvent
 
 from cc_steer.watcher.delivery import SHADOW_DDL
@@ -81,6 +80,38 @@ CREATE TABLE IF NOT EXISTS deliveries (
 INSERT_DELIVERY = """
 INSERT OR IGNORE INTO deliveries (proposal_id, session_id, project, ts, mode, ttl, holdout, state)
 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')
+"""
+
+ReactionKind = Literal["accepted", "edited", "diverged", "dismissed", "ignored", "expired"]
+ReactionSource = Literal["cli_verb", "scan_inferred"]
+
+POSITIVE_REACTIONS: frozenset[str] = frozenset({"accepted", "edited", "diverged"})
+
+REACTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id INTEGER NOT NULL,
+  delivery_id INTEGER,
+  kind TEXT NOT NULL,
+  source TEXT NOT NULL,
+  feedback_dedup_key TEXT,
+  similarity REAL,
+  ts TEXT NOT NULL,
+  UNIQUE(proposal_id)
+);
+"""
+
+UPSERT_REACTION = """
+INSERT INTO reactions (proposal_id, delivery_id, kind, source, feedback_dedup_key, similarity, ts)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(proposal_id) DO UPDATE SET
+  delivery_id = excluded.delivery_id,
+  kind = excluded.kind,
+  source = excluded.source,
+  feedback_dedup_key = excluded.feedback_dedup_key,
+  similarity = excluded.similarity,
+  ts = excluded.ts
+WHERE excluded.source = 'cli_verb' OR reactions.source != 'cli_verb'
 """
 
 
@@ -312,7 +343,7 @@ class MailboxDelivery:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA busy_timeout=2000")
-        await conn.executescript(SHADOW_DDL + DELIVERIES_DDL)
+        await conn.executescript(SHADOW_DDL + DELIVERIES_DDL + REACTIONS_DDL)
         return cls(conn, config)
 
     async def close(self) -> None:
@@ -381,6 +412,64 @@ class MailboxDelivery:
             ((at or datetime.now(UTC)).isoformat(),),
         )
         return cur.rowcount
+
+    async def deliveries(self) -> list[dict[str, object]]:
+        """Every delivery row joined to its proposal's steer, oldest first — the attribution pass's input."""
+        cur = await self.conn.execute(
+            "SELECT d.*, p.steer, p.anchor_uuid FROM deliveries d JOIN proposals p ON p.id = d.proposal_id "
+            "ORDER BY d.id"
+        )
+        return [dict(row) async for row in cur]
+
+    async def record_reaction(
+        self,
+        *,
+        proposal_id: int,
+        delivery_id: int | None,
+        kind: ReactionKind,
+        source: ReactionSource,
+        feedback_dedup_key: str | None = None,
+        similarity: float | None = None,
+        at: datetime | None = None,
+    ) -> None:
+        """Records one proposal's reaction, the single write path with cli-over-scan precedence.
+
+        A ``cli_verb`` reaction always wins and replaces whatever is there; a
+        ``scan_inferred`` reaction writes only when no ``cli_verb`` verdict already
+        stands for the proposal, so an operator's explicit accept/dismiss/edit is
+        never clobbered by a later attribution pass.
+        """
+        await self.conn.execute(
+            UPSERT_REACTION,
+            (
+                proposal_id,
+                delivery_id,
+                kind,
+                source,
+                feedback_dedup_key,
+                similarity,
+                (at or datetime.now(UTC)).isoformat(),
+            ),
+        )
+
+    async def reactions(self) -> list[dict[str, object]]:
+        """Every recorded reaction joined to its proposal, ordered by proposal — the export/report input."""
+        cur = await self.conn.execute(
+            "SELECT r.*, p.steer, p.session_id, p.window_render, p.turn_index "
+            "FROM reactions r JOIN proposals p ON p.id = r.proposal_id ORDER BY r.proposal_id"
+        )
+        return [dict(row) async for row in cur]
+
+    async def delivery_id_for(self, proposal_id: int) -> int | None:
+        """The delivery row id for a proposal, or None when it was never queued — the CLI verbs' link."""
+        cur = await self.conn.execute("SELECT id FROM deliveries WHERE proposal_id = ?", (proposal_id,))
+        row = await cur.fetchone()
+        return int(row["id"]) if row is not None else None
+
+    async def proposal_exists(self, proposal_id: int) -> bool:
+        """Whether the ledger holds a proposal with this id — the CLI verbs' guard against orphan reactions."""
+        cur = await self.conn.execute("SELECT 1 FROM proposals WHERE id = ?", (proposal_id,))
+        return await cur.fetchone() is not None
 
 
 class TeeDelivery:
