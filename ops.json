@@ -1,0 +1,1 @@
+{"v":1,"lamport":1,"ops":[{"kind":"create_task","nonce":"45e2b6634d25724e400af6b10d1e5314","title":"experiment-at-home Phase C: research harness","description":"","type":"task","priority":2,"branch":"main","parent":"","labels":null},{"kind":"add_criterion","id":"dfd8cb4ce448796c1a46192f3553908e","text":"v0.3.0 on PyPI; toy-repo loop end-to-end green","script":""}]}
