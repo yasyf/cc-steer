@@ -1,0 +1,1 @@
+{"v":1,"lamport":1,"ops":[{"kind":"create_task","nonce":"77a82b77f3509842912cd3e71e9c7c5c","title":"Migrate write-like-me onto athome","description":"","type":"task","priority":2,"branch":"main","parent":"","labels":null},{"kind":"add_criterion","id":"41bc336e4d72fb464017e51a95a76a4e","text":"suite green + detached lab-run smoke + calibration byte-parity","script":""}]}
