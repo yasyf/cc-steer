@@ -1,1 +1,1 @@
-{"v":1,"lamport":1,"ops":[{"kind":"create_note","nonce":"45bb468201b77a4047cf86ab980ac708","title":"P1 live plumbing COMPLETE 2026-07-13: mirror stack landed (b5f0ca1 + ef32a70), v0.11.0 on PyPI, fail-open hook installed, canary green, daemon mirror-mode healthy. Mirror week begins now.","body":"","tags":["cc-steer-plan"],"anchors":[]}]}
+{"v":1,"lamport":2,"ops":[{"kind":"verify_note","witness":null,"verified_commit":"ef32a70a6f439d0ccac2fc305123145d16278dbc"}]}
