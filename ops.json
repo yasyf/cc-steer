@@ -1,0 +1,1 @@
+{"v":1,"lamport":1,"ops":[{"kind":"create_task","nonce":"1cb0e8773cfb9959ce8c157917122f2c","title":"experiment-at-home Phase A: bootstrap repo + core modules","description":"","type":"task","priority":2,"branch":"main","parent":"","labels":null},{"kind":"add_criterion","id":"fd82d0aba7aa90ee1e40e69c49252adf","text":"v0.1.0 on PyPI; pytest+ty+3.14t GIL job green","script":""}]}
