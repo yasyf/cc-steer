@@ -85,8 +85,24 @@ def test_install_live_adds_a_synchronous_userpromptsubmit_group(tmp_path: Path) 
     assert hooks.install_live(settings) == "added"
     group = read(settings)["hooks"]["UserPromptSubmit"][0]
     assert group == hooks.live_group()
-    assert group["hooks"][0]["command"] == "uvx cc-steer live hook"
+    assert group["hooks"][0]["command"] == hooks.live_command()
     assert "async" not in group["hooks"][0]
+
+
+def test_live_command_is_a_version_pinned_fail_open_wrapper() -> None:
+    command = hooks.live_command()
+    assert command == "out=$(uvx --from 'cc-steer>=0.11' cc-steer live hook 2>/dev/null) && printf '%s' \"$out\"; exit 0"
+    assert f"cc-steer>={hooks.LIVE_MIN_VERSION}" in command
+    assert command.endswith("; exit 0")
+    assert "2>/dev/null" in command
+    assert hooks.is_live_group(hooks.live_group())
+
+
+def test_live_command_custom_prefix_skips_version_pin_but_stays_fail_open() -> None:
+    command = hooks.live_command("uv run --project /repo cc-steer")
+    assert command == 'out=$(uv run --project /repo cc-steer live hook 2>/dev/null) && printf \'%s\' "$out"; exit 0'
+    assert "--from" not in command
+    assert command.endswith("; exit 0")
 
 
 def test_install_live_is_idempotent(tmp_path: Path) -> None:
@@ -118,6 +134,6 @@ def test_installed_live_command_roundtrip(tmp_path: Path) -> None:
     settings = tmp_path / "settings.json"
     assert hooks.installed_live_command(settings) is None
     hooks.install_live(settings)
-    assert hooks.installed_live_command(settings) == "uvx cc-steer live hook"
+    assert hooks.installed_live_command(settings) == hooks.live_command()
     hooks.uninstall_live(settings)
     assert hooks.installed_live_command(settings) is None

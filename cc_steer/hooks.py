@@ -19,6 +19,7 @@ DEFAULT_PREFIX = "uvx cc-steer"
 EVENT = "SessionEnd"
 LIVE_EVENT = "UserPromptSubmit"
 LIVE_TIMEOUT_S = 5
+LIVE_MIN_VERSION = "0.11"
 
 type Owns = Callable[[dict[str, Any]], bool]
 
@@ -33,9 +34,25 @@ def scan_command(prefix: str = DEFAULT_PREFIX) -> str:
     return f"{prefix} scan --no-sync"
 
 
+def live_runner(prefix: str = DEFAULT_PREFIX) -> str:
+    """The version-safe runner for the blocking live hook.
+
+    The default uvx invocation carries a lower-bound version constraint so a stale cached wheel
+    predating the ``live`` command can never satisfy it; a custom prefix (a dev source checkout)
+    passes through untouched.
+    """
+    return f"uvx --from 'cc-steer>={LIVE_MIN_VERSION}' cc-steer" if prefix == DEFAULT_PREFIX else prefix
+
+
 def live_command(prefix: str = DEFAULT_PREFIX) -> str:
-    """The live hook command: pop and surface the freshest queued steer for the current session."""
-    return f"{prefix} live hook"
+    """The live hook command line: a fail-open, version-safe wrapper around ``cc-steer live hook``.
+
+    UserPromptSubmit blocks the prompt on a nonzero exit, so this line can never block a session: it
+    exits 0 unconditionally and forwards the hook's stdout only when the hook itself exits 0. Every
+    dispatch failure — an old wheel missing the ``live`` command, a uvx resolution or network error,
+    unexpected stderr — collapses to exit 0 with empty stdout, backing the hook body's own fail-open.
+    """
+    return f"out=$({live_runner(prefix)} live hook 2>/dev/null) && printf '%s' \"$out\"; exit 0"
 
 
 def hook_group(prefix: str = DEFAULT_PREFIX) -> dict[str, Any]:
