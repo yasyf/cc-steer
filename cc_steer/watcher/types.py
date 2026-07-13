@@ -45,6 +45,9 @@ class SteerProposal:
         window_render: The exact flattened window text the cascade scored, so
             replay reads the moment off the row instead of reconstructing it
             from ``(session_id, anchor_uuid, turn_index)``.
+        project: The working directory the session ran in, when known — the key a
+            live delivery's ``allow_projects`` gate and per-project shadow metrics
+            read; None when the moment carried no resolvable cwd.
     """
 
     session_id: str
@@ -58,6 +61,7 @@ class SteerProposal:
     stage_versions: str
     window_render: str
     sentinel_prob: float | None = None
+    project: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -132,10 +132,13 @@ def test_journal_shadow_report_appends_one_sorted_json_line(monkeypatch: pytest.
 
 
 @pytest.mark.integration
-def test_watch_live_mode_errors() -> None:
+def test_watch_delivery_is_config_driven_not_a_live_flag() -> None:
     result = CliRunner().invoke(main, ["watch", "--live"])
     assert result.exit_code != 0
-    assert "not yet implemented" in result.output
+    assert "No such option" in result.output and "--live" in result.output
+    help_result = CliRunner().invoke(main, ["watch", "--help"])
+    assert "--shadow" in help_result.output
+    assert "live.toml" in help_result.output
 
 
 @pytest.mark.integration

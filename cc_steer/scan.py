@@ -9,6 +9,7 @@ from cc_transcript import TranscriptDiscovery, TranscriptParser
 
 from cc_steer.detectors import detect
 from cc_steer.sidecar import candidates_for, discover_sidecars
+from cc_steer.watcher.live import scrub_events
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -62,7 +63,7 @@ async def scan(
     scanned = 0
     inserted = 0
     async for parsed in TranscriptParser.stream_transcripts(paths):
-        inserted += await store.record_file_scan(str(parsed.path), parsed.mtime, detect(parsed.events))
+        inserted += await store.record_file_scan(str(parsed.path), parsed.mtime, detect(scrub_events(parsed.events)))
         scanned += 1
     for sidecar in discover_sidecars(findings_dirs):
         mtime = sidecar.stat().st_mtime

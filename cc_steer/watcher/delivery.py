@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   draft TEXT,
   steer TEXT,
   window_render TEXT,
+  project TEXT,
   exemplar_keys TEXT NOT NULL,
   stage_versions TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -43,15 +44,17 @@ CREATE TABLE IF NOT EXISTS proposals (
 INSERT_PROPOSAL = """
 INSERT OR IGNORE INTO proposals (
   session_id, anchor_uuid, turn_index, ts, gate_score, sentinel_prob, draft, steer,
-  window_render, exemplar_keys, stage_versions, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  window_render, project, exemplar_keys, stage_versions, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
-async def ensure_window_render(conn: aiosqlite.Connection) -> None:
+async def ensure_columns(conn: aiosqlite.Connection) -> None:
     cur = await conn.execute("PRAGMA table_info(proposals)")
-    if "window_render" not in {row["name"] async for row in cur}:
-        await conn.execute("ALTER TABLE proposals ADD COLUMN window_render TEXT")
+    columns = {row["name"] async for row in cur}
+    for column in ("window_render", "project"):
+        if column not in columns:
+            await conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
 
 
 class SteerDelivery(Protocol):
@@ -87,7 +90,7 @@ class ShadowDelivery:
         conn = await aiosqlite.connect(str(target), isolation_level=None)
         conn.row_factory = aiosqlite.Row
         await conn.executescript(SHADOW_DDL)
-        await ensure_window_render(conn)
+        await ensure_columns(conn)
         return cls(conn)
 
     async def close(self) -> None:
@@ -119,6 +122,7 @@ class ShadowDelivery:
                 proposal.draft,
                 proposal.steer,
                 proposal.window_render,
+                proposal.project,
                 json.dumps(list(proposal.exemplar_keys)),
                 proposal.stage_versions,
                 now(),

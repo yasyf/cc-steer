@@ -78,3 +78,46 @@ def test_installed_command_roundtrip(tmp_path: Path) -> None:
     assert hooks.installed_command(settings) == "uvx cc-steer scan --no-sync"
     hooks.uninstall(settings)
     assert hooks.installed_command(settings) is None
+
+
+def test_install_live_adds_a_synchronous_userpromptsubmit_group(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    assert hooks.install_live(settings) == "added"
+    group = read(settings)["hooks"]["UserPromptSubmit"][0]
+    assert group == hooks.live_group()
+    assert group["hooks"][0]["command"] == "uvx cc-steer live hook"
+    assert "async" not in group["hooks"][0]
+
+
+def test_install_live_is_idempotent(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    assert hooks.install_live(settings) == "added"
+    assert hooks.install_live(settings) == "unchanged"
+
+
+def test_scan_and_live_hooks_coexist_without_collision(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    hooks.install(settings)
+    hooks.install_live(settings)
+    data = read(settings)
+    assert data["hooks"]["SessionEnd"] == [hooks.hook_group()]
+    assert data["hooks"]["UserPromptSubmit"] == [hooks.live_group()]
+    assert hooks.uninstall_live(settings) == "removed"
+    assert hooks.installed_command(settings) == "uvx cc-steer scan --no-sync"
+    assert hooks.installed_live_command(settings) is None
+
+
+def test_install_live_preserves_foreign_userpromptsubmit_groups(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": {"UserPromptSubmit": [FOREIGN]}}))
+    assert hooks.install_live(settings) == "added"
+    assert read(settings)["hooks"]["UserPromptSubmit"] == [FOREIGN, hooks.live_group()]
+
+
+def test_installed_live_command_roundtrip(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    assert hooks.installed_live_command(settings) is None
+    hooks.install_live(settings)
+    assert hooks.installed_live_command(settings) == "uvx cc-steer live hook"
+    hooks.uninstall_live(settings)
+    assert hooks.installed_live_command(settings) is None

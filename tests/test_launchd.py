@@ -68,7 +68,7 @@ def test_render_watch_is_a_keepalive_daemon(monkeypatch: pytest.MonkeyPatch) -> 
     assert "StartCalendarInterval" not in data
     assert data["ProgramArguments"][:2] == ["/bin/sh", "-lc"]
     command = data["ProgramArguments"][2]
-    assert "exec uv run --project /repo cc-steer watch --shadow --gate lexical --gate-threshold 0.5 --drafter mlx" in command
+    assert "exec uv run --project /repo cc-steer watch --gate lexical --gate-threshold 0.5 --drafter mlx" in command
     assert 'eval "$(ccp env)"' in command
     assert data["StandardOutPath"].endswith("watch.log")
     assert data["StandardErrorPath"].endswith("watch.log")
@@ -76,11 +76,11 @@ def test_render_watch_is_a_keepalive_daemon(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_watch_command_resolves_uvx(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
-    assert "exec /opt/homebrew/bin/uvx cc-steer watch --shadow" in launchd.watch_command("uvx cc-steer")
+    assert "exec /opt/homebrew/bin/uvx cc-steer watch --gate lexical" in launchd.watch_command("uvx cc-steer")
 
 
 def test_watch_command_survives_missing_uvx(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    assert "exec uvx cc-steer watch --shadow --gate lexical --gate-threshold 0.5 --drafter mlx" in launchd.watch_command(
+    assert "exec uvx cc-steer watch --gate lexical --gate-threshold 0.5 --drafter mlx" in launchd.watch_command(
         "uvx cc-steer"
     )

@@ -137,6 +137,6 @@ async def test_step_debounces_and_delivers_every_proposal() -> None:
     watcher = watcher_with(RecordingCascade(result=make_proposal()), delivery, debounce_s=2.0)
     assert await watcher.step(watch_events(entries(4)), now=10.0) == []
     assert delivery.delivered == []
-    assert await watcher.step([], now=13.0) == [make_proposal()]
-    assert delivery.delivered == [make_proposal()]
+    assert await watcher.step([], now=13.0) == [make_proposal(project="/repo")]
+    assert delivery.delivered == [make_proposal(project="/repo")]
     assert await watcher.step([], now=20.0) == []

@@ -59,11 +59,11 @@ def retrain_command(lab: Path) -> str:
 
 
 def watch_command(prefix: str) -> str:
-    """The shell command the watch daemon runs: the two-stage shadow watcher over ~/.claude/projects."""
+    """The shell command the watch daemon runs: the two-stage watcher over ~/.claude/projects, delivering per live.toml."""
     resolved = prefix
     if prefix.split(maxsplit=1)[0] == "uvx" and (uvx := shutil.which("uvx")):
         resolved = prefix.replace("uvx", uvx, 1)
-    body = f"exec {resolved} watch --shadow --gate lexical --gate-threshold 0.5 --drafter mlx"
+    body = f"exec {resolved} watch --gate lexical --gate-threshold 0.5 --drafter mlx"
     return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; {body}'
 
 

@@ -622,6 +622,101 @@ def hooks_status(settings: Path | None) -> None:
     click.echo(f"installed: {command!r}" if command else "not installed")
 
 
+@main.group(name="live")
+def live_group() -> None:
+    """Control live steering: the delivery mode, the kill switch, and the prompt-submit hook."""
+
+
+@live_group.command(name="hook")
+def live_hook() -> None:
+    """The ``UserPromptSubmit`` handler: pop and surface the freshest queued steer (fail-open, exits 0)."""
+    from cc_steer.livehook import run
+
+    run()
+
+
+@live_group.command(name="install-hook")
+@click.option("--prefix", default=hook_wiring.DEFAULT_PREFIX, show_default=True, help="Command prefix the hook runs.")
+@click.option("--settings", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Settings file.")
+def live_install_hook(prefix: str, settings: Path | None) -> None:
+    """Wire the synchronous UserPromptSubmit steer hook into the user-level Claude Code settings."""
+    result = hook_wiring.install_live(settings, prefix=prefix)
+    click.echo(f"{result}: {hook_wiring.live_command(prefix)!r} on {hook_wiring.LIVE_EVENT}")
+
+
+@live_group.command(name="uninstall-hook")
+@click.option("--settings", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Settings file.")
+def live_uninstall_hook(settings: Path | None) -> None:
+    """Remove the UserPromptSubmit steer hook, leaving every other hook untouched."""
+    click.echo(hook_wiring.uninstall_live(settings))
+
+
+@live_group.command(name="on")
+def live_on() -> None:
+    """Resume live delivery: clear the ``~/.cc-steer/live.off`` kill switch."""
+    from cc_steer.watcher.live import live_off_path
+
+    (flag := live_off_path()).unlink(missing_ok=True)
+    click.echo(f"live delivery ON (kill switch cleared at {flag})")
+
+
+@live_group.command(name="off")
+def live_off() -> None:
+    """Halt live delivery everywhere: touch the ``~/.cc-steer/live.off`` kill switch."""
+    from cc_steer.watcher.live import live_off_path
+
+    (flag := live_off_path()).parent.mkdir(parents=True, exist_ok=True)
+    flag.touch()
+    click.echo(f"live delivery OFF (kill switch set at {flag})")
+
+
+@live_group.command(name="mode")
+@click.argument("mode", type=click.Choice(["shadow", "mirror", "live_allow", "live_all"]))
+def live_mode(mode: str) -> None:
+    """Set the delivery mode in ``~/.cc-steer/live.toml`` (the live modes are a human-only escalation)."""
+    from cc_steer.watcher.live import LiveConfig
+
+    path = dataclasses.replace(LiveConfig.load(), mode=mode).write()
+    click.echo(f"mode = {mode} written to {path}")
+
+
+@live_group.command(name="status")
+@coro
+async def live_status() -> None:
+    """Show the live mode, the kill switch, allowed projects, and today's delivery counts."""
+    from cc_steer.watcher.live import LiveConfig, MailboxDelivery, is_killed, live_config_path
+
+    config = LiveConfig.load()
+    click.echo(f"mode:      {config.mode}   (config: {live_config_path()})")
+    click.echo(f"killed:    {is_killed()}")
+    click.echo(f"hook:      {hook_wiring.installed_live_command() or 'not installed'}")
+    click.echo(f"projects:  {', '.join(config.allow_projects) or '(none)'}")
+    click.echo(f"budget:    {config.max_live_per_day}/day   ttl {config.steer_ttl_minutes}m   holdout {config.holdout_frac}")
+    async with await MailboxDelivery.open(config=config) as mailbox:
+        counts = await mailbox.counts()
+    click.echo(f"delivered today: {counts.get('delivered_today', 0)}   " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if k != "delivered_today"))
+
+
+@main.command(name="inbox")
+@click.option("--limit", type=int, default=20, show_default=True, help="How many recent deliveries to show.")
+@coro
+async def inbox(limit: int) -> None:
+    """List recent and undelivered steers — the fallback surface when the hook stays quiet."""
+    from cc_steer.watcher.live import LiveConfig, MailboxDelivery
+
+    async with await MailboxDelivery.open(config=LiveConfig.load()) as mailbox:
+        rows = await mailbox.recent(limit)
+    if not rows:
+        click.echo("inbox empty")
+        return
+    for row in rows:
+        steer = " ".join(str(row["steer"] or "").split())
+        click.echo(
+            f"#{row['proposal_id']} [{row['state']}] {row['ts']} {row.get('project') or ''}\n"
+            f"    {steer[:200]}"
+        )
+
+
 @main.group(name="models")
 def models_group() -> None:
     """Inspect and flip the registry of lab-trained model versions."""
@@ -793,7 +888,7 @@ async def pipeline_run(
     "watch",
     default=True,
     show_default=True,
-    help="Also install the always-on shadow watch daemon under KeepAlive.",
+    help="Also install the always-on watch daemon under KeepAlive.",
 )
 def pipeline_install_launchd(
     prefix: str, journal_repo: Path | None, hour: int, retrain: bool, lab: Path | None, retrain_hour: int, watch: bool
@@ -812,7 +907,7 @@ def pipeline_install_launchd(
     click.echo(f"installed {launchd.LABEL} ({path}): nightly {hour:02d}:00, weekly audit on Sundays")
     if watch:
         watch_path = launchd.install_watch(prefix)
-        click.echo(f"installed {launchd.WATCH_LABEL} ({watch_path}): always-on shadow watcher (KeepAlive)")
+        click.echo(f"installed {launchd.WATCH_LABEL} ({watch_path}): always-on watcher, delivers per live.toml (KeepAlive)")
     if not retrain:
         return
     lab_dir = lab or launchd.LAB_DIR
@@ -832,11 +927,11 @@ def pipeline_uninstall_launchd() -> None:
 
 @main.command(name="watch")
 @click.option(
-    "--shadow/--live",
-    "shadow_mode",
-    default=True,
-    show_default=True,
-    help="Delivery mode; live delivery is not yet implemented.",
+    "--shadow",
+    "force_shadow",
+    is_flag=True,
+    default=False,
+    help="Force shadow delivery, ignoring the mode in ~/.cc-steer/live.toml.",
 )
 @click.option(
     "--root",
@@ -906,7 +1001,7 @@ def pipeline_uninstall_launchd() -> None:
 )
 @coro
 async def watch_(
-    shadow_mode: bool,
+    force_shadow: bool,
     roots: tuple[Path, ...],
     gate_kind: str | None,
     gate_threshold: float | None,
@@ -917,7 +1012,7 @@ async def watch_(
     db: Path | None,
     shadow_db: Path | None,
 ) -> None:
-    """Tail live transcripts and run the steering cascade in shadow mode.
+    """Tail live transcripts and run the steering cascade, delivering per ``~/.cc-steer/live.toml``.
 
     Every open session is followed as it writes; each time one goes quiet
     after completing a turn, the cascade — stage-1 gate, drafting model,
@@ -928,21 +1023,26 @@ async def watch_(
     to the turn-floor heuristic. Stage 2 defaults to the promoted local watcher
     (the mlx extra) when one exists, abstaining at its trained budget threshold
     on P(NO_STEER); stage 3 is then disabled — the E2-validated two-stage
-    configuration — unless ``--refiner spawn`` re-enables it. Proposals land in
-    the shadow ledger (``cc-steer shadow report`` measures them); no session is
-    ever touched. Exemplar retrieval needs the ``embed`` extra and a built
-    index (``cc-steer index``); without an index the watcher still runs, with
-    stage 3 unconditioned. Runs until interrupted.
+    configuration — unless ``--refiner spawn`` re-enables it. Every proposal lands
+    in the shadow ledger (``cc-steer shadow report`` measures them); in ``mirror``
+    or a live mode it is also queued to the delivery mailbox (``cc-steer inbox``)
+    for the ``UserPromptSubmit`` hook to surface. ``--shadow`` forces shadow
+    delivery regardless of the config. Exemplar retrieval needs the ``embed``
+    extra and a built index (``cc-steer index``); without one the watcher still
+    runs, stage 3 unconditioned. Runs until interrupted.
     """
+    import contextlib
+
     from cc_steer.exemplars import load_index, query_encoder
     from cc_steer.watcher.cascade import Cascade, Drafter, Gate, HeuristicGate, Refiner, SpawnDrafter, SpawnRefiner
     from cc_steer.watcher.daemon import Watcher
-    from cc_steer.watcher.delivery import ShadowDelivery
+    from cc_steer.watcher.delivery import ShadowDelivery, SteerDelivery
     from cc_steer.watcher.gate import LexicalGate
+    from cc_steer.watcher.live import LiveConfig, MailboxDelivery, TeeDelivery, shadow_db_path
     from cc_steer.watcher.types import CascadeConfig
 
-    if not shadow_mode:
-        raise click.ClickException("live delivery is not yet implemented; run without --live to shadow")
+    live_config = LiveConfig.load()
+    mode = "shadow" if force_shadow else live_config.mode
     if gate_kind is None:
         gate_kind = "lexical" if registry.current("gate") is not None else "heuristic"
         if gate_kind == "heuristic":
@@ -994,6 +1094,8 @@ async def watch_(
         gate_banner = f"gate: heuristic (threshold {resolved_gate_threshold})"
     config = CascadeConfig(
         gate_threshold=resolved_gate_threshold,
+        cooldown_turns=live_config.cooldown_turns,
+        max_per_session=live_config.max_per_session,
         stage2_model=stage2_model,
         stage2_threshold=stage2_threshold,
         drafter_kind=drafter_kind,
@@ -1026,12 +1128,15 @@ async def watch_(
             config=config,
             encoder=encoder,
         )
-        async with await ShadowDelivery.open(shadow_db) as delivery:
+        shadow_target = shadow_db or shadow_db_path()
+        async with contextlib.AsyncExitStack() as stack:
+            shadow = await stack.enter_async_context(await ShadowDelivery.open(shadow_target))
+            delivery: SteerDelivery = shadow
+            if mode != "shadow":
+                mailbox = await stack.enter_async_context(await MailboxDelivery.open(shadow_target, config=live_config))
+                delivery = TeeDelivery([shadow, mailbox])
             watcher = Watcher(cascade, delivery, roots=roots or (CLAUDE_PROJECTS_DIR,), debounce_s=debounce)
-            click.echo(
-                f"watching {len(watcher.roots)} root(s) in shadow mode; "
-                f"proposals land in {shadow_db or ShadowDelivery.default_path()}"
-            )
+            click.echo(f"watching {len(watcher.roots)} root(s) in {mode} mode; proposals land in {shadow_target}")
             await watcher.run()
 
 

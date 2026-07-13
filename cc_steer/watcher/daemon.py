@@ -20,6 +20,7 @@ byte-compatible with training.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -27,9 +28,12 @@ from typing import TYPE_CHECKING
 import anyio
 from cc_transcript.activity import SessionActivity
 from cc_transcript.context import ContextWindow, turn_ref
+from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import SessionId
 from cc_transcript.render import Budget
 from cc_transcript.watch import TailState, tick
+
+from cc_steer.watcher.live import scrub_event
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -103,7 +107,7 @@ class Watcher:
             if event.is_sidechain:
                 continue
             buffer = self.buffers.setdefault(str(event.session_id), SessionBuffer())
-            buffer.events.append(event.event)
+            buffer.events.append(scrub_event(event.event))
             del buffer.events[: -self.buffer_limit]
             buffer.last_event_at = now
             buffer.dirty = True
@@ -141,7 +145,11 @@ class Watcher:
         if (window := live_window(activity.turns[: target.index + 1])) is None:
             return None
         anchor_uuid = str(window.before[-1].refs[-1].event_uuid)
-        return await self.cascade.evaluate(session_id, turn_index=target.index, anchor_uuid=anchor_uuid, window=window)
+        if (proposal := await self.cascade.evaluate(
+            session_id, turn_index=target.index, anchor_uuid=anchor_uuid, window=window
+        )) is None:
+            return None
+        return dataclasses.replace(proposal, project=session_cwd(buffer.events))
 
     async def step(self, events: Sequence[WatchEvent], *, now: float) -> list[SteerProposal]:
         """One deterministic step: ingest a batch, evaluate quiet sessions, deliver.
@@ -163,6 +171,14 @@ class Watcher:
         while True:
             await self.step(await tick(state, self.roots), now=time.monotonic())
             await anyio.sleep(self.poll)
+
+
+def session_cwd(events: Sequence[TranscriptEvent]) -> str | None:
+    """The session's working directory from its latest cwd-bearing event, or None when none carries one."""
+    return next(
+        (meta.cwd for event in reversed(events) if (meta := event_meta(event)) is not None and meta.cwd is not None),
+        None,
+    )
 
 
 def live_window(turns: Sequence[Turn]) -> ContextWindow | None:
