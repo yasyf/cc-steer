@@ -19,7 +19,7 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "anyio>=4.4",
-    "cc-transcript>=13,<14",
+    "cc-transcript>=13.1,<14",
     "click>=8",
     "datasets>=3.2",
     "fastapi>=0.115",
@@ -42,6 +42,11 @@ gate = [
 mlx = [
     "mlx-lm>=0.31.3",
     "transformers>=5.12,<5.13",
+]
+retrain = [
+    "cc-steer[gate,mlx]",
+    "tinker>=0.22.7,<0.23",
+    "pyarrow>=18",
 ]
 dev = [
     "pytest>=8.0",
