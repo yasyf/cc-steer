@@ -1,8 +1,8 @@
-"""Stage 1 in production: the lab-trained lexical gate, loaded from the registry.
+"""Stage 1 in production: the lexical gate, loaded from the registry.
 
 E1's bake-off winner — TF-IDF word 1-2 grams + char 3-5 grams into a balanced
-logistic regression, temperature-scaled — is trained and serialized by the
-lab's ``harness.retrain`` flow; this module only loads and scores. The two
+logistic regression, temperature-scaled — is trained and serialized by
+:mod:`cc_steer.retrain.lexical`; this module only loads and scores. The two
 sides share ONE artifact spec, defined here and imported by the trainer:
 
 * ``ARTIFACT_NAME`` (``model.joblib``) — a joblib dict with keys ``word_vec``
@@ -50,10 +50,7 @@ class LexicalGate:
     def __init__(self, version: registry.VersionInfo | None = None, *, root: Path | None = None) -> None:
         resolved = version or registry.current(COMPONENT, root=root)
         if resolved is None:
-            raise RuntimeError(
-                "no promoted gate model: train and promote one with the lab's retrain flow "
-                "(uv run --project cc-steer-lab python -m harness.retrain)"
-            )
+            raise RuntimeError("no promoted gate model: train and promote one with `cc-steer retrain --component gate`")
         artifact = resolved.path / ARTIFACT_NAME
         if not artifact.exists():
             raise RuntimeError(f"gate version {resolved.version} has no {ARTIFACT_NAME} at {artifact}")

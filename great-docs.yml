@@ -52,3 +52,16 @@ reference:
     desc: The feedback event store.
     contents:
       - store.FeedbackStore
+  - title: Retraining
+    desc: The weekly retrain lanes — gate and watcher — and their promotion machinery.
+    contents:
+      - retrain.lexical.retrain_gate
+      - retrain.watcher.retrain_watcher
+      - retrain.watcher.WatcherRecipe
+      - retrain.watcher.register_watcher_adapter
+      - retrain.watcher.seed_incumbent_probs
+      - retrain.evalset.freeze_eval
+      - retrain.evalset.EvalFrame
+      - retrain.promotion.corrected_gate
+      - retrain.promotion.GateResult
+      - retrain.promotion.Verdict

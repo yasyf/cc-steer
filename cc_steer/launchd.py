@@ -3,12 +3,13 @@
 The pipeline agent fires ``cc-steer pipeline run --auto-weekly`` at the
 configured hour through a login-ish shell so PATH-provided tooling resolves;
 ``--auto-weekly`` folds the weekly audit into the Sunday run so one agent
-covers both cadences. The retrain agent fires the lab's ``harness.retrain``
-every Sunday morning, refreshing the promoted gate model when the training
-data moved. The watch agent runs ``cc-steer watch`` continuously under
-``KeepAlive`` — a fail-fast crash respawns rather than staying dead, and a
-model promotion takes effect on the next ``launchctl kickstart``. All three
-run through the same ``sh -lc`` + ccp-env-guard command shape.
+covers both cadences. The retrain agent fires ``cc-steer retrain`` for the gate
+lane then the watcher lane every Sunday morning, refreshing each promoted model
+when its training data moved. The watch agent runs ``cc-steer watch``
+continuously under ``KeepAlive`` — a fail-fast crash respawns rather than
+staying dead, and a model promotion takes effect on the next
+``launchctl kickstart``. All run through the same ``sh -lc`` + ccp-env-guard
+command shape.
 """
 
 from __future__ import annotations
@@ -19,12 +20,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from cc_steer.hooks import DEFAULT_PREFIX
+
 LABEL = "com.cc-steer.pipeline"
 RETRAIN_LABEL = "com.cc-steer.retrain"
 WATCH_LABEL = "com.cc-steer.watch"
 LOG_DIR = Path.home() / ".cc-steer" / "logs"
-LAB_DIR = Path.home() / "Code" / "cc-steer-lab"
 SUNDAY = 0  # launchd's StartCalendarInterval weekday numbering
+RETRAIN_EXTRA_PREFIX = "uvx --from 'cc-steer[retrain]' cc-steer"
 
 
 def agent_path() -> Path:
@@ -51,19 +54,29 @@ def pipeline_command(prefix: str, journal_repo: Path | None) -> str:
     return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; exec {resolved} pipeline run --auto-weekly{journal}'
 
 
-def retrain_command(lab: Path) -> str:
-    """The shell command the retrain agent runs: the lab's retrain module in its own venv."""
-    uv = shutil.which("uv") or "uv"
-    body = f"exec {uv} run --project {shlex.quote(str(lab))} python -m harness.retrain"
-    return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; {body}'
+def retrain_command(prefix: str) -> str:
+    """The shell command the retrain agent runs: the gate lane then the watcher lane, each independent.
 
-
-def watch_command(prefix: str) -> str:
-    """The shell command the watch daemon runs: the two-stage watcher over ~/.claude/projects, delivering per live.toml."""
+    A gate-lane failure must not skip the watcher lane, but launchd must still see it —
+    both lanes always run, and the exit status is the OR of theirs.
+    """
     resolved = prefix
     if prefix.split(maxsplit=1)[0] == "uvx" and (uvx := shutil.which("uvx")):
         resolved = prefix.replace("uvx", uvx, 1)
-    body = f"exec {resolved} watch --gate lexical --gate-threshold 0.5 --drafter mlx"
+    lanes = f"s=0; {resolved} retrain --component gate || s=1; {resolved} retrain --component watcher || s=1; exit $s"
+    return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; {lanes}'
+
+
+def watch_command(prefix: str) -> str:
+    """The shell command the watch daemon runs: the two-stage watcher, delivering per live.toml.
+
+    No ``--gate-threshold`` override: the daemon serves each promoted gate at the
+    threshold its retrain fitted, read from the registry metadata.
+    """
+    resolved = prefix
+    if prefix.split(maxsplit=1)[0] == "uvx" and (uvx := shutil.which("uvx")):
+        resolved = prefix.replace("uvx", uvx, 1)
+    body = f"exec {resolved} watch --gate lexical --drafter mlx"
     return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; {body}'
 
 
@@ -80,12 +93,12 @@ def render(prefix: str, journal_repo: Path | None, *, hour: int = 3) -> bytes:
     )
 
 
-def render_retrain(lab: Path, *, hour: int = 4) -> bytes:
+def render_retrain(prefix: str, *, hour: int = 4) -> bytes:
     """The plist for the weekly retrain agent: Sundays at ``hour``."""
     return plistlib.dumps(
         {
             "Label": RETRAIN_LABEL,
-            "ProgramArguments": ["/bin/sh", "-lc", retrain_command(lab)],
+            "ProgramArguments": ["/bin/sh", "-lc", retrain_command(prefix)],
             "StartCalendarInterval": {"Weekday": SUNDAY, "Hour": hour, "Minute": 0},
             "StandardOutPath": str(LOG_DIR / "retrain.log"),
             "StandardErrorPath": str(LOG_DIR / "retrain.log"),
@@ -112,14 +125,38 @@ def install(prefix: str, journal_repo: Path | None, *, hour: int = 3) -> Path:
     return _install(agent_path(), render(prefix, journal_repo, hour=hour))
 
 
-def install_retrain(lab: Path = LAB_DIR, *, hour: int = 4) -> Path:
+def retrain_prefix(prefix: str) -> str:
+    """The retrain-lane prefix: the bare default rewritten to resolve the ``retrain`` extra, else untouched.
+
+    The base ``uvx cc-steer`` dist cannot import the watcher lane's Tinker/mlx-lm deps, so the default
+    resolves ``cc-steer[retrain]``; a custom prefix is the operator's responsibility (mirrors
+    :func:`cc_steer.hooks.live_runner`).
+    """
+    return RETRAIN_EXTRA_PREFIX if prefix == DEFAULT_PREFIX else prefix
+
+
+def install_retrain(prefix: str, *, hour: int = 4) -> Path:
     """Writes and (re)loads the weekly retrain agent; returns the plist path."""
-    return _install(retrain_agent_path(), render_retrain(lab, hour=hour))
+    return _install(retrain_agent_path(), render_retrain(retrain_prefix(prefix), hour=hour))
 
 
 def install_watch(prefix: str) -> Path:
     """Writes and (re)loads the always-on watch daemon; returns the plist path."""
     return _install(watch_agent_path(), render_watch(prefix))
+
+
+def kickstart_watch() -> bool:
+    """Kicks the always-on watch agent so a fresh promotion loads; True when the kick succeeds.
+
+    The watch agent may legitimately not be installed, so a nonzero return is reported by the
+    caller, never raised.
+    """
+    return (
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{_uid()}/{WATCH_LABEL}"], capture_output=True, check=False
+        ).returncode
+        == 0
+    )
 
 
 def uninstall() -> bool:

@@ -67,12 +67,23 @@ kto: train 1156  test 115
 
 Four configs land as per-split parquet in a private `<hf-user>/cc-steer-traces`, next to a generated dataset card. Splits group on the session hash, so a session never straddles train and test.
 
+### Retrain the watcher that steers you back
+
+The exported views close the loop: cc-steer's live watcher — a local 4-bit LoRA that drafts steers as you work — retrains from them on Tinker, gated so a worse model never ships:
+
+```bash
+uvx --from 'cc-steer[retrain]' cc-steer retrain --component watcher
+```
+
+With a Tinker key in `~/.cc-steer/tinker.env`, one run curates the training pool, trains under a hard spend cap ($15 default), scores the candidate server-side against a frozen eval, and promotes only on a strict beat of the incumbent: higher sentinel AUC, fire budget held, coverage wins. On a promote, the watch daemon restarts on the new adapter; on a reject, production never notices. `--component gate` retrains the stage-1 lexical gate the same way, minus the GPU bill, and `cc-steer pipeline install-launchd` schedules both for Sunday 4am.
+
 ## More in the docs
 
 - [Incremental scanning](https://yasyf.github.io/cc-steer/reference/cli/scan.html) explains how content digests and one-transaction commits keep re-scans cheap and interrupt-safe.
 - [Triage, audit, and eval](https://yasyf.github.io/cc-steer/reference/cli/triage.html) cover prompt-versioned judging, a seeded audit sample, and mechanical metrics that need no LLM calls.
 - [view-samples](https://yasyf.github.io/cc-steer/reference/cli/view_samples.html) serves a local dashboard for browsing refined pairs and their full lineage.
 - [The Python API](https://yasyf.github.io/cc-steer/reference/) drives the scanner and the feedback store from your own code.
+- [Retraining](https://yasyf.github.io/cc-steer/reference/#retraining) covers the weekly gate and watcher lanes, the promotion gate's math, and the frozen-eval store.
 
 cc-steer is alpha. The pipeline runs end to end, and the judge prompt still iterates (v6 today).
 

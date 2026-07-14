@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The production retrain loop, consolidated into the package from the lab:
+  `cc-steer retrain --component gate|watcher` retrains the stage-1 lexical gate
+  locally with sklearn and the stage-2 watcher LoRA on Tinker's managed
+  training API under a hard spend cap, scores each candidate server-side
+  against a frozen eval (`cc-steer freeze-eval`), gates it against the
+  incumbent, and auto-promotes only on a strict beat — restarting the watch
+  daemon on a watcher promote. The `retrain` extra carries the heavy deps; the
+  weekly launchd agent (`cc-steer pipeline install-launchd`) now runs both
+  lanes with no lab checkout, and the watch agent serves each promoted gate at
+  its fitted threshold instead of a hardcoded `--gate-threshold 0.5`.
 - The live steering watcher: `cc-steer watch --shadow` tails open Claude Code
   sessions and runs a staged cascade — a cheap stage-1 gate over the flattened
   context window, a stage-2 drafting model, and an optional stage-3

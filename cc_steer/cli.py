@@ -706,10 +706,13 @@ async def live_status() -> None:
     click.echo(f"killed:    {is_killed()}")
     click.echo(f"hook:      {hook_wiring.installed_live_command() or 'not installed'}")
     click.echo(f"projects:  {', '.join(config.allow_projects) or '(none)'}")
-    click.echo(f"budget:    {config.max_live_per_day}/day   ttl {config.steer_ttl_minutes}m   holdout {config.holdout_frac}")
+    click.echo(
+        f"budget:    {config.max_live_per_day}/day   ttl {config.steer_ttl_minutes}m   holdout {config.holdout_frac}"
+    )
     async with await MailboxDelivery.open(config=config) as mailbox:
         counts = await mailbox.counts()
-    click.echo(f"delivered today: {counts.get('delivered_today', 0)}   " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if k != "delivered_today"))
+    others = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if k != "delivered_today")
+    click.echo(f"delivered today: {counts.get('delivered_today', 0)}   {others}")
 
 
 async def record_cli_reaction(proposal_id: int, kind: ReactionKind) -> int | None:
@@ -831,6 +834,105 @@ def models_rollback(component: str) -> None:
     click.echo(f"rolled back {component} to {info.version}")
 
 
+@main.command(name="retrain")
+@click.option(
+    "--component",
+    type=click.Choice(["gate", "watcher"]),
+    required=True,
+    help="Which component to retrain and (conditionally) promote.",
+)
+@click.option("--force", is_flag=True, help="Retrain even when the component's train view is unchanged.")
+@click.option(
+    "--recipe",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Watcher only: a JSON recipe overriding the E8-winner training defaults.",
+)
+@click.option(
+    "--register-adapter",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Watcher only: register and promote this pre-built adapter dir instead of training.",
+)
+@click.option(
+    "--metadata-json",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Watcher registration metadata (base_model, thresholds, render_version, ...).",
+)
+@click.option(
+    "--seed-incumbent-probs",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Watcher only: seed the current incumbent's frozen-eval probs from this cache JSON, then exit.",
+)
+def retrain_(
+    component: str,
+    force: bool,
+    recipe: Path | None,
+    register_adapter: Path | None,
+    metadata_json: Path | None,
+    seed_incumbent_probs: Path | None,
+) -> None:
+    """Retrain and (conditionally) promote one component through the model registry.
+
+    The gate lane retrains the lexical prefilter; the watcher lane trains a LoRA on Tinker,
+    gates it against the incumbent, and serves it locally. ``--register-adapter`` and
+    ``--seed-incumbent-probs`` are watcher-only bootstrap paths that skip training.
+    """
+    from cc_steer.retrain import lexical, watcher
+
+    if component == "gate":
+        if any(opt is not None for opt in (recipe, register_adapter, metadata_json, seed_incumbent_probs)):
+            raise click.ClickException("--recipe and the adapter/probs bootstrap options are watcher only")
+        click.echo(lexical.retrain_gate(force=force))
+        return
+    if seed_incumbent_probs is not None:
+        if any(opt is not None for opt in (recipe, register_adapter, metadata_json)):
+            raise click.UsageError(
+                "--seed-incumbent-probs is a standalone bootstrap; it takes no "
+                "--recipe/--register-adapter/--metadata-json"
+            )
+        incumbent = registry.current(watcher.WATCHER_COMPONENT)
+        if incumbent is None:
+            raise click.ClickException("no promoted watcher incumbent to seed probs for; register one first")
+        path = watcher.seed_incumbent_probs(
+            seed_incumbent_probs,
+            version=incumbent.version,
+            expected_render=int(str(incumbent.metadata["render_version"])),
+        )
+        click.echo(f"watcher: seeded incumbent {incumbent.version} probs -> {path}")
+        return
+    if register_adapter is not None:
+        if metadata_json is None:
+            raise click.UsageError("--register-adapter requires --metadata-json")
+        if recipe is not None:
+            raise click.UsageError("--register-adapter registers a pre-built adapter; it takes no --recipe")
+        click.echo(watcher.register_watcher(register_adapter, metadata=dict(json.loads(metadata_json.read_text()))))
+        return
+    if metadata_json is not None:
+        raise click.UsageError("--metadata-json is only valid with --register-adapter")
+    click.echo(
+        watcher.retrain_watcher(
+            force=force,
+            recipe=watcher.WatcherRecipe.from_json(recipe) if recipe is not None else watcher.WATCHER_RECIPE,
+        )
+    )
+
+
+@main.command(name="freeze-eval")
+def freeze_eval_() -> None:
+    """Freeze the gate and watcher eval views from the current export into ~/.cc-steer/eval/.
+
+    Each view's ``test.parquet`` is copied under ``~/.cc-steer/eval/`` beside a sha256
+    manifest and never silently overwritten — a changed frozen file fails loud.
+    """
+    from cc_steer.retrain import evalset
+
+    for view in ("gate", "watcher"):
+        click.echo(f"froze {view} eval ({evalset.freeze_eval(view)[:12]})")
+
+
 @main.group(name="pipeline")
 def pipeline_group() -> None:
     """Run the collection stages as one budgeted, schedulable pass."""
@@ -933,14 +1035,7 @@ async def pipeline_run(
     "retrain",
     default=True,
     show_default=True,
-    help="Also install the weekly gate-retrain agent, run through the lab checkout.",
-)
-@click.option(
-    "--lab",
-    type=click.Path(file_okay=False, path_type=Path),
-    default=None,
-    show_default="~/Code/cc-steer-lab",
-    help="The cc-steer-lab checkout the retrain agent runs harness.retrain in.",
+    help="Also install the weekly gate + watcher retrain agent.",
 )
 @click.option("--retrain-hour", type=int, default=4, show_default=True, help="Local hour the Sunday retrain fires at.")
 @click.option(
@@ -951,30 +1046,37 @@ async def pipeline_run(
     help="Also install the always-on watch daemon under KeepAlive.",
 )
 def pipeline_install_launchd(
-    prefix: str, journal_repo: Path | None, hour: int, retrain: bool, lab: Path | None, retrain_hour: int, watch: bool
+    prefix: str, journal_repo: Path | None, hour: int, retrain: bool, retrain_hour: int, watch: bool
 ) -> None:
     """Schedule the pass nightly — plus the weekly model retrain and the shadow watcher — via macOS LaunchAgents.
 
     The pipeline agent covers both collection cadences: it runs ``pipeline run
     --auto-weekly``, so the Sunday pass folds in the auditor and eval. The
-    retrain agent runs the lab's ``harness.retrain`` every Sunday, refreshing
-    the promoted gate model when the training data moved (``--no-retrain``
-    skips it). The watch agent runs ``cc-steer watch`` continuously under
-    ``KeepAlive`` so a fail-fast crash respawns (``--no-watch`` skips it). Logs
-    land under ``~/.cc-steer/logs/``. Re-running replaces the agents in place.
+    retrain agent runs ``cc-steer retrain`` for the gate lane then the watcher
+    lane every Sunday, refreshing each promoted model when its training data
+    moved (``--no-retrain`` skips it). The watch agent runs ``cc-steer watch``
+    continuously under ``KeepAlive`` so a fail-fast crash respawns
+    (``--no-watch`` skips it). Logs land under ``~/.cc-steer/logs/``. Re-running
+    replaces the agents in place.
+
+    ``--prefix`` is shared by every agent. The retrain agent needs the
+    ``retrain`` extra (Tinker + mlx-lm) for the watcher lane: the bare default
+    is rewritten to ``uvx --from 'cc-steer[retrain]' cc-steer`` for that agent,
+    while a custom prefix must resolve the extra itself.
     """
     path = launchd.install(prefix, journal_repo, hour=hour)
     click.echo(f"installed {launchd.LABEL} ({path}): nightly {hour:02d}:00, weekly audit on Sundays")
     if watch:
         watch_path = launchd.install_watch(prefix)
-        click.echo(f"installed {launchd.WATCH_LABEL} ({watch_path}): always-on watcher, delivers per live.toml (KeepAlive)")
+        click.echo(
+            f"installed {launchd.WATCH_LABEL} ({watch_path}): always-on watcher, delivers per live.toml (KeepAlive)"
+        )
     if not retrain:
         return
-    lab_dir = lab or launchd.LAB_DIR
-    if not lab_dir.is_dir():
-        raise click.ClickException(f"no cc-steer-lab checkout at {lab_dir}; pass --lab or --no-retrain")
-    retrain_path = launchd.install_retrain(lab_dir, hour=retrain_hour)
-    click.echo(f"installed {launchd.RETRAIN_LABEL} ({retrain_path}): Sundays {retrain_hour:02d}:00, gate retrain")
+    retrain_path = launchd.install_retrain(prefix, hour=retrain_hour)
+    click.echo(
+        f"installed {launchd.RETRAIN_LABEL} ({retrain_path}): Sundays {retrain_hour:02d}:00, gate + watcher retrain"
+    )
 
 
 @pipeline_group.command(name="uninstall-launchd")

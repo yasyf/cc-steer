@@ -1,0 +1,459 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+from cc_steer import launchd, registry
+from cc_steer.retrain import data, evalset, promotion
+from cc_steer.retrain import tinker as tk
+from cc_steer.retrain import watcher as w
+from cc_steer.retrain.evalset import ProbsStoreError
+from cc_steer.retrain.watcher import WATCHER_RECIPE, ConversionDroppedError, WatcherRecipe, WatcherRetrainError
+from cc_steer.watcher import drafter_mlx
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+N = 20
+CANDIDATE_WIN = np.full(N, 0.9)
+CANDIDATE_WIN[:7] = np.linspace(0.01, 0.07, 7)
+CANDIDATE_WIN[7:10] = [0.08, 0.09, 0.10]
+CANDIDATE_WIN[10:] = np.linspace(0.5, 0.99, 10)
+INCUMBENT = np.full(N, 0.9)
+INCUMBENT[10:17] = 0.1
+
+
+def default_kwargs() -> dict[str, Any]:
+    return {
+        "tinker_model": "Qwen/Qwen3-8B",
+        "mlx_id": "mlx-community/Qwen3-8B-4bit",
+        "rank": 32,
+        "learning_rate": 1e-4,
+        "batch_size": 4,
+        "epochs": 2,
+        "checkpoint_fracs": [0.25, 0.5, 0.75, 1.0],
+        "max_tokens": 4096,
+        "render_version": 2,
+        "val_n": 200,
+        "oversample_corrective": 3.0,
+        "budget_fires_per_100": 2.0,
+        "spend_cap_usd": 15.0,
+        "parity_rows": 20,
+        "parity_tolerance": 0.05,
+        "seed": 1729,
+    }
+
+
+class TestWatcherRecipe:
+    def test_default_constant_exact_values(self) -> None:
+        assert WATCHER_RECIPE == WatcherRecipe(**default_kwargs())
+        assert WATCHER_RECIPE.checkpoint_fracs == (0.25, 0.5, 0.75, 1.0)
+        assert WATCHER_RECIPE.rank == 32
+        assert WATCHER_RECIPE.spend_cap_usd == 15.0
+        assert WATCHER_RECIPE.seed == 1729
+
+    def test_json_round_trip_coerces_fracs_to_tuple(self, tmp_path: Path) -> None:
+        path = tmp_path / "recipe.json"
+        path.write_text(json.dumps(default_kwargs()))
+        recipe = WatcherRecipe.from_json(path)
+        assert recipe == WATCHER_RECIPE
+        assert isinstance(recipe.checkpoint_fracs, tuple)
+
+    def test_missing_key_crashes(self, tmp_path: Path) -> None:
+        path = tmp_path / "recipe.json"
+        path.write_text(json.dumps({k: v for k, v in default_kwargs().items() if k != "seed"}))
+        with pytest.raises(TypeError):
+            WatcherRecipe.from_json(path)
+
+    def test_extra_key_crashes(self, tmp_path: Path) -> None:
+        path = tmp_path / "recipe.json"
+        path.write_text(json.dumps(default_kwargs() | {"bogus": 1}))
+        with pytest.raises(TypeError):
+            WatcherRecipe.from_json(path)
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"spend_cap_usd": float("nan")},
+            {"spend_cap_usd": 0.0},
+            {"learning_rate": 0.0},
+            {"learning_rate": -1e-4},
+            {"learning_rate": float("nan")},
+            {"rank": 0},
+            {"batch_size": 0},
+            {"epochs": 0},
+            {"max_tokens": 0},
+            {"val_n": 0},
+            {"parity_rows": 0},
+            {"oversample_corrective": 0.5},
+            {"oversample_corrective": float("nan")},
+            {"oversample_corrective": float("inf")},
+            {"budget_fires_per_100": 0.0},
+            {"budget_fires_per_100": -2.0},
+            {"budget_fires_per_100": float("nan")},
+            {"parity_tolerance": 0.0},
+            {"parity_tolerance": 1.0},
+            {"checkpoint_fracs": [0.0, 1.0]},
+            {"checkpoint_fracs": [0.5, 1.5]},
+            {"render_version": 1},
+            {"render_version": 3},
+            {"render_version": 2.0},
+            {"rank": float("nan")},
+            {"seed": 17.29},
+        ],
+        ids=[
+            "nan-cap",
+            "zero-cap",
+            "zero-lr",
+            "negative-lr",
+            "nan-lr",
+            "rank-0",
+            "batch-size-0",
+            "epochs-0",
+            "max-tokens-0",
+            "val-n-0",
+            "parity-rows-0",
+            "oversample-lt-1",
+            "oversample-nan",
+            "oversample-inf",
+            "budget-0",
+            "budget-negative",
+            "budget-nan",
+            "parity-tol-0",
+            "parity-tol-ge-1",
+            "frac-0",
+            "frac-gt-1",
+            "render-1",
+            "render-3",
+            "render-float-2",
+            "rank-nan",
+            "seed-float",
+        ],
+    )
+    def test_validation_rejects_degenerate(self, override: dict[str, Any]) -> None:
+        with pytest.raises(ValueError):
+            WatcherRecipe(**(default_kwargs() | override))
+
+
+def test_register_watcher_adapter_requires_budget_threshold(tmp_path: Path) -> None:
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / drafter_mlx.ADAPTER_NAME).write_bytes(b"weights")
+    (adapter / drafter_mlx.ADAPTER_CONFIG_NAME).write_bytes(b"{}")
+    with pytest.raises(ValueError, match="'budget' operating point"):
+        w.register_watcher_adapter(
+            adapter,
+            metadata={"base_model": "m", "render_version": 2, "thresholds": {"f1": 0.2}},
+            root=tmp_path / "registry",
+        )
+
+
+def message_struct() -> pa.DataType:
+    return pa.struct([("role", pa.string()), ("content", pa.string())])
+
+
+def watcher_row(index: int, *, split: str, label: bool, category: str, source_kind: str) -> dict[str, Any]:
+    reference = f"steer direction {index}" if label else "NO_STEER"
+    return {
+        "id": f"{split}-{index}",
+        "prompt": [{"role": "user", "content": f"{split} window {index}: should I refactor module {index}?"}],
+        "completion": [{"role": "assistant", "content": reference}],
+        "verbatim": reference if label else "",
+        "label": label,
+        "category": category,
+        "source_kind": source_kind,
+        "session_id": f"s{index}",
+        "split": split,
+    }
+
+
+def watcher_table(rows: list[dict[str, Any]]) -> pa.Table:
+    struct = message_struct()
+    return pa.table(
+        {
+            "prompt": pa.array([r["prompt"] for r in rows], type=pa.list_(struct)),
+            "completion": pa.array([r["completion"] for r in rows], type=pa.list_(struct)),
+            "verbatim": [r["verbatim"] for r in rows],
+            "label": [r["label"] for r in rows],
+            "id": [r["id"] for r in rows],
+            "category": [r["category"] for r in rows],
+            "source_kind": [r["source_kind"] for r in rows],
+            "session_id": [r["session_id"] for r in rows],
+            "split": [r["split"] for r in rows],
+        }
+    )
+
+
+def eval_rows() -> list[dict[str, Any]]:
+    positives = [
+        watcher_row(i, split="test", label=True, category="wrong_approach", source_kind="transcript_message")
+        for i in range(10)
+    ]
+    negatives = [
+        watcher_row(i + 10, split="test", label=False, category="", source_kind="transcript_message")
+        for i in range(10)
+    ]
+    return positives + negatives
+
+
+def train_rows() -> list[dict[str, Any]]:
+    positives = [
+        watcher_row(i, split="train", label=True, category="wrong_approach", source_kind="transcript_message")
+        for i in range(8)
+    ]
+    negatives = [
+        watcher_row(i + 8, split="train", label=False, category="", source_kind="transcript_message")
+        for i in range(8)
+    ]
+    return positives + negatives
+
+
+@dataclass
+class Lane:
+    dataset_dir: Path
+    eval_dir: Path
+    registry_root: Path
+    state_dir: Path
+    frame: evalset.EvalFrame
+    incumbent: registry.VersionInfo
+    calls: dict[str, int] = field(
+        default_factory=lambda: {"download": 0, "convert": 0, "score_frame": 0, "kickstart": 0}
+    )
+    candidate: np.ndarray = field(default_factory=lambda: CANDIDATE_WIN.copy())
+    drafter_offset: float = 0.0
+    convert_dropped: list[str] = field(default_factory=list)
+    train_error: Exception | None = None
+    kickstart_result: bool = True
+
+    def run(self, *, force: bool = True, recipe: WatcherRecipe = WATCHER_RECIPE) -> str:
+        return w.retrain_watcher(
+            force=force,
+            recipe=recipe,
+            dataset_dir=self.dataset_dir,
+            eval_root=self.eval_dir,
+            registry_root=self.registry_root,
+            state_dir=self.state_dir,
+            adapters_dir=self.state_dir / "adapters",
+        )
+
+
+@pytest.fixture
+def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
+    dataset_dir = tmp_path / "dataset"
+    (dataset_dir / "watcher").mkdir(parents=True)
+    pq.write_table(watcher_table(train_rows()), dataset_dir / "watcher" / "train.parquet")
+    pq.write_table(watcher_table(eval_rows()), dataset_dir / "watcher" / "test.parquet")
+
+    eval_dir = tmp_path / "eval"
+    evalset.freeze_eval("watcher", dataset_dir=dataset_dir, root=eval_dir)
+    frame = evalset.EvalFrame.load(root=eval_dir)
+
+    registry_root = tmp_path / "models"
+    incumbent = registry.register(
+        w.WATCHER_COMPONENT,
+        {drafter_mlx.ADAPTER_NAME: b"inc", drafter_mlx.ADAPTER_CONFIG_NAME: b"{}"},
+        {"base_model": "mlx-community/Qwen3-8B-4bit", "render_version": 2, "thresholds": {"budget": 0.5},
+         "dataset_digest": "old-digest"},
+        root=registry_root,
+    )
+    registry.promote(w.WATCHER_COMPONENT, incumbent.version, root=registry_root)
+    evalset.write_probs(
+        frame, incumbent.version, {rid: float(INCUMBENT[i]) for i, rid in enumerate(frame.ids)}, auc=0.4, root=eval_dir
+    )
+
+    obj = Lane(dataset_dir, eval_dir, registry_root, tmp_path / "state", frame, incumbent)
+    tail_index = {frame.tails[i]: i for i in range(len(frame))}
+
+    def fake_build_datum(messages: list[dict[str, str]], mlx_id: str) -> SimpleNamespace:
+        return SimpleNamespace(model_input=SimpleNamespace(length=10))
+
+    def fake_train_lora(
+        datums: Any, base: Any, *, steps: int, checkpoint_fractions: Any, on_checkpoint: Any, **_: Any
+    ) -> SimpleNamespace:
+        if obj.train_error is not None:
+            raise obj.train_error
+        svc = SimpleNamespace(name="svc")
+        ckpt_steps = sorted({max(1, min(steps, round(frac * steps))) for frac in checkpoint_fractions})
+        for step in ckpt_steps:
+            on_checkpoint(step, f"tinker://ckpt/{step}", svc, base)
+        return SimpleNamespace(checkpoints={step: f"tinker://ckpt/{step}" for step in ckpt_steps})
+
+    def fake_score_auc(svc: Any, path: str, valid_rows: Any, mlx_id: str) -> dict[str, float]:
+        return {"auc": 0.7 + int(path.rsplit("/", 1)[1]) * 0.01}
+
+    def fake_score_frame(svc: Any, path: str, frame_arg: evalset.EvalFrame, *, base: Any) -> dict[str, float]:
+        obj.calls["score_frame"] += 1
+        return {rid: float(obj.candidate[i]) for i, rid in enumerate(frame_arg.ids)}
+
+    def fake_download(svc: Any, path: str, out: Path) -> Path:
+        obj.calls["download"] += 1
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+
+    def fake_convert(peft: Path, out: Path, *, num_layers: int, rank: int) -> dict[str, Any]:
+        obj.calls["convert"] += 1
+        out.mkdir(parents=True, exist_ok=True)
+        (out / drafter_mlx.ADAPTER_NAME).write_bytes(b"cand")
+        (out / drafter_mlx.ADAPTER_CONFIG_NAME).write_text("{}")
+        return {"dropped": list(obj.convert_dropped), "covered": [], "n_lora_weights": 1}
+
+    class FakeDrafter:
+        def __init__(
+            self, version: Any = None, *, threshold: Any = None, root: Any = None, operating_point: str = "budget"
+        ) -> None:
+            self.version = version
+
+        def nosteer_prob(self, tail: str) -> float:
+            return float(obj.candidate[tail_index[tail]]) + obj.drafter_offset
+
+    def fake_kickstart() -> bool:
+        obj.calls["kickstart"] += 1
+        return obj.kickstart_result
+
+    monkeypatch.setattr(tk, "build_datum", fake_build_datum)
+    monkeypatch.setattr(tk, "train_lora", fake_train_lora)
+    monkeypatch.setattr(tk, "score_auc_tinker", fake_score_auc)
+    monkeypatch.setattr(tk, "score_frame_tinker", fake_score_frame)
+    monkeypatch.setattr(tk, "download_adapter", fake_download)
+    monkeypatch.setattr(tk, "convert_peft_to_mlx", fake_convert)
+    monkeypatch.setattr(drafter_mlx, "MlxDrafter", FakeDrafter)
+    monkeypatch.setattr(launchd, "kickstart_watch", fake_kickstart)
+    return obj
+
+
+class TestRetrainWatcher:
+    def test_skip_when_digest_unchanged(self, lane: Lane) -> None:
+        digest = data.train_digest(dataset_dir=lane.dataset_dir)
+        matched = registry.register(  # a fresh incumbent whose digest matches the current train view
+            w.WATCHER_COMPONENT,
+            {drafter_mlx.ADAPTER_NAME: b"inc2", drafter_mlx.ADAPTER_CONFIG_NAME: b"{}"},
+            lane.incumbent.metadata | {"dataset_digest": digest},
+            root=lane.registry_root,
+        )
+        registry.promote(w.WATCHER_COMPONENT, matched.version, root=lane.registry_root)
+        verdict = lane.run(force=False)
+        assert verdict == f"watcher: skipped (no new data at digest {digest})"
+        assert lane.calls["score_frame"] == 0
+
+    def test_promote_registers_prunes_writes_probs_and_kickstarts(
+        self, lane: Lane, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for stub in (b"stub-a", b"stub-b"):  # pad past KEEP_VERSIONS so the post-promote prune drops the oldest
+            registry.register(
+                w.WATCHER_COMPONENT,
+                {drafter_mlx.ADAPTER_NAME: stub, drafter_mlx.ADAPTER_CONFIG_NAME: b"{}"},
+                lane.incumbent.metadata,
+                root=lane.registry_root,
+            )
+        order: list[str] = []
+
+        def recorder(name: str, fn: Any) -> Any:
+            def wrapped(*args: Any, **kwargs: Any) -> Any:
+                order.append(name)
+                return fn(*args, **kwargs)
+
+            return wrapped
+
+        monkeypatch.setattr(registry, "register", recorder("register", registry.register))
+        monkeypatch.setattr(registry, "promote", recorder("promote", registry.promote))
+        monkeypatch.setattr(evalset, "write_probs", recorder("write_probs", evalset.write_probs))
+        monkeypatch.setattr(launchd, "kickstart_watch", recorder("kickstart", launchd.kickstart_watch))
+
+        verdict = lane.run()
+        assert verdict.startswith("watcher: promoted")
+        assert order == ["register", "promote", "write_probs", "kickstart"]
+        assert lane.calls["kickstart"] == 1
+        current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
+        assert current is not None and current.version != lane.incumbent.version
+        # FH1: thresholds["budget"] is the P(NO_STEER)-scale cut 1 - fire_score_cut (~0.01 here), not the 0.99 fire cut.
+        expected_threshold = 1.0 - promotion.threshold_for_budget(
+            1.0 - CANDIDATE_WIN, fires_per_100=w.WATCHER_RECIPE.budget_fires_per_100, total_turns=len(lane.frame)
+        )
+        assert current.metadata["thresholds"]["budget"] == pytest.approx(expected_threshold)
+        assert current.metadata["thresholds"]["budget"] < 0.5  # p-scale, not the fire-score scale
+        assert current.metadata["render_version"] == 2
+        assert "tinker_checkpoint" in current.metadata
+        assert "parity_max_abs_diff" in current.metadata
+        remaining = [info.version for info in registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)]
+        assert len(remaining) == w.KEEP_VERSIONS
+        assert lane.incumbent.version not in remaining  # the oldest version was the one pruned
+        assert evalset.probs_path(current.version, root=lane.eval_dir).exists()
+
+    def test_reject_at_gate_never_downloads_or_converts(self, lane: Lane) -> None:
+        lane.candidate = INCUMBENT.copy()  # equal AUC -> the watcher bar rejects
+        verdict = lane.run()
+        assert verdict.startswith("watcher: rejected")
+        assert lane.calls["download"] == 0
+        assert lane.calls["convert"] == 0
+        assert lane.calls["kickstart"] == 0
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_reject_at_parity_never_registers(self, lane: Lane) -> None:
+        lane.drafter_offset = 0.5  # serve diverges from Tinker far beyond tolerance
+        verdict = lane.run()
+        assert verdict.startswith("watcher: rejected (parity")
+        assert lane.calls["convert"] == 1  # convert ran, but no new version was registered
+        assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_spend_cap_refusal_journaled_as_reject(self, lane: Lane) -> None:
+        lane.train_error = tk.SpendCapError("projected cost $99.00 exceeds cap $15.00; not launching")
+        verdict = lane.run()
+        assert verdict.startswith("watcher: rejected (projected")
+        assert lane.calls["score_frame"] == 0
+        assert lane.calls["download"] == 0
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_dropped_conversion_aborts_before_register(self, lane: Lane) -> None:
+        lane.convert_dropped = ["linear_attn.in_proj_qkv"]
+        with pytest.raises(ConversionDroppedError, match="half-converted") as excinfo:
+            lane.run()
+        assert excinfo.value.dropped == ["linear_attn.in_proj_qkv"]
+        assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
+
+    def test_missing_incumbent_probs_fails_loud(self, lane: Lane) -> None:
+        evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()
+        with pytest.raises(WatcherRetrainError, match="--seed-incumbent-probs"):
+            lane.run()
+
+
+class TestSeedIncumbentProbs:
+    def frame_and_root(self, tmp_path: Path) -> tuple[evalset.EvalFrame, Path]:
+        dataset_dir = tmp_path / "dataset"
+        (dataset_dir / "watcher").mkdir(parents=True)
+        pq.write_table(watcher_table(eval_rows()), dataset_dir / "watcher" / "test.parquet")
+        eval_dir = tmp_path / "eval"
+        evalset.freeze_eval("watcher", dataset_dir=dataset_dir, root=eval_dir)
+        return evalset.EvalFrame.load(root=eval_dir), eval_dir
+
+    def test_valid_cache_accepted_and_written(self, tmp_path: Path) -> None:
+        frame, eval_dir = self.frame_and_root(tmp_path)
+        cache = tmp_path / "cache.json"
+        cache.write_text(json.dumps({rid: str(INCUMBENT[i]) for i, rid in enumerate(frame.ids)}))
+        version = "v001-20260101-abcdef123456"
+        path = w.seed_incumbent_probs(cache, version=version, expected_render=2, eval_root=eval_dir)
+        assert path.exists()
+        loaded = evalset.load_probs(frame, version, expected_render=2, root=eval_dir)
+        assert loaded.tolist() == [float(INCUMBENT[i]) for i in range(len(frame))]
+
+    def test_incomplete_cache_fails_loud(self, tmp_path: Path) -> None:
+        frame, eval_dir = self.frame_and_root(tmp_path)
+        cache = tmp_path / "cache.json"
+        cache.write_text(json.dumps({rid: str(INCUMBENT[i]) for i, rid in enumerate(frame.ids) if i < len(frame) - 1}))
+        with pytest.raises(ProbsStoreError, match="missing"):
+            w.seed_incumbent_probs(cache, version="v001", expected_render=2, eval_root=eval_dir)
+
+    def test_drifted_cache_fails_loud(self, tmp_path: Path) -> None:
+        frame, eval_dir = self.frame_and_root(tmp_path)
+        drifted = {rid: str(INCUMBENT[i]) for i, rid in enumerate(frame.ids)} | {"foreign-row": "0.5"}
+        cache = tmp_path / "cache.json"
+        cache.write_text(json.dumps(drifted))
+        with pytest.raises(ProbsStoreError, match="foreign"):
+            w.seed_incumbent_probs(cache, version="v001", expected_render=2, eval_root=eval_dir)

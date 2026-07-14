@@ -72,8 +72,7 @@ class MlxDrafter:
         resolved = version or registry.current(COMPONENT, root=root)
         if resolved is None:
             raise RuntimeError(
-                "no promoted watcher model: register and promote the E2 adapter with the lab's retrain flow "
-                "(uv run --project cc-steer-lab python -m harness.retrain --component watcher)"
+                "no promoted watcher model: train and promote one with `cc-steer retrain --component watcher`"
             )
         for name in (ADAPTER_NAME, ADAPTER_CONFIG_NAME):
             if not (resolved.path / name).exists():
