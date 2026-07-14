@@ -197,15 +197,12 @@ def seed_incumbent_probs(
 
     The cache is the lab's flat ``{row_id: P(NO_STEER)}`` map. It must cover the current
     frame exactly — a missing row is incomplete, a foreign row means it was scored against a
-    drifted eval — and its render must match the frame's. On success it is written through
-    :func:`~cc_steer.retrain.evalset.write_probs`, stamped with the frame digest so the next
-    retrain's incumbent read is coherent.
+    drifted eval. Its render is ``expected_render``, the incumbent's OWN contract from its
+    registry metadata: a migrated incumbent is scored under the render it serves (the E12
+    precedent), and the next retrain's :func:`~cc_steer.retrain.evalset.load_probs` verifies
+    against the same metadata. On success it is written through
+    :func:`~cc_steer.retrain.evalset.write_probs`, stamped with the frame digest.
     """
-    if expected_render != evalset.RENDER_VERSION:
-        raise evalset.ProbsStoreError(
-            f"seed render {expected_render} != frame render {evalset.RENDER_VERSION}; "
-            f"recompute the cache at render {evalset.RENDER_VERSION}"
-        )
     frame = evalset.EvalFrame.load(root=eval_root)
     probs = {row_id: float(value) for row_id, value in json.loads(path.read_text()).items()}
     missing = [row_id for row_id in frame.ids if row_id not in probs]
@@ -216,7 +213,7 @@ def seed_incumbent_probs(
             "the seed cache was computed against a drifted eval"
         )
     auc = promotion.sentinel_auc(frame.labels, np.array([probs[row_id] for row_id in frame.ids], dtype=np.float64))
-    return evalset.write_probs(frame, version, probs, auc=auc, root=eval_root)
+    return evalset.write_probs(frame, version, probs, auc=auc, render=expected_render, root=eval_root)
 
 
 def retrain_watcher(

@@ -174,12 +174,19 @@ def probs_path(version: str, *, root: Path | None = None) -> Path:
 
 
 def write_probs(
-    frame: EvalFrame, version: str, probs: Mapping[str, float], *, auc: float, root: Path | None = None
+    frame: EvalFrame,
+    version: str,
+    probs: Mapping[str, float],
+    *,
+    auc: float,
+    render: int = RENDER_VERSION,
+    root: Path | None = None,
 ) -> Path:
     """Write one version's per-row ``P(NO_STEER)`` — the single codepath that creates these files.
 
-    ``probs`` must cover every frame row; the meta stamps the frame digest and render
-    version so :func:`load_probs` can refuse a stale file.
+    ``probs`` must cover every frame row; the meta stamps the frame digest and the render
+    the version was scored under (its own contract — a migrated incumbent may predate the
+    frame's render) so :func:`load_probs` can refuse a stale file.
     """
     if missing := [row_id for row_id in frame.ids if row_id not in probs]:
         raise ProbsStoreError(f"probs for {version} miss {len(missing)} frame rows; refusing to write a partial file")
@@ -188,7 +195,7 @@ def write_probs(
     path = probs_path(version, root=root)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "meta": {"dataset_digest": frame.digest, "render": RENDER_VERSION, "auc": auc},
+        "meta": {"dataset_digest": frame.digest, "render": render, "auc": auc},
         "probs": {row_id: float(probs[row_id]) for row_id in frame.ids},
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

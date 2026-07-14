@@ -443,6 +443,20 @@ class TestSeedIncumbentProbs:
         loaded = evalset.load_probs(frame, version, expected_render=2, root=eval_dir)
         assert loaded.tolist() == [float(INCUMBENT[i]) for i in range(len(frame))]
 
+    def test_migrated_cache_seeds_under_the_incumbents_own_render(self, tmp_path: Path) -> None:
+        # v001 predates render 2: its cache is scored under its own contract (render 1, the
+        # E12 precedent) and must seed as-is; load_probs verifies against that same render.
+        frame, eval_dir = self.frame_and_root(tmp_path)
+        cache = tmp_path / "cache.json"
+        cache.write_text(json.dumps({rid: str(INCUMBENT[i]) for i, rid in enumerate(frame.ids)}))
+        version = "v001-20260101-abcdef123456"
+        path = w.seed_incumbent_probs(cache, version=version, expected_render=1, eval_root=eval_dir)
+        assert json.loads(path.read_text())["meta"]["render"] == 1
+        loaded = evalset.load_probs(frame, version, expected_render=1, root=eval_dir)
+        assert loaded.tolist() == [float(INCUMBENT[i]) for i in range(len(frame))]
+        with pytest.raises(ProbsStoreError, match="render"):
+            evalset.load_probs(frame, version, expected_render=2, root=eval_dir)
+
     def test_incomplete_cache_fails_loud(self, tmp_path: Path) -> None:
         frame, eval_dir = self.frame_and_root(tmp_path)
         cache = tmp_path / "cache.json"
