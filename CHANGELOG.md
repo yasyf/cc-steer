@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-14
+
+### Fixed
+- `install_watch` now rewrites the bare default prefix to resolve the `gate`
+  and `mlx` extras (`uvx --from 'cc-steer[gate,mlx]' cc-steer`), mirroring the
+  retrain agent's prefix rewrite. The v0.12.0 default installed a watch daemon
+  that crash-looped on startup because the base dist cannot import the lexical
+  gate's scikit-learn or the mlx drafter's mlx-lm.
+
+## [0.12.0] - 2026-07-14
+
 ### Added
 - The production retrain loop, consolidated into the package from the lab:
   `cc-steer retrain --component gate|watcher` retrains the stage-1 lexical gate
@@ -17,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   weekly launchd agent (`cc-steer pipeline install-launchd`) now runs both
   lanes with no lab checkout, and the watch agent serves each promoted gate at
   its fitted threshold instead of a hardcoded `--gate-threshold 0.5`.
+
+## [0.11.0] - 2026-07-13
+
+### Added
 - The live steering watcher: `cc-steer watch --shadow` tails open Claude Code
   sessions and runs a staged cascade — a cheap stage-1 gate over the flattened
   context window, a stage-2 drafting model, and an optional stage-3

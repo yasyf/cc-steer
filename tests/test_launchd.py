@@ -161,3 +161,18 @@ def test_watch_command_resolves_uvx(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_watch_command_survives_missing_uvx(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: None)
     assert "exec uvx cc-steer watch --gate lexical --drafter mlx" in launchd.watch_command("uvx cc-steer")
+
+
+def test_watch_prefix_rewrites_only_the_default() -> None:
+    assert launchd.watch_prefix("uvx cc-steer") == launchd.WATCH_EXTRA_PREFIX
+    assert launchd.watch_prefix("uv run --project /repo cc-steer") == "uv run --project /repo cc-steer"
+
+
+def test_install_watch_default_prefix_resolves_the_extras(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
+    captured: dict[str, bytes] = {}
+    monkeypatch.setattr(launchd, "_install", lambda path, plist: captured.update(plist=plist) or path)
+    launchd.install_watch("uvx cc-steer")
+    command = plistlib.loads(captured["plist"])["ProgramArguments"][2]
+    assert "--from 'cc-steer[gate,mlx]'" in command
+    assert "cc-steer watch --gate lexical --drafter mlx" in command

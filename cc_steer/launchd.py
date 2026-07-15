@@ -28,6 +28,7 @@ WATCH_LABEL = "com.cc-steer.watch"
 LOG_DIR = Path.home() / ".cc-steer" / "logs"
 SUNDAY = 0  # launchd's StartCalendarInterval weekday numbering
 RETRAIN_EXTRA_PREFIX = "uvx --from 'cc-steer[retrain]' cc-steer"
+WATCH_EXTRA_PREFIX = "uvx --from 'cc-steer[gate,mlx]' cc-steer"
 
 
 def agent_path() -> Path:
@@ -140,9 +141,19 @@ def install_retrain(prefix: str, *, hour: int = 4) -> Path:
     return _install(retrain_agent_path(), render_retrain(retrain_prefix(prefix), hour=hour))
 
 
+def watch_prefix(prefix: str) -> str:
+    """The watch-daemon prefix: the bare default rewritten to resolve the ``gate`` and ``mlx`` extras, else untouched.
+
+    The base ``uvx cc-steer`` dist cannot import the lexical gate's scikit-learn or the mlx
+    drafter's mlx-lm deps, so the default resolves ``cc-steer[gate,mlx]``; a custom prefix is
+    the operator's responsibility (mirrors :func:`retrain_prefix`).
+    """
+    return WATCH_EXTRA_PREFIX if prefix == DEFAULT_PREFIX else prefix
+
+
 def install_watch(prefix: str) -> Path:
     """Writes and (re)loads the always-on watch daemon; returns the plist path."""
-    return _install(watch_agent_path(), render_watch(prefix))
+    return _install(watch_agent_path(), render_watch(watch_prefix(prefix)))
 
 
 def kickstart_watch() -> bool:
