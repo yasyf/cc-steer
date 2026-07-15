@@ -22,6 +22,7 @@ dependencies = [
     "cc-transcript>=13.1,<14",
     "click>=8",
     "datasets>=3.2",
+    "experiment-at-home>=0.4",
     "fastapi>=0.115",
     "huggingface-hub>=0.27",
     "numpy>=2",

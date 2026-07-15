@@ -302,6 +302,7 @@ dependencies = [
     { name = "cc-transcript", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "click", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "experiment-at-home", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "fastapi", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -351,6 +352,7 @@ requires-dist = [
     { name = "cc-transcript", specifier = ">=13.1,<14" },
     { name = "click", specifier = ">=8" },
     { name = "datasets", specifier = ">=3.2" },
+    { name = "experiment-at-home", specifier = ">=0.4" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.27" },
@@ -691,6 +693,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/cc/28/c14e053b6762b1044f34a13aab6859bbf40456d37d23aa286ac24cfd9a5d/executing-2.2.1.tar.gz", hash = "sha256:3632cc370565f6648cc328b32435bd120a1e4ebb20c77e3fdde9a13cd1e533c4", size = 1129488, upload-time = "2025-09-01T09:48:10.866Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/ea/53f2148663b321f21b5a606bd5f191517cf40b7072c0497d3c92c4a13b1e/executing-2.2.1-py2.py3-none-any.whl", hash = "sha256:760643d3452b4d777d295bb167ccc74c64a81df23fb5e08eff250c425a4b2017", size = 28317, upload-time = "2025-09-01T09:48:08.5Z" },
+]
+
+[[package]]
+name = "experiment-at-home"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiosqlite", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "anyio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "click", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pydantic-settings", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/84/a3e0c572d650ac5f5cedbfc889f0297929d091a28298d489d1d123f7436c/experiment_at_home-0.4.0.tar.gz", hash = "sha256:adf8b2ebb7f470c5dae6236536dbb5f5c908cc5e1d5ec913b58405d0f7c61732", size = 118665, upload-time = "2026-07-14T22:05:13Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/bd/b6830e57f3ce777bf21f17590c5db5e15b4bcff2ec586251c430c364abcf/experiment_at_home-0.4.0-py3-none-any.whl", hash = "sha256:7574f4cfb6828ccdb20f28712d18bc735c27bdf812fcf23bc78e92750cb6c5d7", size = 151797, upload-time = "2026-07-14T22:05:11.555Z" },
 ]
 
 [[package]]
@@ -2499,6 +2519,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1d/a2/367df868eb584dacf6bf82a389272406d7178e301c4ac82545ab98bc2dd9/pydantic_core-2.46.4-cp314-cp314t-musllinux_1_1_aarch64.whl", hash = "sha256:97e7cf2be5c77b7d1a9713a05605d49460d02c6078d38d8bef3cbe323c548424", size = 2168146, upload-time = "2026-05-06T13:38:31.93Z" },
     { url = "https://files.pythonhosted.org/packages/c1/b8/4460f77f7e201893f649a29ab355dddd3beee8a97bcb1a320db414f9a06e/pydantic_core-2.46.4-cp314-cp314t-musllinux_1_1_armv7l.whl", hash = "sha256:3bf92c5d0e00fefaab325a4d27828fe6b6e2a21848686b5b60d2d9eeb09d76c6", size = 2306309, upload-time = "2026-05-06T13:37:44.717Z" },
     { url = "https://files.pythonhosted.org/packages/64/c4/be2639293acd87dc8ddbcec41a73cee9b2ebf996fe6d892a1a74e88ad3f7/pydantic_core-2.46.4-cp314-cp314t-musllinux_1_1_x86_64.whl", hash = "sha256:3ecbc122d18468d06ca279dc26a8c2e2d5acb10943bb35e36ae92096dc3b5565", size = 2369736, upload-time = "2026-05-06T13:37:05.645Z" },
+]
+
+[[package]]
+name = "pydantic-settings"
+version = "2.14.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "python-dotenv", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "typing-inspection", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5c/b5/8f48e906c3e0205276e8bd8cb7512217a87b2685304d64be27cad5b3019f/pydantic_settings-2.14.2.tar.gz", hash = "sha256:c19dd64b19097f1de80184f0cc7b0272a13ae6e170cbf240a3e27e381ed14a5f", size = 237700, upload-time = "2026-06-19T13:44:56.324Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/c1/6e422f34e569cf8e18df68d1939c81c099d2b61e4f7d9621c8a77560799c/pydantic_settings-2.14.2-py3-none-any.whl", hash = "sha256:a20c97b37910b6550d5ea50fbcc2d4187defe58cd57070b73863d069419c9440", size = 61715, upload-time = "2026-06-19T13:44:55.02Z" },
 ]
 
 [[package]]
