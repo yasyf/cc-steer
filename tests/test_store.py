@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -7,18 +8,20 @@ from cc_transcript.corrections import Correction, CorrectionLog
 from cc_transcript.ids import EventUuid, SessionId
 from cc_transcript.mining import FEEDBACK_DDL as BASE_FEEDBACK_DDL
 from cc_transcript.mining import DedupKey
+from cc_transcript.store import FileStateStore
 
 from cc_steer.detectors import detect
 from cc_steer.refine import RefinedPair, Refinement
-from cc_steer.store import FEEDBACK_DDL, TRIAGE_DDL
+from cc_steer.rendering import has_substantive_content, messages
+from cc_steer.store import ACCRUED_EMPTY_REASON, FEEDBACK_DDL, TRIAGE_DDL, FeedbackStore
 from cc_steer.triage import JUDGE, Verdict
 from tests.builders import assistant_tool_use, denial_result, interrupt_result, parse, user_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
     from cc_steer.models import FeedbackCandidate
-    from cc_steer.store import FeedbackStore
 
 pytestmark = pytest.mark.anyio
 
@@ -79,7 +82,7 @@ SELECT
   e.origin_path
 FROM feedback_events e
 JOIN latest_judge t ON t.dedup_key = e.dedup_key
-WHERE t.is_steering = 1;
+WHERE t.is_steering = 1 AND e.quarantined_reason IS NULL;
 """
 
 
@@ -89,9 +92,28 @@ def test_composed_triage_ddl_matches_original_literal() -> None:
 
 
 @pytest.mark.unit
-def test_feedback_ddl_extends_the_platform_table_with_origin_path() -> None:
+def test_feedback_ddl_extends_the_platform_table_with_steer_columns() -> None:
     assert "origin_path TEXT" not in BASE_FEEDBACK_DDL
+    assert "quarantined_reason TEXT" not in BASE_FEEDBACK_DDL
     assert "origin_path TEXT" in FEEDBACK_DDL  # the .replace() anchor matched
+    assert "quarantined_reason TEXT" in FEEDBACK_DDL
+
+
+async def test_open_extends_an_existing_database_and_sets_busy_timeout(tmp_path: Path) -> None:
+    database = tmp_path / "legacy.db"
+    legacy_ddl = BASE_FEEDBACK_DDL.replace(
+        "  ingested_at TEXT NOT NULL\n",
+        "  ingested_at TEXT NOT NULL,\n  origin_path TEXT\n",
+    )
+    async with await FileStateStore.open(database, extra_schema=legacy_ddl):
+        pass
+    async with await FeedbackStore.open(database) as upgraded:
+        columns = {
+            str(row["name"]) async for row in await upgraded.store.conn.execute("PRAGMA table_info(feedback_events)")
+        }
+        timeout = await (await upgraded.store.conn.execute("PRAGMA busy_timeout")).fetchone()
+    assert "quarantined_reason" in columns
+    assert timeout is not None and timeout[0] == 2_000
 
 
 async def seeded_keys(store: FeedbackStore) -> list[DedupKey]:
@@ -137,6 +159,81 @@ async def test_record_file_scan_is_idempotent(store: FeedbackStore) -> None:
     assert first == len(candidates)
     assert second == 0
     assert (await store.stats()).total == len(candidates)
+
+
+@pytest.mark.integration
+async def test_record_file_scan_quarantines_empty_context_at_accrual(store: FeedbackStore) -> None:
+    candidates = sample_candidates()
+    substantive = next(c for c in candidates if has_substantive_content(messages(c.window.before)))
+    other = next(c for c in candidates if c.dedup_key != substantive.dedup_key)
+    empty = replace(other, window=replace(other.window, before=()))
+    await store.record_file_scan(FILE, 1.0, [substantive, empty])
+
+    reasons = {
+        str(row["dedup_key"]): row["quarantined_reason"]
+        async for row in await store.store.conn.execute("SELECT dedup_key, quarantined_reason FROM feedback_events")
+    }
+    assert reasons[str(empty.dedup_key)] == ACCRUED_EMPTY_REASON
+    assert reasons[str(substantive.dedup_key)] is None
+    assert await store.quarantined_keys() == {str(empty.dedup_key)}
+
+    active = {str(row["dedup_key"]) for row in await store.unjudged(role=JUDGE, prompt_version=1)}
+    assert str(empty.dedup_key) not in active
+    assert str(substantive.dedup_key) in active
+
+
+@pytest.mark.integration
+async def test_record_file_scan_does_not_quarantine_an_existing_healthy_duplicate(store: FeedbackStore) -> None:
+    substantive = next(
+        candidate
+        for candidate in sample_candidates()
+        if has_substantive_content(messages(candidate.window.before))
+    )
+    await store.record_file_scan(FILE, 1.0, [substantive])
+    existing = await (
+        await store.store.conn.execute(
+            "SELECT context_json FROM feedback_events WHERE dedup_key = ?", (substantive.dedup_key,)
+        )
+    ).fetchone()
+    empty = replace(substantive, window=replace(substantive.window, before=()))
+
+    assert await store.record_file_scan(FILE, 2.0, [empty]) == 0
+    row = await (
+        await store.store.conn.execute(
+            "SELECT context_json, quarantined_reason FROM feedback_events WHERE dedup_key = ?",
+            (substantive.dedup_key,),
+        )
+    ).fetchone()
+    assert existing is not None and row is not None
+    assert row["context_json"] == existing["context_json"]
+    assert row["quarantined_reason"] is None
+
+
+@pytest.mark.integration
+async def test_record_file_scan_does_not_heal_an_existing_empty_duplicate(store: FeedbackStore) -> None:
+    substantive = next(
+        candidate
+        for candidate in sample_candidates()
+        if has_substantive_content(messages(candidate.window.before))
+    )
+    empty = replace(substantive, window=replace(substantive.window, before=()))
+    await store.record_file_scan(FILE, 1.0, [empty])
+    existing = await (
+        await store.store.conn.execute(
+            "SELECT context_json FROM feedback_events WHERE dedup_key = ?", (substantive.dedup_key,)
+        )
+    ).fetchone()
+
+    assert await store.record_file_scan(FILE, 2.0, [substantive]) == 0
+    row = await (
+        await store.store.conn.execute(
+            "SELECT context_json, quarantined_reason FROM feedback_events WHERE dedup_key = ?",
+            (substantive.dedup_key,),
+        )
+    ).fetchone()
+    assert existing is not None and row is not None
+    assert row["context_json"] == existing["context_json"]
+    assert row["quarantined_reason"] == ACCRUED_EMPTY_REASON
 
 
 @pytest.mark.integration
@@ -229,6 +326,33 @@ async def test_unjudged_honors_version_and_limit(store: FeedbackStore) -> None:
     assert len(remaining) == len(keys) - 1
     assert len(await store.unjudged(role=JUDGE, prompt_version=2)) == len(keys)
     assert len(await store.unjudged(role=JUDGE, prompt_version=1, limit=1)) == 1
+
+
+@pytest.mark.integration
+async def test_unjudged_applies_quarantine_and_limit_in_sql(store: FeedbackStore) -> None:
+    await store.record_file_scan(FILE, 1.0, sample_candidates())
+    first = await (
+        await store.store.conn.execute("SELECT dedup_key FROM feedback_events ORDER BY id LIMIT 1")
+    ).fetchone()
+    assert first is not None
+    await store.store.conn.execute(
+        "UPDATE feedback_events SET quarantined_reason = ? WHERE dedup_key = ?",
+        (ACCRUED_EMPTY_REASON, first["dedup_key"]),
+    )
+    statements: list[str] = []
+    await store.store.conn.set_trace_callback(statements.append)
+    rows = await store.unjudged(role=JUDGE, prompt_version=1, limit=1)
+    await store.store.conn.set_trace_callback(None)
+
+    assert len(rows) == 1
+    assert rows[0]["dedup_key"] != first["dedup_key"]
+    [query] = [
+        " ".join(statement.split())
+        for statement in statements
+        if "LEFT JOIN triage" in statement and "FROM feedback_events e" in statement
+    ]
+    assert "e.quarantined_reason IS NULL" in query
+    assert query.endswith("LIMIT 1")
 
 
 @pytest.mark.integration

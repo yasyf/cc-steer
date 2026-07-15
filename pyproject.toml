@@ -49,6 +49,7 @@ retrain = [
     "pyarrow>=18",
 ]
 dev = [
+    "cc-steer[gate]",
     "pytest>=8.0",
     "ty>=0.0.44",
     "ruff>=0.8",

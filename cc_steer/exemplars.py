@@ -47,7 +47,7 @@ EXEMPLAR_EVENTS_QUERY = """
 SELECT e.dedup_key, e.session_id, e.event_uuid, e.text, e.context_json, t.category
 FROM feedback_events e
 JOIN latest_judge t ON t.dedup_key = e.dedup_key
-WHERE t.is_steering = 1
+WHERE t.is_steering = 1 AND e.quarantined_reason IS NULL
 ORDER BY e.id
 """
 

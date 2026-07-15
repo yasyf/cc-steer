@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from cc_steer.rendering import has_substantive_content
 from cc_steer.retrain.data import DIRECTION, WatcherRow, dataset_digest
 
 if TYPE_CHECKING:
@@ -45,6 +47,7 @@ EVAL_NAMES: dict[str, str] = {"gate": GATE_EVAL_NAME, "watcher": WATCHER_EVAL_NA
 PROBS_DIRNAME = "probs"
 QA_SOURCE_KIND = "question_answer"
 RENDER_VERSION = 2
+GATE_ROLE_BLOCK = re.compile(r"(?:\A|\n\n)<\w+>\n")
 
 VIEW_COLUMNS: dict[str, tuple[str, ...]] = {
     "gate": ("id", "text", "label", "kind", "offset_turns", "source_kind", "category", "session_id", "split"),
@@ -62,6 +65,15 @@ class SchemaError(ValueError):
 
 class ProbsStoreError(RuntimeError):
     """A stored incumbent probability file is missing, stale, or does not cover the frame."""
+
+
+class EmptyEvalContext(ValueError):
+    """Eval rows whose rendered context has no substantive content — invalid to freeze."""
+
+    def __init__(self, view: str, ids: Sequence[str]) -> None:
+        self.view = view
+        self.ids = tuple(ids)
+        super().__init__(f"{view} eval has {len(self.ids)} rows with empty rendered context: {list(self.ids)}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +132,9 @@ def freeze_eval(view: str = "watcher", *, dataset_dir: Path | None = None, root:
     Freezes either the ``gate`` or the ``watcher`` eval into ``<view>_eval.parquet``,
     keeping the sibling view's manifest entry intact. Idempotent for identical bytes;
     raises :class:`FrozenViolationError` before writing anything when the frozen file
-    exists with different content. Returns the frozen file's sha256.
+    exists with different content, and :class:`EmptyEvalContext` — naming the offending
+    row ids — when any row's rendered context has no substantive content, so an invalid
+    eval can never be frozen. Returns the frozen file's sha256.
     """
     import pyarrow.parquet as pq
 
@@ -130,6 +144,8 @@ def freeze_eval(view: str = "watcher", *, dataset_dir: Path | None = None, root:
     if not source.exists():
         raise FileNotFoundError(f"no {view} test parquet at {source}")
     _validate_columns(view, pq.read_schema(source).names)
+    if empty := _empty_context_ids(view, pq.read_table(source)):
+        raise EmptyEvalContext(view, empty)
     payload = source.read_bytes()
     sha = _sha256(payload)
     frozen = eval_root(root)
@@ -222,6 +238,23 @@ def load_probs(frame: EvalFrame, version: str, *, expected_render: int, root: Pa
     if missing := [row_id for row_id in frame.ids if row_id not in probs]:
         raise ProbsStoreError(f"{path} misses {len(missing)} frame rows; it does not cover the eval")
     return np.array([float(probs[row_id]) for row_id in frame.ids], dtype=np.float64)
+
+
+def _empty_context_ids(view: str, table: pa.Table) -> list[str]:
+    match view:
+        case "watcher":
+            return sorted(
+                row.id
+                for record in table.to_pylist()
+                if not has_substantive_content((row := WatcherRow.from_record(record)).prompt)
+            )
+        case "gate":
+            return sorted(
+                str(record["id"])
+                for record in table.to_pylist()
+                if not GATE_ROLE_BLOCK.sub("", str(record["text"])).strip()
+            )
+    return []
 
 
 def _validate_columns(view: str, columns: Sequence[str]) -> None:

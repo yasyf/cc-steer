@@ -8,12 +8,16 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from cc_transcript.context import ContextWindow, TurnRef
+from cc_transcript.ids import EventRef, EventUuid, SessionId
 
+from cc_steer.rendering import gate_text
 from cc_steer.retrain.evalset import (
     GATE_EVAL_NAME,
     MANIFEST_NAME,
     RENDER_VERSION,
     WATCHER_EVAL_NAME,
+    EmptyEvalContext,
     EvalFrame,
     FrozenViolationError,
     ProbsStoreError,
@@ -113,6 +117,68 @@ class TestFreezeEval:
         bad = write_dataset(tmp_path / "dataset", pa.table({"id": ["r0"], "label": [True]}))
         with pytest.raises(SchemaError, match="missing columns"):
             freeze_eval(dataset_dir=bad, root=eval_dir)
+
+    def test_rejects_watcher_rows_with_empty_rendered_context(self, tmp_path: Path, eval_dir: Path) -> None:
+        message = pa.struct([("role", pa.string()), ("content", pa.string())])
+        table = pa.table(
+            {
+                "prompt": pa.array(
+                    [
+                        [{"role": "user", "content": "real context"}],
+                        [{"role": "assistant", "content": "   "}],  # whitespace only
+                        [],  # no messages at all
+                    ],
+                    type=pa.list_(message),
+                ),
+                "completion": pa.array([[{"role": "assistant", "content": "steer"}]] * 3, type=pa.list_(message)),
+                "verbatim": ["v"] * 3,
+                "label": [True, True, True],
+                "id": ["good", "blank", "empty"],
+                "category": ["wrong_approach"] * 3,
+                "source_kind": [""] * 3,
+                "session_id": ["s0", "s1", "s2"],
+                "split": ["test"] * 3,
+            }
+        )
+        dataset = write_dataset(tmp_path / "dataset", table)
+        with pytest.raises(EmptyEvalContext) as excinfo:
+            freeze_eval(dataset_dir=dataset, root=eval_dir)
+        assert excinfo.value.ids == ("blank", "empty")
+        assert "blank" in str(excinfo.value) and "empty" in str(excinfo.value)
+        assert not (eval_dir / WATCHER_EVAL_NAME).exists()  # nothing frozen over invalid rows
+
+    def test_rejects_gate_rows_with_empty_text(self, tmp_path: Path, eval_dir: Path) -> None:
+        dataset = tmp_path / "dataset"
+        (dataset / "gate").mkdir(parents=True)
+        empty_text = gate_text(
+            ContextWindow(
+                anchor=EventRef(SessionId("s1"), EventUuid("u1")),
+                before=(TurnRef(role="assistant", refs=(), preview="   ", tool_digests=()),),
+                trigger=None,
+                after=(),
+                fidelity="full",
+                preview_chars=200,
+            )
+        )
+        assert empty_text == "<assistant>\n   "
+        gate = pa.table(
+            {
+                "id": ["g0", "g1"],
+                "text": ["real context", empty_text],
+                "label": [True, False],
+                "kind": ["positive", "hard_negative"],
+                "offset_turns": [0, 0],
+                "source_kind": ["transcript_message", "question_answer"],
+                "category": ["wrong_approach", ""],
+                "session_id": ["s0", "s1"],
+                "split": ["test", "test"],
+            }
+        )
+        pq.write_table(gate, dataset / "gate" / "test.parquet")
+        with pytest.raises(EmptyEvalContext) as excinfo:
+            freeze_eval("gate", dataset_dir=dataset, root=eval_dir)
+        assert excinfo.value.ids == ("g1",)
+        assert not (eval_dir / GATE_EVAL_NAME).exists()
 
     def test_freezes_both_views_and_merges_the_manifest(self, tmp_path: Path, eval_dir: Path) -> None:
         dataset = write_dataset(tmp_path / "dataset", watcher_test_table())

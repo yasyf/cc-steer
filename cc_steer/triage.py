@@ -317,12 +317,19 @@ async def render_context(window: ContextWindow) -> tuple[str, Fidelity]:
         return replace(window, fidelity="summary").render_preview(budget=CONTEXT_BUDGET), "summary"
     split = len(window.before)
     end = split + (window.trigger is not None)
+    turns = hydrated.turns
+    if window.trigger is not None and split and turns[split - 1] is turns[split]:
+        # A tool-result anchor splits one real turn across before's tail and the
+        # trigger; both hydrate to it, so drop the duplicate and render it once.
+        turns = turns[: split - 1] + turns[split:]
+        split -= 1
+        end -= 1
     return (
         "\n".join(
             (
-                section(window, "conversation before", hydrated.turns[:split], CONTEXT_BUDGET),
-                section(window, "the turn the message arrived in", hydrated.turns[split:end], TRIGGER_BUDGET),
-                section(window, "conversation after", hydrated.turns[end:], CONTEXT_BUDGET),
+                section(window, "conversation before", turns[:split], CONTEXT_BUDGET),
+                section(window, "the turn the message arrived in", turns[split:end], TRIGGER_BUDGET),
+                section(window, "conversation after", turns[end:], CONTEXT_BUDGET),
             )
         ),
         "full",

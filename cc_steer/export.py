@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
@@ -34,6 +34,7 @@ from cc_steer.rendering import (
     ask_block,
     assistant_message,
     gate_text,
+    has_substantive_content,
     messages,
     render_edit,
     split_of,
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
 
     from cc_steer.store import FeedbackStore
 
-__all__ = ["ExportReport", "export"]
+__all__ = ["EmptyWatcherPrompt", "ExportReport", "export"]
 
 SPLITS = ("train", "test")
 REVIEW_META_KEYS = ("file", "line_start", "line_end", "format")
@@ -84,6 +85,7 @@ SELECT e.dedup_key, e.source_kind, e.session_id, e.event_uuid, e.occurred_at, e.
 FROM feedback_events e
 JOIN judge j ON j.dedup_key = e.dedup_key AND j.rn = 1
 LEFT JOIN auditor a ON a.dedup_key = e.dedup_key AND a.rn = 1
+WHERE e.quarantined_reason IS NULL
 ORDER BY e.id
 """
 
@@ -99,6 +101,7 @@ SELECT g.sample_key, g.kind, g.offset_turns, g.session_id, g.window_json,
 FROM gate_sample g
 LEFT JOIN feedback_events e ON e.dedup_key = g.dedup_key
 LEFT JOIN latest_judge j ON j.dedup_key = g.dedup_key
+WHERE g.dedup_key IS NULL OR e.quarantined_reason IS NULL
 ORDER BY g.id
 """
 
@@ -205,6 +208,7 @@ CONFIG_USES = {
 
 MINED_CONFIDENCE = 1.0
 LIVE_SOURCE = "live_reaction"
+LIVE_EMPTY_WINDOW_REASON = "live_window_render_empty"
 
 # reaction kind -> (label bucket, fire label, confidence); expired carries no label.
 LIVE_LABEL: dict[str, tuple[str, bool, float]] = {
@@ -290,6 +294,19 @@ class WatcherRow(TypedDict):
     label_confidence: float
 
 
+class EmptyWatcherPrompt(ValueError):
+    """An exported row whose final prompt has no substantive content."""
+
+    def __init__(self, *, dedup_key: str, session_id: str, source_kind: str, view: str = "watcher") -> None:
+        self.dedup_key = dedup_key
+        self.session_id = session_id
+        self.source_kind = source_kind
+        self.view = view
+        super().__init__(
+            f"empty {view} prompt: dedup_key={dedup_key} session_id={session_id} source_kind={source_kind}"
+        )
+
+
 class SftRow(TypedDict):
     prompt: list[Message]
     completion: list[Message]
@@ -321,11 +338,13 @@ class ExportReport:
         counts: Row counts keyed by config name, then split name.
         out: The directory the per-config parquet files and dataset card landed in.
         pushed: Whether the configs were pushed to the HuggingFace repo.
+        quarantined: Excluded live-reaction counts keyed by quarantine reason.
     """
 
     counts: Mapping[str, Mapping[str, int]]
     out: Path
     pushed: bool
+    quarantined: Mapping[str, int] = field(default_factory=dict)
 
 
 def evidence_entry(correction: Correction) -> Evidence:
@@ -392,9 +411,29 @@ def trace_row(row: Row, pairs: list[Pair], log: CorrectionLog) -> Trace:
     }
 
 
+def validated_prompt(
+    prompt: list[Message], *, view: str, dedup_key: str, session_id: str, source_kind: str
+) -> list[Message]:
+    if not has_substantive_content(prompt):
+        raise EmptyWatcherPrompt(
+            dedup_key=dedup_key,
+            session_id=session_id,
+            source_kind=source_kind,
+            view=view,
+        )
+    return prompt
+
+
 def sft_row(trace: Trace) -> SftRow:
+    prompt = [*trace["context"], *assistant_message(trace["agent_action"] or trace["what_claude_did"])]
     return {
-        "prompt": [*trace["context"], *assistant_message(trace["agent_action"] or trace["what_claude_did"])],
+        "prompt": validated_prompt(
+            prompt,
+            view="sft",
+            dedup_key=trace["id"],
+            session_id=trace["session_id"],
+            source_kind=trace["source_kind"],
+        ),
         "completion": assistant_message(trace["user_message"]),
         "id": trace["id"],
         "category": trace["category"],
@@ -403,7 +442,13 @@ def sft_row(trace: Trace) -> SftRow:
 
 def kto_row(trace: Trace) -> KtoRow:
     return {
-        "prompt": trace["context"],
+        "prompt": validated_prompt(
+            trace["context"],
+            view="kto",
+            dedup_key=trace["id"],
+            session_id=trace["session_id"],
+            source_kind=trace["source_kind"],
+        ),
         "completion": assistant_message(trace["agent_action"] or trace["what_claude_did"]),
         "label": not trace["is_steering"],
         "id": trace["id"],
@@ -413,7 +458,13 @@ def kto_row(trace: Trace) -> KtoRow:
 
 def dpo_row(trace: Trace, entry: Evidence) -> DpoRow:
     return {
-        "prompt": trace["context"],
+        "prompt": validated_prompt(
+            trace["context"],
+            view="dpo",
+            dedup_key=trace["id"],
+            session_id=trace["session_id"],
+            source_kind=trace["source_kind"],
+        ),
         "chosen": assistant_message(
             render_edit(str(entry["correction_file"]), str(entry["correcting_old"]), str(entry["correcting_new"]))
         ),
@@ -483,7 +534,13 @@ def watcher_positive(trace: Trace) -> WatcherRow:
     if ask is not None and not any("[assistant asked" in message["content"] for message in prompt):
         prompt = [*prompt, ask]
     return {
-        "prompt": prompt,
+        "prompt": validated_prompt(
+            prompt,
+            view="watcher",
+            dedup_key=trace["id"],
+            session_id=trace["session_id"],
+            source_kind=trace["source_kind"],
+        ),
         "completion": assistant_message(direction),
         "verbatim": trace["user_message"],
         "label": True,
@@ -545,8 +602,12 @@ def messages_from_render(render: str) -> list[Message]:
     ]
 
 
+def live_render_has_substantive_content(reaction: Mapping[str, object]) -> bool:
+    return has_substantive_content(messages_from_render(str(reaction["window_render"] or "")))
+
+
 def live_completion(kind: str, steer: str, reply: str | None) -> str:
-    """The training target for a live reaction: the steer if accepted, the user's reply if corrected, else the sentinel."""
+    """The training target: the steer if accepted, the user's reply if corrected, else the sentinel."""
     match kind:
         case "accepted":
             return steer
@@ -564,8 +625,15 @@ def live_watcher_row(reaction: Mapping[str, object], reply_texts: Mapping[str, s
     session_id = str(reaction["session_id"])
     reply = reply_texts.get(str(reaction["feedback_dedup_key"] or ""))
     steer = str(reaction["steer"] or "")
+    prompt = messages_from_render(str(reaction["window_render"] or ""))
     return {
-        "prompt": messages_from_render(str(reaction["window_render"] or "")),
+        "prompt": validated_prompt(
+            prompt,
+            view="watcher",
+            dedup_key=f"live:{reaction['proposal_id']}",
+            session_id=session_id,
+            source_kind=LIVE_SOURCE,
+        ),
         "completion": assistant_message(live_completion(str(reaction["kind"]), steer, reply)),
         "verbatim": reply or steer,
         "label": label,
@@ -584,9 +652,17 @@ def live_gate_row(reaction: Mapping[str, object]) -> GateRow | None:
         return None
     _, label, confidence = entry
     session_id = str(reaction["session_id"])
+    render = str(reaction["window_render"] or "")
+    validated_prompt(
+        messages_from_render(render),
+        view="gate",
+        dedup_key=f"live:{reaction['proposal_id']}",
+        session_id=session_id,
+        source_kind=LIVE_SOURCE,
+    )
     return {
         "id": f"live:{reaction['proposal_id']}",
-        "text": str(reaction["window_render"] or ""),
+        "text": render,
         "label": label,
         "kind": LIVE_SOURCE,
         "offset_turns": 0,
@@ -774,8 +850,9 @@ async def export(
     event at the current judge prompt version — the canonical ``traces`` config —
     then projects the TRL-ready ``sft``, ``dpo``, and ``kto`` configs from the same
     rows. Delivered-steer reactions add ``live_reaction`` rows to ``watcher`` and
-    ``gate``, each carrying a ``label_confidence`` (mined rows carry ``1.0``). Every
-    config is written as per-split parquet
+    ``gate``, each carrying a ``label_confidence`` (mined rows carry ``1.0``). Labelled
+    reactions without substantive ``window_render`` content are excluded and counted
+    by quarantine reason in the report. Every config is written as per-split parquet
     under ``out/<config>/<split>.parquet`` next to a generated dataset card at
     ``out/README.md``; with ``push_to``, every config is also pushed to that private
     HuggingFace repo and the card uploaded. Splits are a deterministic group split
@@ -790,18 +867,24 @@ async def export(
         shadow_db: The shadow ledger to read reactions from; None uses the default.
 
     Returns:
-        The export's per-config, per-split row counts.
+        The export report with per-config row counts and live-reaction quarantines.
     """
     traces = await load_traces(store)
     gate_cur = await store.store.conn.execute(GATE_SAMPLES_QUERY)
     gate_samples = [row async for row in gate_cur]
     reactions, reply_texts = await load_live_reactions(store, shadow_db)
+    labelled_reactions = [reaction for reaction in reactions if str(reaction["kind"]) in LIVE_LABEL]
+    live_reactions = [reaction for reaction in labelled_reactions if live_render_has_substantive_content(reaction)]
     features = config_features()
     by_config = config_rows(
         traces,
         gate_samples,
-        live_watcher=[row for r in reactions if (row := live_watcher_row(r, reply_texts)) is not None],
-        live_gate=[row for r in reactions if (row := live_gate_row(r)) is not None],
+        live_watcher=[
+            row
+            for reaction in live_reactions
+            if (row := live_watcher_row(reaction, reply_texts)) is not None
+        ],
+        live_gate=[row for reaction in live_reactions if (row := live_gate_row(reaction)) is not None],
     )
     built = {
         config: DatasetDict(
@@ -831,4 +914,9 @@ async def export(
         for config, splits in built.items():
             splits.push_to_hub(push_to, config_name=config, private=True)
         HfApi().upload_file(path_or_fileobj=card, path_in_repo="README.md", repo_id=push_to, repo_type="dataset")
-    return ExportReport(counts=counts, out=out, pushed=push_to is not None)
+    return ExportReport(
+        counts=counts,
+        out=out,
+        pushed=push_to is not None,
+        quarantined={LIVE_EMPTY_WINDOW_REASON: len(labelled_reactions) - len(live_reactions)},
+    )

@@ -45,6 +45,7 @@ EVENT_WINDOWS_QUERY = """
 SELECT e.dedup_key, e.session_id, e.event_uuid, e.occurred_at, e.context_json, j.is_steering
 FROM feedback_events e
 JOIN latest_judge j ON j.dedup_key = e.dedup_key
+WHERE e.quarantined_reason IS NULL
 ORDER BY e.id
 """
 
@@ -147,9 +148,7 @@ def random_samples(
     seed: int,
 ) -> list[GateSample]:
     """Samples assistant-anchored windows from one session's quiet stretches."""
-    windows = sample_windows(
-        activity, n=per_session, exclude=exclude, exclusion_radius=EXCLUSION_RADIUS, seed=seed
-    )
+    windows = sample_windows(activity, n=per_session, exclude=exclude, exclusion_radius=EXCLUSION_RADIUS, seed=seed)
     return [
         GateSample(
             sample_key=f"rand:{window.anchor.session_id}:{window.anchor.event_uuid}",

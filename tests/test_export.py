@@ -11,7 +11,21 @@ from cc_transcript.corrections import Correction, CorrectionLog
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import DedupKey
 
-from cc_steer.export import ask_message_of, export, split_of, watcher_negative, watcher_positive
+from cc_steer.export import (
+    LIVE_EMPTY_WINDOW_REASON,
+    EmptyWatcherPrompt,
+    ask_message_of,
+    dpo_row,
+    evidence_entry,
+    export,
+    kto_row,
+    live_gate_row,
+    live_watcher_row,
+    sft_row,
+    split_of,
+    watcher_negative,
+    watcher_positive,
+)
 from cc_steer.refine import RefinedPair, Refinement
 from cc_steer.triage import AUDIT_VERSION, JUDGE, PROMPT_VERSION, Verdict
 from cc_steer.watcher.delivery import ShadowDelivery
@@ -123,7 +137,7 @@ async def seed(store: FeedbackStore) -> None:
             "u1",
             "no dont vendor it",
             json.dumps({"signal": SIGNAL}),
-            window(TRAIN_SESSION, "u1"),
+            window(TRAIN_SESSION, "u1", before=(turn("assistant", "proposed the plan again"),)),
         ),
     ]
     for i, (key, kind, session, uuid, text, payload, ctx) in enumerate(events):
@@ -480,6 +494,39 @@ async def test_export_adds_live_reaction_rows_to_watcher_and_gate(store: Feedbac
     assert gate["text"] == "<user>\nplease do step\n\n<assistant>\ndid step"
 
 
+async def test_export_quarantines_legacy_live_reaction_without_window_render(
+    store: FeedbackStore, tmp_path: Path
+) -> None:
+    shadow_db = tmp_path / "shadow.db"
+    async with await ShadowDelivery.open(shadow_db) as delivery:
+        await delivery.deliver(make_proposal(session_id=TRAIN_SESSION, anchor_uuid="a1", steer="run the linter"))
+        await delivery.conn.execute("UPDATE proposals SET window_render = NULL")
+    async with await MailboxDelivery.open(shadow_db, config=LiveConfig.shadow()) as mailbox:
+        await mailbox.record_reaction(proposal_id=1, delivery_id=None, kind="accepted", source="cli_verb")
+    report = await export(store, out=tmp_path / "dataset", shadow_db=shadow_db)
+    assert report.quarantined == {LIVE_EMPTY_WINDOW_REASON: 1}
+    assert rows(report.out, "watcher", "train") == []
+    assert rows(report.out, "gate", "train") == []
+
+
+@pytest.mark.parametrize("render", [None, "", "<assistant>\n   "], ids=["null", "empty", "role-markup-only"])
+def test_live_rows_reject_empty_rendered_prompts(render: object) -> None:
+    reaction = {
+        "kind": "accepted",
+        "session_id": TRAIN_SESSION,
+        "feedback_dedup_key": None,
+        "steer": "run the linter",
+        "proposal_id": 7,
+        "window_render": render,
+    }
+    with pytest.raises(EmptyWatcherPrompt) as watcher:
+        live_watcher_row(reaction, {})
+    assert (watcher.value.view, watcher.value.dedup_key) == ("watcher", "live:7")
+    with pytest.raises(EmptyWatcherPrompt) as gate:
+        live_gate_row(reaction)
+    assert (gate.value.view, gate.value.dedup_key) == ("gate", "live:7")
+
+
 def trace_for(
     *,
     source_kind: str = "question_answer",
@@ -521,7 +568,32 @@ def trace_for(
                 }
             )
         ),
-    }
+      }
+
+
+def empty_prompt_trace() -> dict[str, object]:
+    return trace_for(meta={}, context=[]) | {"what_claude_did": ""}
+
+
+class TestViewPrompts:
+    def test_kto_rejects_an_empty_emitted_prompt_with_row_identity(self) -> None:
+        with pytest.raises(EmptyWatcherPrompt) as raised:
+            kto_row(empty_prompt_trace())
+        assert (raised.value.view, raised.value.dedup_key) == ("kto", "k-qa")
+
+    def test_sft_rejects_an_empty_final_assembled_prompt_with_row_identity(self) -> None:
+        with pytest.raises(EmptyWatcherPrompt) as raised:
+            sft_row(empty_prompt_trace())
+        assert (raised.value.view, raised.value.dedup_key) == ("sft", "k-qa")
+
+    def test_sft_accepts_a_substantive_action_in_the_final_assembled_prompt(self) -> None:
+        row = sft_row(trace_for(meta={}, context=[]))
+        assert row["prompt"] == [{"role": "assistant", "content": "asked a question"}]
+
+    def test_dpo_rejects_an_empty_emitted_prompt_with_row_identity(self) -> None:
+        with pytest.raises(EmptyWatcherPrompt) as raised:
+            dpo_row(empty_prompt_trace(), evidence_entry(correction("u9", ts_ms=9)))
+        assert (raised.value.view, raised.value.dedup_key) == ("dpo", "k-qa")
 
 
 class TestWatcherV2:
@@ -548,10 +620,13 @@ class TestWatcherV2:
         # the context already carries the ask, so nothing is appended
         assert len(row["prompt"]) == 1
 
-    def test_qa_without_payload_question_appends_nothing(self) -> None:
-        row = watcher_positive(trace_for(meta={}))
-        assert row["prompt"] == [{"role": "assistant", "content": ""}]
+    def test_qa_without_payload_question_fails_with_row_identity(self) -> None:
         assert ask_message_of(trace_for(meta={})) is None
+        with pytest.raises(EmptyWatcherPrompt) as raised:
+            watcher_positive(trace_for(meta={}))
+        assert raised.value.dedup_key == "k-qa"
+        assert raised.value.session_id == TRAIN_SESSION
+        assert raised.value.source_kind == "question_answer"
 
     def test_negative_carries_source_kind_and_session_id(self) -> None:
         sample = {

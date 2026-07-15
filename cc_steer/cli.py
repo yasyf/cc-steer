@@ -16,6 +16,7 @@ from cc_transcript import CLAUDE_PROJECTS_DIR
 from cc_steer import hooks as hook_wiring
 from cc_steer import launchd, registry
 from cc_steer.claude import claude_available
+from cc_steer.context_rebuild import rebuild_contexts
 from cc_steer.dashboard import build_app
 from cc_steer.evaluate import evaluate, flip_report
 from cc_steer.journal import Journal
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 SOURCE_KINDS = [*STEERING_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
 DATASET_DIR = Path.home() / ".cc-steer" / "dataset"
+MIRRORS_DIR = Path.home() / ".cc-steer" / "mirrors"
 sync_option = click.option(
     "--sync/--no-sync",
     default=True,
@@ -132,6 +134,26 @@ async def scan(
             click.echo(reactions.summary_line())
         if sync and report.inserted:
             await sync_dataset(store)
+
+
+@main.command()
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def rebuild_context(db: Path | None) -> None:
+    """Rebuild stored contexts from their source session transcripts."""
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        report = await rebuild_contexts(store, (MIRRORS_DIR, CLAUDE_PROJECTS_DIR))
+    click.echo(
+        f"considered {report.found} rows; rebuilt {report.rebuilt}, quarantined {report.quarantined}, "
+        f"gate samples repaired {report.gate_repaired}"
+    )
+    for failure in report.parse_failures:
+        click.echo(f"skipped unparseable copy {failure.path}: {failure.error}", err=True)
 
 
 @main.command()
@@ -548,9 +570,7 @@ async def sample_negatives_(
 
 
 @main.command(name="index")
-@click.option(
-    "--model", default="voyage-4-large", show_default=True, help="Embedding model for the exemplar index."
-)
+@click.option("--model", default="voyage-4-large", show_default=True, help="Embedding model for the exemplar index.")
 @click.option("--batch", type=int, default=32, show_default=True, help="Encode batch size.")
 @click.option(
     "--db",
@@ -727,9 +747,7 @@ async def record_cli_reaction(proposal_id: int, kind: ReactionKind) -> int | Non
         if not await mailbox.proposal_exists(proposal_id):
             raise click.ClickException(f"no proposal {proposal_id} in the shadow ledger")
         delivery_id = await mailbox.delivery_id_for(proposal_id)
-        await mailbox.record_reaction(
-            proposal_id=proposal_id, delivery_id=delivery_id, kind=kind, source="cli_verb"
-        )
+        await mailbox.record_reaction(proposal_id=proposal_id, delivery_id=delivery_id, kind=kind, source="cli_verb")
     return delivery_id
 
 

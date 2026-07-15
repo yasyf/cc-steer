@@ -60,6 +60,10 @@ def messages(turns: Sequence[TurnRef]) -> list[Message]:
     return [{"role": turn.role, "content": turn.preview} for turn in turns]
 
 
+def has_substantive_content(rendered: Sequence[Message]) -> bool:
+    return any(message["content"].strip() for message in rendered)
+
+
 def assistant_message(content: str) -> list[Message]:
     return [{"role": "assistant", "content": content}]
 

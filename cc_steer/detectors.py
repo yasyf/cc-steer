@@ -16,11 +16,11 @@ from typing import TYPE_CHECKING
 
 from cc_transcript import keep
 from cc_transcript.activity import SessionActivity
-from cc_transcript.context import capture_window
 from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef
 from cc_transcript.mining import FeedbackCandidate, MiningSpec, dedup_key, mine
 
+from cc_steer.capture import capture_anchored_window
 from cc_steer.formats import review_spec
 from cc_steer.spec import STEERING_SPEC
 
@@ -117,7 +117,7 @@ def to_candidate(activity: SessionActivity, events: Sequence[TranscriptEvent], s
         source_kind=sig.kind,
         occurred_at=sig.occurred_at,
         text=sig.text,
-        window=capture_window(activity, anchor, before=clamped_before(activity, events, sig)),
+        window=capture_anchored_window(activity, anchor, before=clamped_before(activity, events, sig)),
         ref=anchor,
         session_id=sig.session_id,
         cc_version=sig.cc_version,

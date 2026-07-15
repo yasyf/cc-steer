@@ -143,7 +143,7 @@ def test_candidate_window_anchors_the_signal_event() -> None:
     assert window.anchor == candidate.ref
     assert window.fidelity == "full"
     assert window.trigger is not None
-    assert "ls" in window.trigger.preview
+    assert "ls" in "".join(ref.preview for ref in window.before)
     assert any("no, run the tests instead please" in ref.preview for ref in window.after)
 
 

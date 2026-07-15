@@ -19,11 +19,12 @@ from typing import TYPE_CHECKING
 
 from cc_transcript import TranscriptDiscovery
 from cc_transcript.activity import SessionActivity
-from cc_transcript.context import capture_window
 from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef, SessionId
 from cc_transcript.mining import REVIEW_COMMENT, FeedbackCandidate, dedup_key, firm
 from cc_transcript.parser import parse_events_async
+
+from cc_steer.capture import capture_anchored_window
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -177,7 +178,7 @@ def to_candidate(sidecar: Path, finding: Finding, anchor: Anchor) -> FeedbackCan
         source_kind=REVIEW_COMMENT,
         occurred_at=anchor.occurred_at,
         text=candidate_text(finding),
-        window=capture_window(anchor.activity, anchor.ref),
+        window=capture_anchored_window(anchor.activity, anchor.ref),
         ref=anchor.ref,
         session_id=anchor.session_id,
         signal=firm("sidecar_finding", finding.severity.lower()),

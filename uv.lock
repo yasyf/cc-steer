@@ -315,6 +315,7 @@ dev = [
     { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "ruff", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "scikit-learn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "ty", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
 embed = [
@@ -345,6 +346,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.4" },
+    { name = "cc-steer", extras = ["gate"], marker = "extra == 'dev'" },
     { name = "cc-steer", extras = ["gate", "mlx"], marker = "extra == 'retrain'" },
     { name = "cc-transcript", specifier = ">=13.1,<14" },
     { name = "click", specifier = ">=8" },
