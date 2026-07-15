@@ -16,7 +16,7 @@ from cc_transcript import CLAUDE_PROJECTS_DIR
 from cc_steer import hooks as hook_wiring
 from cc_steer import launchd, registry
 from cc_steer.claude import claude_available
-from cc_steer.context_rebuild import rebuild_contexts
+from cc_steer.context_rebuild import rebuild_contexts, rebuild_lock
 from cc_steer.dashboard import build_app
 from cc_steer.evaluate import evaluate, flip_report
 from cc_steer.journal import Journal
@@ -143,15 +143,29 @@ async def scan(
     default=None,
     help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
+@click.option("--dry-run", is_flag=True, help="Preview the full report without writing anything.")
 @coro
-async def rebuild_context(db: Path | None) -> None:
-    """Rebuild stored contexts from their source session transcripts."""
-    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        report = await rebuild_contexts(store, (MIRRORS_DIR, CLAUDE_PROJECTS_DIR))
+async def rebuild_context(db: Path | None, dry_run: bool) -> None:
+    """Rebuild stored contexts from their source session transcripts.
+
+    Deploy the fixed capture code to the daemon first, run this once, then run
+    it again — rows ingested mid-sweep are picked up by the second pass, which
+    converges to zero changes.
+    """
+    path = db or FeedbackStore.default_path()
+    async with rebuild_lock(path):
+        async with await FeedbackStore.open(path) as store:
+            report = await rebuild_contexts(
+                store, (MIRRORS_DIR, CLAUDE_PROJECTS_DIR), dry_run=dry_run, acquire_lock=False
+            )
     click.echo(
-        f"considered {report.found} rows; rebuilt {report.rebuilt}, quarantined {report.quarantined}, "
-        f"gate samples repaired {report.gate_repaired}"
+        f"considered {report.found} rows ({report.rows_at_start} at start, {report.rows_at_end} at end); "
+        f"rebuilt {report.rebuilt}, quarantined {report.quarantined}, "
+        f"gate samples repaired {report.gate_repaired}, family/verdict mismatches {report.family_mismatches}"
+        + (" [dry run — nothing written]" if dry_run else "")
     )
+    for drift in report.drifted:
+        click.echo(f"detector drift: {drift.old_dedup_key} -> {drift.new_dedup_key}", err=True)
     for failure in report.parse_failures:
         click.echo(f"skipped unparseable copy {failure.path}: {failure.error}", err=True)
 

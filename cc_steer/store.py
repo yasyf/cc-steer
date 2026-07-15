@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
+import aiosqlite
 from cc_transcript.ids import EventUuid, SessionId
 from cc_transcript.judge import VerdictStoreMixin
 from cc_transcript.judge.verdicts import EVENT_COLUMNS, hydratable
@@ -220,6 +221,16 @@ UPDATE gate_sample SET window_json = ?
 WHERE sample_key = ? AND window_json != ?
 """
 
+DELETE_GATE_SAMPLE = "DELETE FROM gate_sample WHERE sample_key = ?"
+
+GATE_FAMILY_MISMATCH_QUERY = """
+SELECT DISTINCT g.dedup_key
+FROM gate_sample g
+JOIN latest_judge j ON j.dedup_key = g.dedup_key
+WHERE (j.is_steering = 1 AND g.kind = 'hard_negative')
+   OR (j.is_steering = 0 AND g.kind = 'positive_window')
+"""
+
 INSERT_EMBEDDING = """
 INSERT INTO exemplar_embedding (dedup_key, model, text_digest, dim, vector, created_at)
 VALUES (?, ?, ?, ?, ?, ?)
@@ -299,6 +310,21 @@ class ContextRebuildChanges:
     quarantined: int
 
 
+def gate_sample_row(sample: GateSample, created_at: str) -> tuple[object, ...]:
+    return (
+        sample.sample_key,
+        sample.kind,
+        sample.dedup_key,
+        sample.session_id,
+        sample.anchor_uuid,
+        sample.occurred_at,
+        sample.offset_turns,
+        sample.window_json,
+        sample.seed,
+        created_at,
+    )
+
+
 class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     """Persistent store for collected feedback over a :class:`FileStateStore`.
 
@@ -335,6 +361,20 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             await store.conn.execute(ADD_QUARANTINE_COLUMN)
         await store.conn.executescript(TRIAGE_DDL + REFINE_DDL + GATE_DDL)
         return cls(store)
+
+    @classmethod
+    async def open_readonly(cls, path: Path) -> Self:
+        """Opens an existing feedback database without schema or data writes."""
+        conn = await aiosqlite.connect(
+            f"{path.resolve().as_uri()}?mode=ro",
+            isolation_level=None,
+            uri=True,
+        )
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("PRAGMA query_only = ON")
+        await conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        return cls(FileStateStore(conn))
 
     async def record_file_scan(self, path: str, mtime: float, candidates: Sequence[FeedbackCandidate]) -> int:
         """Records a scanned file and its candidates in one transaction.
@@ -377,8 +417,12 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         self,
         rebuilt: Sequence[tuple[DedupKey, str]],
         quarantined: Sequence[tuple[DedupKey, str]],
+        *,
+        dry_run: bool = False,
     ) -> ContextRebuildChanges:
         """Persists rebuilt contexts and quarantine reasons in one transaction."""
+        if dry_run:
+            return ContextRebuildChanges(rebuilt=len(rebuilt), quarantined=len(quarantined))
         async with self.store.transaction() as conn:
             before = conn.total_changes
             await conn.executemany(UPDATE_CONTEXT, [(context_json, key) for key, context_json in rebuilt])
@@ -543,33 +587,36 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             before = conn.total_changes
             await conn.executemany(
                 INSERT_GATE_SAMPLE,
-                [
-                    (
-                        sample.sample_key,
-                        sample.kind,
-                        sample.dedup_key,
-                        sample.session_id,
-                        sample.anchor_uuid,
-                        sample.occurred_at,
-                        sample.offset_turns,
-                        sample.window_json,
-                        sample.seed,
-                        created_at,
-                    )
-                    for sample in samples
-                ],
+                [gate_sample_row(sample, created_at) for sample in samples],
             )
             return conn.total_changes - before
 
-    async def repair_gate_sample_windows(self, rows: Sequence[tuple[str, str]]) -> int:
-        """Updates existing gate samples with rebuilt context windows."""
+    async def reconcile_gate_samples(
+        self,
+        *,
+        updates: Sequence[tuple[str, str]],
+        deletes: Sequence[str],
+        inserts: Sequence[GateSample],
+    ) -> int:
+        """Applies one computed gate-family reconciliation transactionally."""
+        created_at = now()
         async with self.store.transaction() as conn:
             before = conn.total_changes
             await conn.executemany(
                 UPDATE_GATE_SAMPLE_WINDOW,
-                [(window_json, sample_key, window_json) for sample_key, window_json in rows],
+                [(window_json, sample_key, window_json) for sample_key, window_json in updates],
+            )
+            await conn.executemany(DELETE_GATE_SAMPLE, [(sample_key,) for sample_key in deletes])
+            await conn.executemany(
+                INSERT_GATE_SAMPLE,
+                [gate_sample_row(sample, created_at) for sample in inserts],
             )
             return conn.total_changes - before
+
+    async def gate_sample_family_mismatch_keys(self) -> set[str]:
+        """Returns parents whose stored gate family contradicts the latest judge verdict."""
+        cur = await self.store.conn.execute(GATE_FAMILY_MISMATCH_QUERY)
+        return {str(row["dedup_key"]) async for row in cur}
 
     async def gate_samples(self, *, kind: str | None = None) -> list[dict[str, object]]:
         """Returns gate samples, oldest first, optionally restricted to one kind."""

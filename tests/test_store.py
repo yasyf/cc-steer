@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -114,6 +115,20 @@ async def test_open_extends_an_existing_database_and_sets_busy_timeout(tmp_path:
         timeout = await (await upgraded.store.conn.execute("PRAGMA busy_timeout")).fetchone()
     assert "quarantined_reason" in columns
     assert timeout is not None and timeout[0] == 2_000
+
+
+async def test_open_readonly_performs_no_schema_or_data_writes(tmp_path: Path) -> None:
+    database = tmp_path / "readonly.db"
+    async with await FeedbackStore.open(database) as writable:
+        await writable.record_file_scan(FILE, 1.0, sample_candidates())
+    before = database.read_bytes()
+
+    async with await FeedbackStore.open_readonly(database) as readonly:
+        assert (await readonly.stats()).total == len(sample_candidates())
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            await readonly.store.conn.execute("DELETE FROM feedback_events")
+
+    assert database.read_bytes() == before
 
 
 async def seeded_keys(store: FeedbackStore) -> list[DedupKey]:
