@@ -164,11 +164,9 @@ def register_watcher_adapter(
             raise ValueError(f"watcher metadata is missing {key!r}")
     if not isinstance(thresholds := metadata["thresholds"], dict) or "budget" not in thresholds:
         raise ValueError(f"watcher metadata thresholds must carry the 'budget' operating point, got {thresholds!r}")
-    files: dict[str, bytes | Path] = {
-        name: adapter_dir / name for name in (drafter_mlx.ADAPTER_NAME, drafter_mlx.ADAPTER_CONFIG_NAME)
-    }
+    files = {name: adapter_dir / name for name in (drafter_mlx.ADAPTER_NAME, drafter_mlx.ADAPTER_CONFIG_NAME)}
     for name, path in files.items():
-        if not Path(path).exists():
+        if not path.exists():
             raise FileNotFoundError(f"{adapter_dir} has no {name}")
     info = registry.register(WATCHER_COMPONENT, files, metadata, root=root)
     if promote:
