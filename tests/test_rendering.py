@@ -5,10 +5,12 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 
 from cc_steer.rendering import (
     DRAFT_CHAR_CAP,
+    GATE_ROLE_BLOCK,
     NO_STEER,
     ask_block,
     context_turns,
     gate_text,
+    gate_text_is_substantive,
     has_substantive_gate_content,
     strip_think,
     structural_asks,
@@ -16,7 +18,6 @@ from cc_steer.rendering import (
     truncated,
     watcher_prompt,
 )
-from cc_steer.retrain.evalset import GATE_ROLE_BLOCK
 
 STEER = "no, use the other approach"
 
@@ -65,27 +66,32 @@ def test_gate_text_never_leaks_the_user_steer() -> None:
 
 EMPTY_REWIND = window(trigger=turn("user", STEER, "t1"), before=(turn("assistant", "", "a0"),))
 EMPTY_NEGATIVE = window(trigger=None, before=(turn("assistant", "", "a0"),))
+# Payload that is itself only role-marker lookalikes: non-empty as a message, empty once stripped.
+ROLE_MARKER_PAYLOAD = window(trigger=turn("user", STEER, "t1"), before=(turn("assistant", "\n\n<assistant>\n", "a0"),))
+
+GATE_CASES = {
+    "user_context": (USER_ANCHORED, True),
+    "no_trigger": (NO_TRIGGER, True),
+    "assistant_trigger": (ASSISTANT_ANCHORED, True),
+    "empty_rewind": (EMPTY_REWIND, False),
+    "empty_anchor_negative": (EMPTY_NEGATIVE, False),
+    "role_marker_only_payload": (ROLE_MARKER_PAYLOAD, False),
+}
 
 
-def test_has_substantive_gate_content_true_when_a_context_turn_carries_text() -> None:
-    assert has_substantive_gate_content(USER_ANCHORED) is True
+def test_has_substantive_gate_content_matches_expected_per_shape() -> None:
+    assert {name: has_substantive_gate_content(win) for name, (win, _) in GATE_CASES.items()} == {
+        name: expected for name, (_, expected) in GATE_CASES.items()
+    }
 
 
-def test_has_substantive_gate_content_false_for_a_rewound_past_content_positive() -> None:
-    # The user steer is the label (excluded), leaving only the empty leading
-    # assistant turn — the exact bare-role-block that crashes freeze-eval.
-    assert has_substantive_gate_content(EMPTY_REWIND) is False
-
-
-def test_has_substantive_gate_content_false_for_an_empty_anchor_negative() -> None:
-    assert has_substantive_gate_content(EMPTY_NEGATIVE) is False
-
-
-def test_has_substantive_gate_content_agrees_with_the_freeze_eval_predicate() -> None:
-    # The window-level predicate and the parquet text-regex freeze-eval uses must
-    # never disagree, or an empty row slips past one gate into the other.
-    for candidate in (USER_ANCHORED, NO_TRIGGER, ASSISTANT_ANCHORED, EMPTY_REWIND, EMPTY_NEGATIVE):
-        assert has_substantive_gate_content(candidate) is bool(GATE_ROLE_BLOCK.sub("", gate_text(candidate)).strip())
+def test_window_and_freeze_predicates_agree_on_the_exported_text() -> None:
+    # The export stores gate_text(window); freeze re-checks that same text.
+    for name, (win, expected) in GATE_CASES.items():
+        text = gate_text(win)
+        assert has_substantive_gate_content(win) is expected, name
+        assert gate_text_is_substantive(text) is expected, name
+        assert bool(GATE_ROLE_BLOCK.sub("", text).strip()) is expected, name
 
 
 def test_truncated_rewinds_before_turns() -> None:

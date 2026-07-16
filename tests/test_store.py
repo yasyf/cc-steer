@@ -657,3 +657,9 @@ async def test_record_gate_samples_drops_windows_with_no_substantive_content(sto
     )
     assert inserted == 1
     assert {str(row["sample_key"]) for row in await store.gate_samples()} == {"substantive"}
+
+
+async def test_negative_sessions_unions_the_sampled_marker(store: FeedbackStore) -> None:
+    # A dropped-only session persists no random_negative row; the marker keeps it done.
+    await store.mark_sessions_sampled(["dropped-only-session"])
+    assert "dropped-only-session" in await store.negative_sessions()

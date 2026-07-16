@@ -105,6 +105,18 @@ class GatePruneReport:
 
 
 @dataclass(frozen=True, slots=True)
+class GatePruneClassification:
+    """One transaction's prune decision: the report plus the keys to delete.
+
+    Both are computed from the same scanned rows, so :attr:`report`'s counts and the
+    :attr:`empty_keys` the store deletes never disagree.
+    """
+
+    report: GatePruneReport
+    empty_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CopyCandidates:
     mtime: float
     path: Path
@@ -409,18 +421,35 @@ def empty_gate_sample_keys(rows: Sequence[Row]) -> tuple[str, ...]:
     )
 
 
-def gate_prune_repairs(rows: Sequence[Row]) -> GateSampleRepairs:
-    return GateSampleRepairs((), empty_gate_sample_keys(rows), ())
+def classify_gate_rows(rows: Sequence[Row]) -> GatePruneClassification:
+    empty = set(empty_gate_sample_keys(rows))
+    positive = [row for row in rows if str(row["kind"]) == "positive_window"]
+    return GatePruneClassification(
+        report=GatePruneReport(
+            scanned=len(rows),
+            pruned=len(empty),
+            pruned_by_kind=dict(Counter(str(row["kind"]) for row in rows if str(row["sample_key"]) in empty)),
+            pruned_positive_by_offset=dict(
+                sorted(Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) in empty).items())
+            ),
+            surviving_positive_by_offset=dict(
+                sorted(
+                    Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) not in empty).items()
+                )
+            ),
+        ),
+        empty_keys=tuple(empty),
+    )
 
 
 async def prune_empty_gate_samples(store: FeedbackStore, *, dry_run: bool) -> GatePruneReport:
     """Deletes every gate sample whose rendered gate text has no substantive content.
 
     The empties are a pure function of the stored ``window_json`` — rewound-past-content
-    positives and empty-anchor negatives — so no transcript is re-read. Idempotent: a
-    second pass prunes zero. The delete recomputes empties inside its own transaction
-    (read snapshot is write snapshot); running with the watch daemon unloaded keeps that
-    snapshot equal to the report's, which the planned-vs-deleted check enforces.
+    positives, empty-anchor negatives, and role-marker-only payloads — so no transcript is
+    re-read. Idempotent: a second pass prunes zero. The store scans, classifies, and deletes
+    in one ``BEGIN IMMEDIATE`` transaction, so every reported count reflects exactly the rows
+    deleted even under a concurrent pipeline.
 
     Args:
         store: The open feedback store to inspect and prune.
@@ -429,29 +458,7 @@ async def prune_empty_gate_samples(store: FeedbackStore, *, dry_run: bool) -> Ga
     Returns:
         The prune counts and the positive-rewind distribution before and after.
     """
-    rows = [row async for row in await store.store.conn.execute(PRUNE_GATE_QUERY)]
-    empty = set(empty_gate_sample_keys(rows))
-    positive = [row for row in rows if str(row["kind"]) == "positive_window"]
-    report = GatePruneReport(
-        scanned=len(rows),
-        pruned=len(empty),
-        pruned_by_kind=dict(Counter(str(row["kind"]) for row in rows if str(row["sample_key"]) in empty)),
-        pruned_positive_by_offset=dict(
-            sorted(Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) in empty).items())
-        ),
-        surviving_positive_by_offset=dict(
-            sorted(Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) not in empty).items())
-        ),
-    )
-    if dry_run:
-        return report
-    deleted = await store.repair_gate_samples(PRUNE_GATE_QUERY, gate_prune_repairs)
-    if deleted != report.pruned:
-        raise RuntimeError(
-            f"prune deleted {deleted} rows but planned {report.pruned}; the gate table changed mid-pass — "
-            "run with the watch daemon unloaded"
-        )
-    return report
+    return (await store.prune_gate_samples(PRUNE_GATE_QUERY, classify_gate_rows, dry_run=dry_run)).report
 
 
 async def execute_context_rebuild(

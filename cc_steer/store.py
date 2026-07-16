@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from cc_transcript.corrections import CorrectionLog
     from cc_transcript.mining import DedupKey, FeedbackCandidate
 
-    from cc_steer.context_rebuild import GateSampleRepairs
+    from cc_steer.context_rebuild import GatePruneClassification, GateSampleRepairs
     from cc_steer.negatives import GateSample
     from cc_steer.refine import Refinement
 
@@ -202,6 +202,10 @@ CREATE TABLE IF NOT EXISTS gate_sample (
 );
 CREATE INDEX IF NOT EXISTS idx_gate_sample_kind ON gate_sample(kind);
 CREATE INDEX IF NOT EXISTS idx_gate_sample_session ON gate_sample(session_id);
+CREATE TABLE IF NOT EXISTS sampled_session (
+  session_id TEXT PRIMARY KEY,
+  sampled_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS exemplar_embedding (
   dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
   model TEXT NOT NULL,
@@ -225,6 +229,8 @@ WHERE sample_key = ? AND window_json != ?
 """
 
 DELETE_GATE_SAMPLE = "DELETE FROM gate_sample WHERE sample_key = ?"
+
+INSERT_SAMPLED_SESSION = "INSERT OR IGNORE INTO sampled_session (session_id, sampled_at) VALUES (?, ?)"
 
 GATE_FAMILY_MISMATCH_QUERY = """
 SELECT DISTINCT g.dedup_key
@@ -628,6 +634,27 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             )
             return conn.total_changes - before
 
+    async def prune_gate_samples(
+        self,
+        query: str,
+        classify: Callable[[Sequence[Row]], GatePruneClassification],
+        *,
+        dry_run: bool,
+    ) -> GatePruneClassification:
+        """Scans, classifies, and deletes empty gate samples in one transaction.
+
+        The live delete's read snapshot is its write snapshot, so the returned
+        classification's counts reflect exactly the rows removed even if the pipeline
+        writes concurrently. ``dry_run`` classifies over an unlocked read and deletes
+        nothing.
+        """
+        if dry_run:
+            return classify([row async for row in await self.store.conn.execute(query)])
+        async with self.store.transaction() as conn:
+            classification = classify([row async for row in await conn.execute(query)])
+            await conn.executemany(DELETE_GATE_SAMPLE, [(key,) for key in classification.empty_keys])
+            return classification
+
     async def gate_sample_family_mismatch_keys(self) -> set[str]:
         """Returns parents whose stored gate family contradicts the latest judge verdict."""
         cur = await self.store.conn.execute(GATE_FAMILY_MISMATCH_QUERY)
@@ -645,11 +672,23 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         return {str(row["kind"]): int(row["n"]) async for row in cur}
 
     async def negative_sessions(self) -> set[str]:
-        """Returns the sessions that already carry random-negative samples."""
+        """Returns the sessions already parsed for random negatives.
+
+        Doneness is completion, not survival: a session whose every empty-anchor
+        sample was dropped at insert carries no ``random_negative`` row, so the
+        ``sampled_session`` marker is unioned in to stop it re-parsing every pass.
+        """
         cur = await self.store.conn.execute(
-            "SELECT DISTINCT session_id FROM gate_sample WHERE kind = 'random_negative'"
+            "SELECT session_id FROM sampled_session "
+            "UNION SELECT session_id FROM gate_sample WHERE kind = 'random_negative'"
         )
         return {str(row["session_id"]) async for row in cur}
+
+    async def mark_sessions_sampled(self, session_ids: Sequence[str]) -> None:
+        """Records that ``session_ids`` were parsed for random negatives, dropped-only included."""
+        sampled_at = now()
+        async with self.store.transaction() as conn:
+            await conn.executemany(INSERT_SAMPLED_SESSION, [(session_id, sampled_at) for session_id in session_ids])
 
     async def record_embeddings(self, rows: Sequence[tuple[str, str, str, int, bytes]]) -> None:
         """Upserts exemplar embeddings as ``(dedup_key, model, text_digest, dim, vector)`` rows."""

@@ -34,6 +34,7 @@ from cc_steer.rendering import (
     ask_block,
     assistant_message,
     gate_text,
+    gate_text_is_substantive,
     has_substantive_content,
     messages,
     render_edit,
@@ -490,16 +491,17 @@ def gate_row(row: Row) -> GateRow | None:
         window = ContextWindow.from_json(str(row["window_json"]))
     except (ValueError, KeyError):
         return None
-    validated_prompt(
-        watcher_prompt(window),
-        view="gate",
-        dedup_key=str(row["sample_key"]),
-        session_id=str(row["session_id"]),
-        source_kind=str(row["source_kind"]),
-    )
+    text = gate_text(window)
+    if not gate_text_is_substantive(text):
+        raise EmptyWatcherPrompt(
+            dedup_key=str(row["sample_key"]),
+            session_id=str(row["session_id"]),
+            source_kind=str(row["source_kind"]),
+            view="gate",
+        )
     return {
         "id": str(row["sample_key"]),
-        "text": gate_text(window),
+        "text": text,
         "label": str(row["kind"]) == "positive_window",
         "kind": str(row["kind"]),
         "offset_turns": int(row["offset_turns"]),

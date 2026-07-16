@@ -27,6 +27,8 @@ NO_STEER = "NO_STEER"
 
 DRAFT_CHAR_CAP = 10_000
 
+GATE_ROLE_BLOCK = re.compile(r"(?:\A|\n\n)<\w+>\n")
+
 # The Qwen3-2507 *Instruct* chat template renders every assistant turn with an
 # empty ``<think>\n\n</think>`` scaffold (it is distilled from a thinking model
 # and the template injects the block unconditionally). A LoRA trained through
@@ -199,16 +201,26 @@ def gate_text(window: ContextWindow) -> str:
     return "\n\n".join(f"<{message['role']}>\n{message['content']}" for message in watcher_prompt(window))
 
 
-def has_substantive_gate_content(window: ContextWindow) -> bool:
-    """Whether :func:`gate_text` for ``window`` carries content beneath its role markup.
+def gate_text_is_substantive(text: str) -> bool:
+    """Whether flattened gate text carries content once its role-block markup is stripped.
 
-    The single window-level predicate the sampler's insert choke point and the
-    export invariant share, equivalent by construction to stripping the role
-    blocks off :func:`gate_text` and checking for a non-empty remainder: a
-    rewound-past-content positive or an empty-anchor negative renders to bare
-    ``<assistant>\\n`` and is not a valid gate sample.
+    The one text-level predicate every seam shares — sampler insert, export, and
+    :func:`~cc_steer.retrain.evalset.freeze_eval` — so a sample can never pass one
+    and fail another. A payload that is itself only role-marker lookalikes is
+    degenerate noise and correctly reads as empty.
     """
-    return has_substantive_content(watcher_prompt(window))
+    return bool(GATE_ROLE_BLOCK.sub("", text).strip())
+
+
+def has_substantive_gate_content(window: ContextWindow) -> bool:
+    """Whether ``window`` renders gate text with content beneath its role markup.
+
+    Applies :func:`gate_text_is_substantive` to the window's rendered
+    :func:`gate_text` — the exact text the export stores and the freeze checks — so
+    a rewound-past-content positive, an empty-anchor negative, or a role-marker-only
+    payload all read as empty at every seam.
+    """
+    return gate_text_is_substantive(gate_text(window))
 
 
 def tail_messages(prompt: Sequence[Message], cap: int = DRAFT_CHAR_CAP) -> list[Message]:

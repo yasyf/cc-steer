@@ -7,7 +7,8 @@ import pytest
 from cc_transcript.context import ContextWindow, TurnRef
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 
-from cc_steer.negatives import event_samples, sample_negatives
+import cc_steer.negatives as negatives
+from cc_steer.negatives import GateSample, event_samples, sample_negatives
 from tests.builders import assistant_text, user_text, write_transcript
 from tests.test_exemplars import TRAIN_SESSION, seed_steering, window_json
 
@@ -107,6 +108,46 @@ async def test_sample_negatives_end_to_end(store: FeedbackStore, tmp_path: Path)
 
     stats = await store.gate_sample_stats()
     assert stats == {"positive_window": 2, "random_negative": 2}
+
+
+async def test_sample_negatives_marks_a_dropped_only_session(
+    store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = "d0000000-0000-0000-0000-000000000000"
+    write_transcript(tmp_path / "proj" / f"{session}.jsonl", session_entries(session))
+    empty = ContextWindow(
+        anchor=EventRef(SessionId(session), EventUuid("x")),
+        before=(TurnRef(role="assistant", refs=(), preview="", tool_digests=()),),
+        trigger=None,
+        after=(),
+        fidelity="full",
+        preview_chars=200,
+    ).to_json()
+    monkeypatch.setattr(
+        negatives,
+        "random_samples",
+        lambda activity, exclude, *, per_session, seed: [
+            GateSample(
+                sample_key=f"rand:{session}:x",
+                kind="random_negative",
+                dedup_key=None,
+                session_id=session,
+                anchor_uuid="x",
+                occurred_at=None,
+                offset_turns=0,
+                window_json=empty,
+                seed=seed,
+            )
+        ],
+    )
+    report = await sample_negatives(store, [tmp_path], seed=1, sessions=10, per_session=2, min_bytes=0)
+    # Every sample is empty and dropped, yet the parsed session is marked done.
+    assert report.inserted["random_negative"] == 0
+    assert report.sessions_sampled == 1
+    assert session in await store.negative_sessions()
+
+    again = await sample_negatives(store, [tmp_path], seed=1, sessions=10, per_session=2, min_bytes=0)
+    assert again.sessions_sampled == 0
 
 
 async def test_sample_negatives_excludes_turns_near_detected_events(store: FeedbackStore, tmp_path: Path) -> None:

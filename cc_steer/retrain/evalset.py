@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +28,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from cc_steer.rendering import has_substantive_content
+from cc_steer.rendering import gate_text_is_substantive, has_substantive_content
 from cc_steer.retrain.data import DIRECTION, WatcherRow, dataset_digest
 
 if TYPE_CHECKING:
@@ -47,7 +46,6 @@ EVAL_NAMES: dict[str, str] = {"gate": GATE_EVAL_NAME, "watcher": WATCHER_EVAL_NA
 PROBS_DIRNAME = "probs"
 QA_SOURCE_KIND = "question_answer"
 RENDER_VERSION = 2
-GATE_ROLE_BLOCK = re.compile(r"(?:\A|\n\n)<\w+>\n")
 
 VIEW_COLUMNS: dict[str, tuple[str, ...]] = {
     "gate": ("id", "text", "label", "kind", "offset_turns", "source_kind", "category", "session_id", "split"),
@@ -252,7 +250,7 @@ def _empty_context_ids(view: str, table: pa.Table) -> list[str]:
             return sorted(
                 str(record["id"])
                 for record in table.to_pylist()
-                if not GATE_ROLE_BLOCK.sub("", str(record["text"])).strip()
+                if not gate_text_is_substantive(str(record["text"]))
             )
     return []
 
