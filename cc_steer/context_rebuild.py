@@ -251,6 +251,8 @@ def rebuild_outcome(
         ]
         if not drifted:
             return quarantine_outcome(row, dedup_key, "anchor_not_found")
+        if not has_substantive_content(messages(ContextWindow.from_json(str(row["context_json"])).before)):
+            return quarantine_outcome(row, dedup_key, "rebuilt_context_empty")
         best_score = max(
             (before_content_length(candidate.window), mtime)
             for mtime, candidate in drifted

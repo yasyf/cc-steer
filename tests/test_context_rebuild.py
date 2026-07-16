@@ -528,6 +528,33 @@ async def test_rebuild_marks_shared_event_uuid_detector_drift_as_ambiguous(
     assert after == before
 
 
+async def test_rebuild_quarantines_drift_rows_with_empty_stored_context(
+    store: FeedbackStore, projects_root: Path
+) -> None:
+    session_id = "empty-context-drift-session"
+    entries = plan_rejection_entries(session_id)
+    current = detected(entries, f"{session_id}-anchor")
+    stored = replace(current, dedup_key=DedupKey("legacy-empty-dedup-key"))
+    await store.record_file_scan("/obsolete/.cc-pushback/empty-drift.jsonl", 1.0, [stored])
+    await store.store.conn.execute(
+        "UPDATE feedback_events SET context_json = ?, quarantined_reason = NULL WHERE dedup_key = ?",
+        (replace(stored.window, before=()).to_json(), str(stored.dedup_key)),
+    )
+    await store.store.conn.commit()
+    write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
+
+    report = await rebuild_contexts(store, (projects_root,))
+
+    assert report == replace(rebuild_report(), quarantined=1)
+    row = await (
+        await store.store.conn.execute(
+            "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?",
+            (str(stored.dedup_key),),
+        )
+    ).fetchone()
+    assert row is not None and row["quarantined_reason"] == "rebuilt_context_empty"
+
+
 async def test_rebuild_marks_tied_fresh_detector_drift_as_ambiguous(
     store: FeedbackStore, projects_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
