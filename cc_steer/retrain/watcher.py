@@ -46,6 +46,10 @@ class WatcherRetrainError(RuntimeError):
     """The watcher retrain cannot proceed: no incumbent, unseeded incumbent probs, or an unknown base."""
 
 
+class FreshEpochError(WatcherRetrainError):
+    """``--fresh-epoch`` misuse: the frozen frame already has scored version probs, so the one-shot cutover is over."""
+
+
 class ConversionDroppedError(RuntimeError):
     """The PEFT-to-mlx conversion dropped modules; promoting a half-converted adapter is refused."""
 
@@ -204,6 +208,7 @@ def seed_incumbent_probs(
 def retrain_watcher(
     *,
     force: bool = False,
+    fresh_epoch: bool = False,
     recipe: WatcherRecipe,
     dataset_dir: Path | None = None,
     eval_root: Path | None = None,
@@ -218,6 +223,13 @@ def retrain_watcher(
     parity-checks, registers, promotes, and seeds the new version's probs before kicking the
     live watch agent. Every branch — skip, spend-cap reject, gate reject, parity reject,
     promote — journals exactly once.
+
+    ``fresh_epoch`` is the one-shot clean-slate cutover: the incumbent-relative gate
+    (:func:`~cc_steer.retrain.promotion.corrected_gate`) is skipped entirely — the candidate
+    promotes on the absolute checks the lane already runs (spend cap, mlx parity) plus a single
+    below-chance refusal (sentinel AUC must beat 0.5 on the clean frame). It first refuses via
+    :class:`FreshEpochError` if any registered version already carries probs for the current
+    frozen frame, so it can only run once per frame.
     """
     incumbent = registry.current(WATCHER_COMPONENT, root=registry_root)
     digest = data.train_digest(dataset_dir=dataset_dir)
@@ -225,15 +237,15 @@ def retrain_watcher(
         return promotion.journal(
             WATCHER_COMPONENT, f"skipped (no new data at digest {digest})", dataset_digest=digest, state_dir=state_dir
         )
-    if incumbent is None:
+    if incumbent is None and not fresh_epoch:
         raise WatcherRetrainError(
             "no promoted watcher incumbent to gate against; register the base adapter first "
             "(cc-steer retrain --component watcher --register-adapter <dir> --metadata-json <json>)"
         )
 
     frame = evalset.EvalFrame.load(root=eval_root)
-    incumbent_probs = _load_incumbent_probs(frame, incumbent, root=eval_root)
-    incumbent_threshold = float(incumbent.metadata["thresholds"]["budget"])
+    if fresh_epoch:
+        _refuse_scored_frame(frame, eval_root=eval_root, registry_root=registry_root)
     base = _base_for(recipe)
 
     rows = data.load_train_rows(dataset_dir=dataset_dir)
@@ -276,26 +288,40 @@ def retrain_watcher(
     svc = captured[0]
     best_step = max(scores, key=lambda step: scores[step])
     candidate_probs = tk.score_frame_tinker(svc, run.checkpoints[best_step], frame, base=base)
-    result = promotion.corrected_gate(
-        np.array([candidate_probs[row_id] for row_id in frame.ids], dtype=np.float64),
-        incumbent_probs,
-        candidate="candidate",
-        incumbent=incumbent.version,
-        incumbent_threshold=incumbent_threshold,
-        labels=frame.labels,
-        corrective=frame.corrective,
-        prose=frame.prose,
-        harmful_favors_incumbent=None,
-    )
-    gate_verdict = promotion.watcher_promotable(result)
-    if not gate_verdict.promote:
-        return promotion.journal(
-            WATCHER_COMPONENT,
-            f"rejected ({gate_verdict.reason})",
-            dataset_digest=digest,
-            metrics=_gate_stats(result),
-            state_dir=state_dir,
+    candidate_arr = np.array([candidate_probs[row_id] for row_id in frame.ids], dtype=np.float64)
+    eval_auc = promotion.sentinel_auc(frame.labels, candidate_arr)
+
+    if fresh_epoch:
+        if eval_auc <= 0.5:
+            raise WatcherRetrainError(
+                f"fresh-epoch candidate scores sentinel AUC {eval_auc:.4f} <= 0.5 (below chance) on the clean frozen "
+                f"frame (digest {frame.digest}); refusing to promote a degenerate model"
+            )
+        gate_stats: dict[str, float] = {}
+        reason = f"candidate AUC {eval_auc:.4f}, no incumbent gate"
+    else:
+        result = promotion.corrected_gate(
+            candidate_arr,
+            _load_incumbent_probs(frame, incumbent, root=eval_root),
+            candidate="candidate",
+            incumbent=incumbent.version,
+            incumbent_threshold=float(incumbent.metadata["thresholds"]["budget"]),
+            labels=frame.labels,
+            corrective=frame.corrective,
+            prose=frame.prose,
+            harmful_favors_incumbent=None,
         )
+        gate_verdict = promotion.watcher_promotable(result)
+        if not gate_verdict.promote:
+            return promotion.journal(
+                WATCHER_COMPONENT,
+                f"rejected ({gate_verdict.reason})",
+                dataset_digest=digest,
+                metrics=_gate_stats(result),
+                state_dir=state_dir,
+            )
+        gate_stats = _gate_stats(result)
+        reason = gate_verdict.reason
 
     candidate_dir = _convert_best(svc, run.checkpoints[best_step], base, recipe, adapters_dir=adapters_dir)
     parity = _parity_check(frame, candidate_probs, candidate_dir, recipe)
@@ -304,13 +330,13 @@ def retrain_watcher(
             WATCHER_COMPONENT,
             f"rejected (parity max abs diff {parity:.4f} > tolerance {recipe.parity_tolerance})",
             dataset_digest=digest,
-            metrics=_gate_stats(result) | {"parity_max_abs_diff": parity},
+            metrics=gate_stats | {"parity_max_abs_diff": parity},
             state_dir=state_dir,
         )
 
     # Store on the P(NO_STEER) scale (fire iff p < it); the cut is on 1 - p, so 1 - cut (lab ~0.15, run_e12.py:116).
     fire_score_cut = promotion.threshold_for_budget(
-        1.0 - np.array([candidate_probs[row_id] for row_id in frame.ids], dtype=np.float64),
+        1.0 - candidate_arr,
         fires_per_100=recipe.budget_fires_per_100,
         total_turns=len(frame),
     )
@@ -326,19 +352,20 @@ def retrain_watcher(
         "best_step": best_step,
         "tinker_checkpoint": run.checkpoints[best_step],
         "tinker_val_auc": scores[best_step],
-        "eval_auc": result.cell_auc,
+        "eval_auc": eval_auc,
         "parity_max_abs_diff": parity,
-        **_gate_stats(result),
+        **gate_stats,
     }
     info = register_watcher_adapter(candidate_dir, metadata=metadata, root=registry_root)
     registry.prune(WATCHER_COMPONENT, keep=KEEP_VERSIONS, root=registry_root)
-    evalset.write_probs(frame, info.version, candidate_probs, auc=result.cell_auc, root=eval_root)
+    evalset.write_probs(frame, info.version, candidate_probs, auc=eval_auc, root=eval_root)
     kicked = launchd.kickstart_watch()
+    prefix = "fresh-epoch " if fresh_epoch else ""
     return promotion.journal(
         WATCHER_COMPONENT,
-        f"promoted {info.version} ({gate_verdict.reason}); watch kickstart {'ok' if kicked else 'skipped'}",
+        f"{prefix}promoted {info.version} ({reason}); watch kickstart {'ok' if kicked else 'skipped'}",
         dataset_digest=digest,
-        metrics=_gate_stats(result)
+        metrics=gate_stats
         | {"parity_max_abs_diff": parity, "tinker_val_auc": scores[best_step], "threshold_budget": threshold},
         version=info.version,
         state_dir=state_dir,
@@ -352,6 +379,27 @@ def _base_for(recipe: WatcherRecipe) -> tk.BaseModel:
             f"only {tk.QWEN3_8B.tinker_model}/{tk.QWEN3_8B.mlx_id} is supported"
         )
     return tk.QWEN3_8B
+
+
+def _refuse_scored_frame(frame: evalset.EvalFrame, *, eval_root: Path | None, registry_root: Path | None) -> None:
+    scored = {
+        info.version: evalset.probs_path(info.version, root=eval_root)
+        for info in registry.versions(WATCHER_COMPONENT, root=registry_root)
+        if _has_frame_probs(frame, info.version, root=eval_root)
+    }
+    if scored:
+        raise FreshEpochError(
+            f"--fresh-epoch is a one-shot clean-slate cutover, but {len(scored)} registered version(s) already carry "
+            f"probs for the current frozen frame (digest {frame.digest}); the cutover is over. "
+            f"Files: {[str(path) for path in scored.values()]}"
+        )
+
+
+def _has_frame_probs(frame: evalset.EvalFrame, version: str, *, root: Path | None) -> bool:
+    path = evalset.probs_path(version, root=root)
+    if not path.exists():
+        return False
+    return json.loads(path.read_text())["meta"]["dataset_digest"] == frame.digest
 
 
 def _load_incumbent_probs(

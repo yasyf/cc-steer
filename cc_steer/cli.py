@@ -914,6 +914,16 @@ def models_rollback(component: str) -> None:
 )
 @click.option("--force", is_flag=True, help="Retrain even when the component's train view is unchanged.")
 @click.option(
+    "--fresh-epoch",
+    is_flag=True,
+    help=(
+        "One-shot clean-slate cutover: gate the candidate as if no incumbent existed. Watcher — skip the "
+        "incumbent-relative gate and refuse only a below-chance (sentinel AUC <= 0.5) candidate; a watcher-only guard "
+        "refuses if any registered version already has probs for the current frozen frame. Gate — take the "
+        "no-incumbent promotion path (the gate lane has no probs store, so no reuse guard applies there)."
+    ),
+)
+@click.option(
     "--recipe",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
@@ -940,6 +950,7 @@ def models_rollback(component: str) -> None:
 def retrain_(
     component: str,
     force: bool,
+    fresh_epoch: bool,
     recipe: Path | None,
     register_adapter: Path | None,
     metadata_json: Path | None,
@@ -956,13 +967,13 @@ def retrain_(
     if component == "gate":
         if any(opt is not None for opt in (recipe, register_adapter, metadata_json, seed_incumbent_probs)):
             raise click.ClickException("--recipe and the adapter/probs bootstrap options are watcher only")
-        click.echo(lexical.retrain_gate(force=force))
+        click.echo(lexical.retrain_gate(force=force, fresh_epoch=fresh_epoch))
         return
     if seed_incumbent_probs is not None:
-        if any(opt is not None for opt in (recipe, register_adapter, metadata_json)):
+        if fresh_epoch or any(opt is not None for opt in (recipe, register_adapter, metadata_json)):
             raise click.UsageError(
                 "--seed-incumbent-probs is a standalone bootstrap; it takes no "
-                "--recipe/--register-adapter/--metadata-json"
+                "--recipe/--register-adapter/--metadata-json/--fresh-epoch"
             )
         incumbent = registry.current(watcher.WATCHER_COMPONENT)
         if incumbent is None:
@@ -977,8 +988,10 @@ def retrain_(
     if register_adapter is not None:
         if metadata_json is None:
             raise click.UsageError("--register-adapter requires --metadata-json")
-        if recipe is not None:
-            raise click.UsageError("--register-adapter registers a pre-built adapter; it takes no --recipe")
+        if recipe is not None or fresh_epoch:
+            raise click.UsageError(
+                "--register-adapter registers a pre-built adapter; it takes no --recipe/--fresh-epoch"
+            )
         click.echo(watcher.register_watcher(register_adapter, metadata=dict(json.loads(metadata_json.read_text()))))
         return
     if metadata_json is not None:
@@ -986,6 +999,7 @@ def retrain_(
     click.echo(
         watcher.retrain_watcher(
             force=force,
+            fresh_epoch=fresh_epoch,
             recipe=watcher.WatcherRecipe.from_json(recipe) if recipe is not None else watcher.WatcherRecipe.default(),
         )
     )

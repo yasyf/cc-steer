@@ -321,12 +321,19 @@ def gate_train_digest(*, dataset_dir: Path | None = None) -> str:
 def retrain_gate(
     *,
     force: bool = False,
+    fresh_epoch: bool = False,
     dataset_dir: Path | None = None,
     eval_root: Path | None = None,
     registry_root: Path | None = None,
     state_dir: Path | None = None,
 ) -> str:
-    """One gate retrain pass; returns the journaled one-line verdict."""
+    """One gate retrain pass; returns the journaled one-line verdict.
+
+    ``fresh_epoch`` gates the candidate through the no-incumbent promotion path
+    (:func:`~cc_steer.retrain.promotion.gate_promotable` with no incumbent), ignoring the
+    incumbent's metrics for the one-shot clean-slate cutover. The gate lane keeps no probs
+    store, so there is no reuse guard here (unlike the watcher lane).
+    """
     incumbent = registry.current(COMPONENT, root=registry_root)
     digest = gate_train_digest(dataset_dir=dataset_dir)
     if not promotion.should_retrain(incumbent, digest, force=force):
@@ -334,7 +341,7 @@ def retrain_gate(
             COMPONENT, f"skipped (no new data at digest {digest})", dataset_digest=digest, state_dir=state_dir
         )
     candidate = train_gate(dataset_dir=dataset_dir, eval_root=eval_root)
-    if incumbent is None:
+    if incumbent is None or fresh_epoch:
         incumbent_metrics = None
     else:
         metrics = incumbent.metadata["metrics"]
@@ -346,13 +353,14 @@ def retrain_gate(
         f"pr_auc={candidate.metrics[PR_AUC_KEY]:.4f} ece={candidate.metrics['ece_post_t']:.4f} "
         f"recall@2/100={candidate.metrics[RECALL_KEY]:.4f} threshold={candidate.metrics[THRESHOLD_METRIC]:.4f}"
     )
+    prefix = "fresh-epoch " if fresh_epoch else ""
     version: str | None = None
     if not verdict.promote:
         incumbent_version = incumbent.version if incumbent is not None else "?"
-        line = f"rejected ({verdict.reason}); incumbent {incumbent_version} stays — {summary}"
+        line = f"{prefix}rejected ({verdict.reason}); incumbent {incumbent_version} stays — {summary}"
     else:
         version = (info := register_candidate(candidate, digest=digest, root=registry_root)).version
-        line = f"promoted {info.version} ({verdict.reason}) — {summary}"
+        line = f"{prefix}promoted {info.version} ({verdict.reason}) — {summary}"
     return promotion.journal(
         COMPONENT, line, dataset_digest=digest, metrics=candidate.metrics, version=version, state_dir=state_dir
     )

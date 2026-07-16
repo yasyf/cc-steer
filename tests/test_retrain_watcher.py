@@ -15,7 +15,7 @@ from cc_steer.retrain import data, evalset, promotion
 from cc_steer.retrain import tinker as tk
 from cc_steer.retrain import watcher as w
 from cc_steer.retrain.evalset import ProbsStoreError
-from cc_steer.retrain.watcher import ConversionDroppedError, WatcherRecipe, WatcherRetrainError
+from cc_steer.retrain.watcher import ConversionDroppedError, FreshEpochError, WatcherRecipe, WatcherRetrainError
 from cc_steer.watcher import drafter_mlx
 
 if TYPE_CHECKING:
@@ -233,9 +233,10 @@ class Lane:
     train_error: Exception | None = None
     kickstart_result: bool = True
 
-    def run(self, *, force: bool = True, recipe: WatcherRecipe = WatcherRecipe.default()) -> str:
+    def run(self, *, force: bool = True, fresh_epoch: bool = False, recipe: WatcherRecipe = WatcherRecipe.default()) -> str:
         return w.retrain_watcher(
             force=force,
+            fresh_epoch=fresh_epoch,
             recipe=recipe,
             dataset_dir=self.dataset_dir,
             eval_root=self.eval_dir,
@@ -423,6 +424,34 @@ class TestRetrainWatcher:
         evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()
         with pytest.raises(WatcherRetrainError, match="--seed-incumbent-probs"):
             lane.run()
+
+
+class TestFreshEpoch:
+    def test_promotes_on_absolute_bar_without_incumbent_probs(self, lane: Lane) -> None:
+        evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()  # no incumbent probs for this frame
+        verdict = lane.run(fresh_epoch=True)
+        assert verdict.startswith("watcher: fresh-epoch promoted")
+        assert "candidate AUC" in verdict and "no incumbent gate" in verdict
+        current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
+        assert current is not None and current.version != lane.incumbent.version
+        assert evalset.probs_path(current.version, root=lane.eval_dir).exists()
+
+    def test_refuses_below_chance_candidate(self, lane: Lane) -> None:
+        evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()
+        below_chance = np.full(N, 0.9)
+        below_chance[10:] = 0.1  # negatives fire hardest -> sentinel AUC 0.0, below chance
+        lane.candidate = below_chance
+        with pytest.raises(WatcherRetrainError, match="below chance"):
+            lane.run(fresh_epoch=True)
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_refuses_when_frame_already_scored(self, lane: Lane) -> None:
+        # The lane seeds incumbent probs for the current frame; the one-shot guard fires before training.
+        with pytest.raises(FreshEpochError, match="one-shot") as excinfo:
+            lane.run(fresh_epoch=True)
+        assert str(evalset.probs_path(lane.incumbent.version, root=lane.eval_dir)) in str(excinfo.value)
+        assert lane.calls["score_frame"] == 0
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
 
 
 class TestSeedIncumbentProbs:

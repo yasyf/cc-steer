@@ -23,15 +23,45 @@ def runner() -> CliRunner:
 def test_gate_dispatch_passes_force(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
-    def fake(*, force: bool) -> str:
+    def fake(*, force: bool, fresh_epoch: bool) -> str:
         seen["force"] = force
+        seen["fresh_epoch"] = fresh_epoch
         return "gate: promoted v001-x"
 
     monkeypatch.setattr(lexical, "retrain_gate", fake)
     result = runner.invoke(main, ["retrain", "--component", "gate", "--force"])
     assert result.exit_code == 0, result.output
-    assert seen == {"force": True}
+    assert seen == {"force": True, "fresh_epoch": False}
     assert "gate: promoted v001-x" in result.output
+
+
+def test_fresh_epoch_threads_to_both_lanes(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        lexical, "retrain_gate", lambda *, force, fresh_epoch: seen.update(gate=fresh_epoch) or "gate: fresh-epoch promoted v001-x"
+    )
+    monkeypatch.setattr(
+        w,
+        "retrain_watcher",
+        lambda *, force, fresh_epoch, recipe: seen.update(watcher=fresh_epoch) or "watcher: fresh-epoch promoted v002-x",
+    )
+    assert runner.invoke(main, ["retrain", "--component", "gate", "--fresh-epoch"]).exit_code == 0
+    assert runner.invoke(main, ["retrain", "--component", "watcher", "--fresh-epoch"]).exit_code == 0
+    assert seen == {"gate": True, "watcher": True}
+
+
+def test_fresh_epoch_rejected_with_register_adapter(runner: CliRunner, tmp_path: Path) -> None:
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    metadata_json = tmp_path / "meta.json"
+    metadata_json.write_text("{}")
+    result = runner.invoke(
+        main,
+        ["retrain", "--component", "watcher", "--fresh-epoch", "--register-adapter", str(adapter),
+         "--metadata-json", str(metadata_json)],
+    )
+    assert result.exit_code != 0
+    assert "--fresh-epoch" in result.output
 
 
 def test_gate_rejects_watcher_only_options(runner: CliRunner, tmp_path: Path) -> None:
@@ -45,15 +75,16 @@ def test_gate_rejects_watcher_only_options(runner: CliRunner, tmp_path: Path) ->
 def test_watcher_dispatch_defaults_to_the_e8_recipe(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
-    def fake(*, force: bool, recipe: w.WatcherRecipe) -> str:
+    def fake(*, force: bool, fresh_epoch: bool, recipe: w.WatcherRecipe) -> str:
         seen["force"] = force
+        seen["fresh_epoch"] = fresh_epoch
         seen["recipe"] = recipe
         return "watcher: promoted v002-x"
 
     monkeypatch.setattr(w, "retrain_watcher", fake)
     result = runner.invoke(main, ["retrain", "--component", "watcher"])
     assert result.exit_code == 0, result.output
-    assert seen == {"force": False, "recipe": w.WatcherRecipe.default()}
+    assert seen == {"force": False, "fresh_epoch": False, "recipe": w.WatcherRecipe.default()}
     assert "watcher: promoted v002-x" in result.output
 
 
@@ -79,7 +110,9 @@ def test_watcher_dispatch_parses_recipe(runner: CliRunner, tmp_path: Path, monke
     recipe_path = tmp_path / "recipe.json"
     recipe_path.write_text(json.dumps(fields))
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(w, "retrain_watcher", lambda *, force, recipe: seen.update(recipe=recipe) or "watcher: skipped")
+    monkeypatch.setattr(
+        w, "retrain_watcher", lambda *, force, fresh_epoch, recipe: seen.update(recipe=recipe) or "watcher: skipped"
+    )
     result = runner.invoke(main, ["retrain", "--component", "watcher", "--recipe", str(recipe_path)])
     assert result.exit_code == 0, result.output
     assert seen["recipe"] == w.WatcherRecipe(**fields)

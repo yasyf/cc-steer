@@ -161,6 +161,24 @@ class TestRetrainGate:
                 state_dir=roots["state"],
             )
 
+    def test_fresh_epoch_promotes_over_metricsless_incumbent(
+        self, dataset_dir: Path, eval_dir: Path, roots: dict[str, Path]
+    ) -> None:
+        # A metrics-less incumbent would KeyError on the normal path; fresh-epoch takes the no-incumbent path instead.
+        info = registry.register("gate", {ARTIFACT_NAME: b"stub"}, {"dataset_digest": "stale"}, root=roots["registry"])
+        registry.promote("gate", info.version, root=roots["registry"])
+        verdict = lexical.retrain_gate(
+            force=True,
+            fresh_epoch=True,
+            dataset_dir=dataset_dir,
+            eval_root=eval_dir,
+            registry_root=roots["registry"],
+            state_dir=roots["state"],
+        )
+        assert verdict.startswith("gate: fresh-epoch promoted")
+        assert "(no incumbent)" in verdict
+        assert registry.current("gate", root=roots["registry"]).version != info.version
+
     def test_journals_every_pass(self, dataset_dir: Path, eval_dir: Path, roots: dict[str, Path]) -> None:
         lexical.retrain_gate(
             force=True,
