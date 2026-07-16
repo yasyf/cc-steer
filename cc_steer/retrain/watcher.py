@@ -128,25 +128,12 @@ class WatcherRecipe:
         """Parse an override recipe; missing or extra keys crash, and every value is validated."""
         return cls(**json.loads(path.read_text()))
 
+    @classmethod
+    def default(cls) -> WatcherRecipe:
+        """Parse the packaged E8-winner recipe shipped in the wheel (``cc_steer/assets/watcher_recipe.json``)."""
+        from cc_steer.assets import WATCHER_RECIPE_PATH
 
-WATCHER_RECIPE = WatcherRecipe(
-    tinker_model="Qwen/Qwen3-8B",
-    mlx_id="mlx-community/Qwen3-8B-4bit",
-    rank=32,
-    learning_rate=1e-4,
-    batch_size=4,
-    epochs=2,
-    checkpoint_fracs=(0.25, 0.5, 0.75, 1.0),
-    max_tokens=4096,
-    render_version=2,
-    val_n=200,
-    oversample_corrective=3.0,
-    budget_fires_per_100=2.0,
-    spend_cap_usd=15.0,
-    parity_rows=20,
-    parity_tolerance=0.05,
-    seed=1729,
-)
+        return cls.from_json(WATCHER_RECIPE_PATH)
 
 
 def register_watcher_adapter(

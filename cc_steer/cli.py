@@ -917,7 +917,7 @@ def models_rollback(component: str) -> None:
     "--recipe",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Watcher only: a JSON recipe overriding the E8-winner training defaults.",
+    help="Watcher only: a JSON recipe overriding the packaged E8-winner training defaults.",
 )
 @click.option(
     "--register-adapter",
@@ -986,7 +986,7 @@ def retrain_(
     click.echo(
         watcher.retrain_watcher(
             force=force,
-            recipe=watcher.WatcherRecipe.from_json(recipe) if recipe is not None else watcher.WATCHER_RECIPE,
+            recipe=watcher.WatcherRecipe.from_json(recipe) if recipe is not None else watcher.WatcherRecipe.default(),
         )
     )
 

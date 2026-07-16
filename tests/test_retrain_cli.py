@@ -53,7 +53,7 @@ def test_watcher_dispatch_defaults_to_the_e8_recipe(runner: CliRunner, monkeypat
     monkeypatch.setattr(w, "retrain_watcher", fake)
     result = runner.invoke(main, ["retrain", "--component", "watcher"])
     assert result.exit_code == 0, result.output
-    assert seen == {"force": False, "recipe": w.WATCHER_RECIPE}
+    assert seen == {"force": False, "recipe": w.WatcherRecipe.default()}
     assert "watcher: promoted v002-x" in result.output
 
 

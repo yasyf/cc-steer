@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -11,6 +13,8 @@ from cc_steer import registry
 from cc_steer.retrain.promotion import (
     PR_AUC_KEY,
     RECALL_KEY,
+    RETRAIN_LOG_LABEL,
+    RETRAIN_LOG_TITLE,
     GateResult,
     Verdict,
     corrected_gate,
@@ -257,3 +261,27 @@ class TestJournal:
         lines = (tmp_path / "retrain" / "journal.jsonl").read_text().splitlines()
         assert len(lines) == 2
         assert json.loads(lines[1])["metrics"] == {}
+
+    def test_mirrors_line_to_cc_notes_retrain_log(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+        responses = {
+            ("log", "list"): json.dumps([{"id": "rid", "title": RETRAIN_LOG_TITLE}]),
+            ("log", "append"): "",
+        }
+
+        def fake(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            key = tuple(argv[1:3])
+            return subprocess.CompletedProcess(
+                argv, returncode=0 if key in responses else 1, stdout=responses.get(key, ""), stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake)
+        line = journal("watcher", "promoted v009", dataset_digest="d9", state_dir=tmp_path)
+        assert line == "watcher: promoted v009"
+        listed = next(argv for argv in calls if argv[1:3] == ["log", "list"])
+        assert listed[listed.index("--label") + 1] == RETRAIN_LOG_LABEL
+        append = next(argv for argv in calls if argv[1:3] == ["log", "append"])
+        assert append[3:] == ["rid", "--entry", "watcher: promoted v009"]
+        # journal() stays the sole writer: one JSONL line, the mirror adds no second write.
+        assert (tmp_path / "retrain" / "journal.jsonl").read_text().count("\n") == 1

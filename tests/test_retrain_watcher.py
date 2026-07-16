@@ -15,7 +15,7 @@ from cc_steer.retrain import data, evalset, promotion
 from cc_steer.retrain import tinker as tk
 from cc_steer.retrain import watcher as w
 from cc_steer.retrain.evalset import ProbsStoreError
-from cc_steer.retrain.watcher import WATCHER_RECIPE, ConversionDroppedError, WatcherRecipe, WatcherRetrainError
+from cc_steer.retrain.watcher import ConversionDroppedError, WatcherRecipe, WatcherRetrainError
 from cc_steer.watcher import drafter_mlx
 
 if TYPE_CHECKING:
@@ -52,18 +52,19 @@ def default_kwargs() -> dict[str, Any]:
 
 
 class TestWatcherRecipe:
-    def test_default_constant_exact_values(self) -> None:
-        assert WATCHER_RECIPE == WatcherRecipe(**default_kwargs())
-        assert WATCHER_RECIPE.checkpoint_fracs == (0.25, 0.5, 0.75, 1.0)
-        assert WATCHER_RECIPE.rank == 32
-        assert WATCHER_RECIPE.spend_cap_usd == 15.0
-        assert WATCHER_RECIPE.seed == 1729
+    def test_packaged_default_exact_values(self) -> None:
+        recipe = WatcherRecipe.default()
+        assert recipe == WatcherRecipe(**default_kwargs())
+        assert recipe.checkpoint_fracs == (0.25, 0.5, 0.75, 1.0)
+        assert recipe.rank == 32
+        assert recipe.spend_cap_usd == 15.0
+        assert recipe.seed == 1729
 
     def test_json_round_trip_coerces_fracs_to_tuple(self, tmp_path: Path) -> None:
         path = tmp_path / "recipe.json"
         path.write_text(json.dumps(default_kwargs()))
         recipe = WatcherRecipe.from_json(path)
-        assert recipe == WATCHER_RECIPE
+        assert recipe == WatcherRecipe(**default_kwargs())
         assert isinstance(recipe.checkpoint_fracs, tuple)
 
     def test_missing_key_crashes(self, tmp_path: Path) -> None:
@@ -232,7 +233,7 @@ class Lane:
     train_error: Exception | None = None
     kickstart_result: bool = True
 
-    def run(self, *, force: bool = True, recipe: WatcherRecipe = WATCHER_RECIPE) -> str:
+    def run(self, *, force: bool = True, recipe: WatcherRecipe = WatcherRecipe.default()) -> str:
         return w.retrain_watcher(
             force=force,
             recipe=recipe,
@@ -374,7 +375,7 @@ class TestRetrainWatcher:
         assert current is not None and current.version != lane.incumbent.version
         # FH1: thresholds["budget"] is the P(NO_STEER)-scale cut 1 - fire_score_cut (~0.01 here), not the 0.99 fire cut.
         expected_threshold = 1.0 - promotion.threshold_for_budget(
-            1.0 - CANDIDATE_WIN, fires_per_100=w.WATCHER_RECIPE.budget_fires_per_100, total_turns=len(lane.frame)
+            1.0 - CANDIDATE_WIN, fires_per_100=w.WatcherRecipe.default().budget_fires_per_100, total_turns=len(lane.frame)
         )
         assert current.metadata["thresholds"]["budget"] == pytest.approx(expected_threshold)
         assert current.metadata["thresholds"]["budget"] < 0.5  # p-scale, not the fire-score scale

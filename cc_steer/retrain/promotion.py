@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from cc_steer.journal import Journal
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -31,6 +33,8 @@ if TYPE_CHECKING:
 
 STATE_DIR: Path = Path.home() / ".cc-steer"
 JOURNAL_NAME = "journal.jsonl"
+RETRAIN_LOG_TITLE = "cc-steer retrain journal"
+RETRAIN_LOG_LABEL = "retrain"
 PR_AUC_KEY = "pr_auc"
 RECALL_KEY = "recall_at_2per100_viewratio_proxy"
 
@@ -240,7 +244,9 @@ def journal(
     """Append one retrain-journal line and return the ``<component>: <verdict>`` stdout line.
 
     The single writer for ``<state_dir>/retrain/journal.jsonl``; ``state_dir`` defaults
-    to ``~/.cc-steer``.
+    to ``~/.cc-steer``. The same line is mirrored to the ``cc-steer retrain journal``
+    cc-notes log in the current repo, degrading silently when cc-notes is missing or the
+    repo is uninitialized — the JSONL stays authoritative regardless.
     """
     path = (state_dir or STATE_DIR) / "retrain" / JOURNAL_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,4 +260,6 @@ def journal(
     }
     with path.open("a") as handle:
         handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    return f"{component}: {verdict}"
+    line = f"{component}: {verdict}"
+    Journal(Path.cwd(), title=RETRAIN_LOG_TITLE, label=RETRAIN_LOG_LABEL).append(line)
+    return line

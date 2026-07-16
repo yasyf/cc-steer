@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import subprocess
+from typing import TYPE_CHECKING, Any
 
 import cc_transcript.corrections
 import cc_transcript.discovery
@@ -17,6 +18,23 @@ if TYPE_CHECKING:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def hermetic_cc_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralize the cc-notes boundary so the retrain journal mirror never touches the real ledger.
+
+    Only ``cc-notes`` invocations are intercepted (degraded to a failing exit); every other
+    subprocess passes through. A test that asserts the mirror re-patches ``subprocess.run``.
+    """
+    real_run = subprocess.run
+
+    def guarded(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "cc-notes":
+            return subprocess.CompletedProcess(argv, returncode=1, stdout="", stderr="hermetic")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded)
 
 
 @pytest.hookimpl(wrapper=True)
