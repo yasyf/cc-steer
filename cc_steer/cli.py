@@ -165,7 +165,11 @@ async def rebuild_context(db: Path | None, dry_run: bool) -> None:
         + (" [dry run — nothing written]" if dry_run else "")
     )
     for drift in report.drifted:
-        click.echo(f"detector drift: {drift.old_dedup_key} -> {drift.new_dedup_key}", err=True)
+        click.echo(
+            f"detector drift: {drift.old_dedup_key} -> {drift.new_dedup_key}"
+            f"{' (ambiguous)' if drift.ambiguous else ''}",
+            err=True,
+        )
     for failure in report.parse_failures:
         click.echo(f"skipped unparseable copy {failure.path}: {failure.error}", err=True)
 

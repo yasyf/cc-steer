@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import fcntl
 import os
+from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from itertools import groupby
@@ -63,6 +64,7 @@ class DetectorDrift:
 
     old_dedup_key: DedupKey
     new_dedup_key: DedupKey
+    ambiguous: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,35 +148,15 @@ def rebuild_lock_path(database: Path | None) -> Path | None:
     return None if database is None or str(database) == ":memory:" else database.with_name(LOCK_FILENAME)
 
 
-def lock_holder_pid(lock: Path) -> int | None:
+def acquire_rebuild_lock(lock: Path) -> int:
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        pid = int(lock.read_text().strip())
-    except (OSError, ValueError):
-        return None
-    return pid if pid > 0 else None
-
-
-def process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def acquire_rebuild_lock(lock: Path, *, recover_stale: bool = True) -> int:
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        pid = lock_holder_pid(lock)
-        if pid is None or process_alive(pid) or not recover_stale:
-            holder = str(pid) if pid is not None else "unknown"
-            raise RuntimeError(f"context rebuild already running; lock held by pid {holder} at {lock}") from None
-        logging.getLogger(__name__).warning("recovering stale context rebuild lock from dead pid %s at %s", pid, lock)
-        lock.unlink()
-        return acquire_rebuild_lock(lock, recover_stale=False)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        holder = os.read(fd, 64).decode().strip() or "unknown"
+        os.close(fd)
+        raise RuntimeError(f"context rebuild already running; lock held by pid {holder} at {lock}") from None
+    os.ftruncate(fd, 0)
     os.write(fd, str(os.getpid()).encode())
     return fd
 
@@ -190,8 +172,10 @@ async def rebuild_lock(database: Path | None) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        os.close(fd)
-        lock.unlink()
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 async def parse_copy(
@@ -243,7 +227,9 @@ def quarantine_outcome(row: Row, dedup_key: DedupKey, reason: str) -> RebuildOut
     )
 
 
-def rebuild_outcome(row: Row, session: SessionCopies) -> RebuildOutcome:
+def rebuild_outcome(
+    row: Row, session: SessionCopies, *, ambiguous_event_uuid: bool
+) -> RebuildOutcome:
     dedup_key = DedupKey(str(row["dedup_key"]))
     if row["quarantined_reason"] not in (None, *REBUILD_QUARANTINE_REASONS):
         return UnchangedContext(dedup_key)
@@ -263,10 +249,24 @@ def rebuild_outcome(row: Row, session: SessionCopies) -> RebuildOutcome:
             for candidate in copy.candidates
             if str(candidate.ref.event_uuid) == str(row["event_uuid"])
         ]
-        return (
-            DetectorDrift(dedup_key, best_candidate(drifted).dedup_key)
-            if drifted
-            else quarantine_outcome(row, dedup_key, "anchor_not_found")
+        if not drifted:
+            return quarantine_outcome(row, dedup_key, "anchor_not_found")
+        best_score = max(
+            (before_content_length(candidate.window), mtime)
+            for mtime, candidate in drifted
+        )
+        return DetectorDrift(
+            dedup_key,
+            best_candidate(drifted).dedup_key,
+            ambiguous=ambiguous_event_uuid
+            or len(
+                {
+                    candidate.dedup_key
+                    for mtime, candidate in drifted
+                    if (before_content_length(candidate.window), mtime) == best_score
+                }
+            )
+            > 1,
         )
     window = best_candidate(matching).window
     if not has_substantive_content(messages(window.before)):
@@ -368,16 +368,12 @@ async def repair_gate_samples(
     store: FeedbackStore, parents: Mapping[str, GateSampleParent], *, dry_run: bool
 ) -> int:
     """Reconciles stored gate families with their active parents' effective contexts."""
-    rows = [row async for row in await store.store.conn.execute(GATE_SAMPLES_QUERY)]
-    repairs = gate_sample_repairs(parents, rows)
-    return (
-        repairs.total
-        if dry_run
-        else await store.reconcile_gate_samples(
-            updates=repairs.updates,
-            deletes=repairs.deletes,
-            inserts=repairs.inserts,
-        )
+    if dry_run:
+        rows = [row async for row in await store.store.conn.execute(GATE_SAMPLES_QUERY)]
+        return gate_sample_repairs(parents, rows).total
+    return await store.repair_gate_samples(
+        GATE_SAMPLES_QUERY,
+        lambda rows: gate_sample_repairs(parents, rows),
     )
 
 
@@ -392,6 +388,7 @@ async def execute_context_rebuild(
             key=lambda row: str(row["session_id"]),
         )
     }
+    event_uuid_counts = Counter(str(row["event_uuid"]) for row in rows)
     session_ids = tuple(rows_by_session)
     semaphore = asyncio.Semaphore(PARSE_CONCURRENCY)
     rebuilt = 0
@@ -405,7 +402,14 @@ async def execute_context_rebuild(
         )
         failures.extend(failure for copies in parsed.values() for failure in copies.failures)
         batch_resolved = [
-            (row, rebuild_outcome(row, parsed[session_id]))
+            (
+                row,
+                rebuild_outcome(
+                    row,
+                    parsed[session_id],
+                    ambiguous_event_uuid=event_uuid_counts[str(row["event_uuid"])] > 1,
+                ),
+            )
             for session_id in batch
             for row in rows_by_session[session_id]
         ]

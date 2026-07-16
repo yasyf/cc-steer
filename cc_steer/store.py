@@ -30,11 +30,13 @@ from cc_transcript.store import FileStateStore
 from cc_steer.rendering import has_substantive_content, messages
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
+    from aiosqlite import Row
     from cc_transcript.corrections import CorrectionLog
     from cc_transcript.mining import DedupKey, FeedbackCandidate
 
+    from cc_steer.context_rebuild import GateSampleRepairs
     from cc_steer.negatives import GateSample
     from cc_steer.refine import Refinement
 
@@ -591,25 +593,28 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             )
             return conn.total_changes - before
 
-    async def reconcile_gate_samples(
+    async def repair_gate_samples(
         self,
-        *,
-        updates: Sequence[tuple[str, str]],
-        deletes: Sequence[str],
-        inserts: Sequence[GateSample],
+        query: str,
+        planner: Callable[[Sequence[Row]], GateSampleRepairs],
     ) -> int:
-        """Applies one computed gate-family reconciliation transactionally."""
+        """Reads, plans, and applies one gate-family reconciliation transactionally."""
         created_at = now()
         async with self.store.transaction() as conn:
+            rows = [row async for row in await conn.execute(query)]
+            repairs = planner(rows)
             before = conn.total_changes
             await conn.executemany(
                 UPDATE_GATE_SAMPLE_WINDOW,
-                [(window_json, sample_key, window_json) for sample_key, window_json in updates],
+                [
+                    (window_json, sample_key, window_json)
+                    for sample_key, window_json in repairs.updates
+                ],
             )
-            await conn.executemany(DELETE_GATE_SAMPLE, [(sample_key,) for sample_key in deletes])
+            await conn.executemany(DELETE_GATE_SAMPLE, [(sample_key,) for sample_key in repairs.deletes])
             await conn.executemany(
                 INSERT_GATE_SAMPLE,
-                [gate_sample_row(sample, created_at) for sample in inserts],
+                [gate_sample_row(sample, created_at) for sample in repairs.inserts],
             )
             return conn.total_changes - before
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -488,7 +490,66 @@ async def test_rebuild_reports_detector_drift_without_changing_the_stored_row(
     assert after == before
 
 
-async def test_rebuild_heals_a_stale_gate_sample_when_feedback_is_already_current(
+async def test_rebuild_marks_shared_event_uuid_detector_drift_as_ambiguous(
+    store: FeedbackStore, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "ambiguous-shared-event-drift-session"
+    entries = plan_rejection_entries(session_id)
+    candidate = detected(entries, f"{session_id}-anchor")
+    old_a = replace(candidate, dedup_key=DedupKey("old-a"))
+    old_b = replace(candidate, dedup_key=DedupKey("old-b"))
+    new_a = replace(candidate, dedup_key=DedupKey("new-a"))
+    new_b = replace(candidate, dedup_key=DedupKey("new-b"))
+    await store.record_file_scan("/obsolete/.cc-pushback/shared-event.jsonl", 1.0, [old_a, old_b])
+    monkeypatch.setattr(context_rebuild, "detect", lambda _: [new_a, new_b])
+    write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
+    before = [
+        dict(row)
+        async for row in await store.store.conn.execute(
+            "SELECT * FROM feedback_events ORDER BY id"
+        )
+    ]
+
+    report = await rebuild_contexts(store, (projects_root,))
+    after = [
+        dict(row)
+        async for row in await store.store.conn.execute(
+            "SELECT * FROM feedback_events ORDER BY id"
+        )
+    ]
+
+    assert report == replace(
+        rebuild_report(found=2),
+        drifted=(
+            DetectorDrift(old_a.dedup_key, new_a.dedup_key, ambiguous=True),
+            DetectorDrift(old_b.dedup_key, new_a.dedup_key, ambiguous=True),
+        ),
+    )
+    assert after == before
+
+
+async def test_rebuild_marks_tied_fresh_detector_drift_as_ambiguous(
+    store: FeedbackStore, projects_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "ambiguous-fresh-tie-drift-session"
+    entries = plan_rejection_entries(session_id)
+    candidate = detected(entries, f"{session_id}-anchor")
+    old = replace(candidate, dedup_key=DedupKey("old-a"))
+    new_a = replace(candidate, dedup_key=DedupKey("new-a"))
+    new_b = replace(candidate, dedup_key=DedupKey("new-b"))
+    await store.record_file_scan("/obsolete/.cc-pushback/fresh-tie.jsonl", 1.0, [old])
+    monkeypatch.setattr(context_rebuild, "detect", lambda _: [new_a, new_b])
+    write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
+
+    report = await rebuild_contexts(store, (projects_root,))
+
+    assert report == replace(
+        rebuild_report(),
+        drifted=(DetectorDrift(old.dedup_key, new_a.dedup_key, ambiguous=True),),
+    )
+
+
+async def test_second_rebuild_heals_a_gate_sample_inserted_after_the_first_pass(
     store: FeedbackStore, projects_root: Path
 ) -> None:
     session_id = "gate-heal-session"
@@ -496,6 +557,8 @@ async def test_rebuild_heals_a_stale_gate_sample_when_feedback_is_already_curren
     candidate = detected(entries, f"{session_id}-anchor")
     await store.record_file_scan("/obsolete/.cc-pushback/heal.jsonl", 1.0, [candidate])
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
+
+    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report()
     await store.record_gate_samples(
         [
             gate_sample(
@@ -507,11 +570,10 @@ async def test_rebuild_heals_a_stale_gate_sample_when_feedback_is_already_curren
         ]
     )
 
-    report = await rebuild_contexts(store, (projects_root,))
-    assert report.rebuilt == 0
-    assert report.gate_repaired == 3
+    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(gate_repaired=3)
     samples = {str(sample["sample_key"]): sample for sample in await store.gate_samples()}
     assert str(samples[f"pos:{candidate.dedup_key}:0"]["window_json"]) == candidate.window.to_json()
+    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report()
 
 
 async def test_rebuild_isolates_a_corrupt_copy_and_reports_it(
@@ -611,28 +673,63 @@ async def test_rebuild_dry_run_reports_real_changes_without_writing(
     assert await rebuild_contexts(store, (projects_root,)) == dry_run
 
 
-async def test_rebuild_recovers_a_stale_lock_from_a_dead_process(
-    store: FeedbackStore, projects_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    dead_pid = 2**30
-    with pytest.raises(ProcessLookupError):
-        os.kill(dead_pid, 0)
+async def test_rebuild_refuses_a_lock_held_by_a_live_process(tmp_path: Path) -> None:
     lock = tmp_path / LOCK_FILENAME
-    lock.write_text(str(dead_pid))
+    with subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o644)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "os.ftruncate(fd, 0)\n"
+            "os.write(fd, str(os.getpid()).encode())\n"
+            "print(os.getpid(), flush=True)\n"
+            "sys.stdin.read()\n",
+            str(lock),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as holder:
+        assert holder.stdout is not None
+        pid = int(holder.stdout.readline())
+        with pytest.raises(RuntimeError, match=rf"pid {pid} at {lock}"):
+            context_rebuild.acquire_rebuild_lock(lock)
+        assert holder.stdin is not None
+        holder.stdin.close()
+        assert holder.wait(timeout=5) == 0
 
-    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(found=0)
-    assert not lock.exists()
-    assert f"dead pid {dead_pid}" in caplog.text
 
-
-async def test_rebuild_refuses_a_lock_held_by_a_live_process(
-    store: FeedbackStore, projects_root: Path, tmp_path: Path
-) -> None:
+async def test_rebuild_lock_is_released_after_context_exit(tmp_path: Path) -> None:
+    database = tmp_path / "feedback.db"
     lock = tmp_path / LOCK_FILENAME
-    lock.write_text(str(os.getpid()))
 
-    with pytest.raises(RuntimeError, match=rf"pid {os.getpid()} at {lock}"):
-        await rebuild_contexts(store, (projects_root,))
+    async with context_rebuild.rebuild_lock(database):
+        assert lock.read_text() == str(os.getpid())
+
+    assert lock.exists()
+    os.close(context_rebuild.acquire_rebuild_lock(lock))
+
+
+async def test_rebuild_lock_is_released_when_holder_exits_without_unlocking(tmp_path: Path) -> None:
+    lock = tmp_path / LOCK_FILENAME
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o644)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "os.ftruncate(fd, 0)\n"
+            "os.write(fd, str(os.getpid()).encode())\n",
+            str(lock),
+        ],
+        check=True,
+    )
+
+    os.close(context_rebuild.acquire_rebuild_lock(lock))
+    assert lock.read_text() == str(os.getpid())
 
 
 async def test_rebuild_skips_locking_for_an_in_memory_database(projects_root: Path) -> None:
