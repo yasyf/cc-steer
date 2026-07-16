@@ -110,12 +110,14 @@ class MlxDrafter:
         """First-token P(NO_STEER sentinel) at the answer position — the abstain score.
 
         Sub-argmax by design: greedy may pick NO_STEER while the fire signal
-        lives in this probability (the E2 diagnostic).
+        lives in this probability (the E2 diagnostic). The softmax normalizes in
+        float32: bf16 ``logsumexp`` rounding shifts mid-confidence scores by up to
+        ~0.03, enough to move a served decision off the value the score was fit at.
         """
         import mlx.core as mx
 
         prefix, sentinel = self._prefix_and_sentinel(context_tail)
-        logits = self.model(mx.array(prefix)[None])[0, -1]
+        logits = self.model(mx.array(prefix)[None])[0, -1].astype(mx.float32)
         logp = logits - mx.logsumexp(logits)
         return float(mx.exp(logp[sentinel]))
 
