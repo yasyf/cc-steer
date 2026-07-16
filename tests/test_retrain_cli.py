@@ -103,8 +103,8 @@ def test_watcher_dispatch_parses_recipe(runner: CliRunner, tmp_path: Path, monke
         "oversample_corrective": 2.0,
         "budget_fires_per_100": 3.0,
         "spend_cap_usd": 5.0,
-        "parity_rows": 8,
-        "parity_tolerance": 0.1,
+        "diagnostic_rows": 8,
+        "diagnostic_tolerance": 0.1,
         "seed": 7,
     }
     recipe_path = tmp_path / "recipe.json"

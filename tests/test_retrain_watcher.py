@@ -45,8 +45,8 @@ def default_kwargs() -> dict[str, Any]:
         "oversample_corrective": 3.0,
         "budget_fires_per_100": 2.0,
         "spend_cap_usd": 15.0,
-        "parity_rows": 20,
-        "parity_tolerance": 0.05,
+        "diagnostic_rows": 20,
+        "diagnostic_tolerance": 0.05,
         "seed": 1729,
     }
 
@@ -92,15 +92,15 @@ class TestWatcherRecipe:
             {"epochs": 0},
             {"max_tokens": 0},
             {"val_n": 0},
-            {"parity_rows": 0},
+            {"diagnostic_rows": 0},
             {"oversample_corrective": 0.5},
             {"oversample_corrective": float("nan")},
             {"oversample_corrective": float("inf")},
             {"budget_fires_per_100": 0.0},
             {"budget_fires_per_100": -2.0},
             {"budget_fires_per_100": float("nan")},
-            {"parity_tolerance": 0.0},
-            {"parity_tolerance": 1.0},
+            {"diagnostic_tolerance": 0.0},
+            {"diagnostic_tolerance": 1.0},
             {"checkpoint_fracs": [0.0, 1.0]},
             {"checkpoint_fracs": [0.5, 1.5]},
             {"render_version": 1},
@@ -120,15 +120,15 @@ class TestWatcherRecipe:
             "epochs-0",
             "max-tokens-0",
             "val-n-0",
-            "parity-rows-0",
+            "diagnostic-rows-0",
             "oversample-lt-1",
             "oversample-nan",
             "oversample-inf",
             "budget-0",
             "budget-negative",
             "budget-nan",
-            "parity-tol-0",
-            "parity-tol-ge-1",
+            "diagnostic-tol-0",
+            "diagnostic-tol-ge-1",
             "frac-0",
             "frac-gt-1",
             "render-1",
@@ -225,9 +225,17 @@ class Lane:
     frame: evalset.EvalFrame
     incumbent: registry.VersionInfo
     calls: dict[str, int] = field(
-        default_factory=lambda: {"train": 0, "download": 0, "convert": 0, "score_frame": 0, "kickstart": 0}
+        default_factory=lambda: {
+            "train": 0,
+            "download": 0,
+            "convert": 0,
+            "score_rows": 0,
+            "score_local": 0,
+            "kickstart": 0,
+        }
     )
     candidate: np.ndarray = field(default_factory=lambda: CANDIDATE_WIN.copy())
+    tinker: np.ndarray | None = None
     drafter_offset: float = 0.0
     convert_dropped: list[str] = field(default_factory=list)
     train_error: Exception | None = None
@@ -291,9 +299,10 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
     def fake_score_auc(svc: Any, path: str, valid_rows: Any, mlx_id: str) -> dict[str, float]:
         return {"auc": 0.7 + int(path.rsplit("/", 1)[1]) * 0.01}
 
-    def fake_score_frame(svc: Any, path: str, frame_arg: evalset.EvalFrame, *, base: Any) -> dict[str, float]:
-        obj.calls["score_frame"] += 1
-        return {rid: float(obj.candidate[i]) for i, rid in enumerate(frame_arg.ids)}
+    def fake_score_rows(svc: Any, path: str, rows: Any, *, base: Any) -> dict[str, float]:
+        obj.calls["score_rows"] += 1
+        reference = obj.tinker if obj.tinker is not None else obj.candidate
+        return {row_id: float(reference[tail_index[tail]]) for row_id, tail in rows}
 
     def fake_download(svc: Any, path: str, out: Path) -> Path:
         obj.calls["download"] += 1
@@ -312,9 +321,13 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
             self, version: Any = None, *, threshold: Any = None, root: Any = None, operating_point: str = "budget"
         ) -> None:
             self.version = version
+            obj.calls["score_local"] += 1
 
         def nosteer_prob(self, tail: str) -> float:
             return float(obj.candidate[tail_index[tail]]) + obj.drafter_offset
+
+        def clear_cache(self) -> None:
+            pass
 
     def fake_kickstart() -> bool:
         obj.calls["kickstart"] += 1
@@ -323,12 +336,18 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
     monkeypatch.setattr(tk, "build_datum", fake_build_datum)
     monkeypatch.setattr(tk, "train_lora", fake_train_lora)
     monkeypatch.setattr(tk, "score_auc_tinker", fake_score_auc)
-    monkeypatch.setattr(tk, "score_frame_tinker", fake_score_frame)
+    monkeypatch.setattr(tk, "score_rows_tinker", fake_score_rows)
     monkeypatch.setattr(tk, "download_adapter", fake_download)
     monkeypatch.setattr(tk, "convert_peft_to_mlx", fake_convert)
     monkeypatch.setattr(drafter_mlx, "MlxDrafter", FakeDrafter)
     monkeypatch.setattr(launchd, "kickstart_watch", fake_kickstart)
     return obj
+
+
+def sidecar_path(lane: Lane) -> Path:
+    matches = sorted((lane.state_dir / "adapters").glob(f"watcher-*/{w.DIAGNOSTIC_NAME}"))
+    assert len(matches) == 1, f"expected exactly one serving diagnostic, got {matches}"
+    return matches[0]
 
 
 class TestRetrainWatcher:
@@ -343,7 +362,8 @@ class TestRetrainWatcher:
         registry.promote(w.WATCHER_COMPONENT, matched.version, root=lane.registry_root)
         verdict = lane.run(force=False)
         assert verdict == f"watcher: skipped (no new data at digest {digest})"
-        assert lane.calls["score_frame"] == 0
+        assert lane.calls["score_rows"] == 0
+        assert lane.calls["score_local"] == 0
 
     def test_promote_registers_prunes_writes_probs_and_kickstarts(
         self, lane: Lane, monkeypatch: pytest.MonkeyPatch
@@ -383,34 +403,71 @@ class TestRetrainWatcher:
         assert current.metadata["thresholds"]["budget"] < 0.5  # p-scale, not the fire-score scale
         assert current.metadata["render_version"] == 2
         assert "tinker_checkpoint" in current.metadata
-        assert "parity_max_abs_diff" in current.metadata
+        assert "diagnostic_max_abs_diff" in current.metadata
         remaining = [info.version for info in registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)]
         assert len(remaining) == w.KEEP_VERSIONS
         assert lane.incumbent.version not in remaining  # the oldest version was the one pruned
         assert evalset.probs_path(current.version, root=lane.eval_dir).exists()
 
-    def test_reject_at_gate_never_downloads_or_converts(self, lane: Lane) -> None:
-        lane.candidate = INCUMBENT.copy()  # equal AUC -> the watcher bar rejects
+    def test_reject_at_gate_after_convert_never_registers(self, lane: Lane) -> None:
+        # The gate scores through the converted artifact, so a reject pays one download + convert +
+        # local scoring pass + diagnostic, but never registers a new version or kicks the daemon.
+        lane.candidate = INCUMBENT.copy()  # served AUC ties the incumbent -> the watcher bar rejects
         verdict = lane.run()
         assert verdict.startswith("watcher: rejected")
-        assert lane.calls["download"] == 0
-        assert lane.calls["convert"] == 0
+        assert lane.calls["download"] == 1
+        assert lane.calls["convert"] == 1
+        assert lane.calls["score_local"] == 1
         assert lane.calls["kickstart"] == 0
-        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
-
-    def test_reject_at_parity_never_registers(self, lane: Lane) -> None:
-        lane.drafter_offset = 0.5  # serve diverges from Tinker far beyond tolerance
-        verdict = lane.run()
-        assert verdict.startswith("watcher: rejected (parity")
-        assert lane.calls["convert"] == 1  # convert ran, but no new version was registered
         assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_gate_reads_the_served_channel_not_tinker(self, lane: Lane) -> None:
+        # Served (local) probs tie the incumbent while Tinker would win outright: the gate follows
+        # what we serve and rejects, ignoring the stronger Tinker frame.
+        lane.candidate = INCUMBENT.copy()
+        lane.tinker = CANDIDATE_WIN.copy()
+        assert lane.run().startswith("watcher: rejected")
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_gate_promotes_on_served_win_even_when_tinker_ties(self, lane: Lane) -> None:
+        # The inverse: served wins while Tinker only ties the incumbent. The gate promotes on served.
+        lane.candidate = CANDIDATE_WIN.copy()
+        lane.tinker = INCUMBENT.copy()
+        assert lane.run().startswith("watcher: promoted")
+        current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
+        assert current is not None and current.version != lane.incumbent.version
+
+    def test_diagnostic_sidecar_records_drift_on_promote(self, lane: Lane) -> None:
+        lane.tinker = CANDIDATE_WIN.copy()
+        lane.tinker[0] += 0.2  # index 0 drifts 0.2 from served, index 1 drifts 0.1; both over the 0.05 tolerance
+        lane.tinker[1] += 0.1
+        verdict = lane.run()
+        assert verdict.startswith("watcher: promoted")
+        payload = json.loads(sidecar_path(lane).read_text())
+        assert len(payload["rows"]) == N
+        assert payload["rows"][0]["index"] == 0 and payload["rows"][0]["abs_diff"] == pytest.approx(0.2)
+        assert payload["rows"][1]["index"] == 1 and payload["rows"][1]["abs_diff"] == pytest.approx(0.1)
+        assert payload["summary"]["diagnostic_max_abs_diff"] == pytest.approx(0.2)
+        assert payload["summary"]["diagnostic_over_tolerance"] == 2.0
+        current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
+        assert current.metadata["diagnostic_over_tolerance"] == 2.0
+
+    def test_diagnostic_sidecar_persists_on_reject(self, lane: Lane) -> None:
+        # Per-row serving evidence survives a reject: the sidecar is written before the gate decides,
+        # closing the hole where write_probs (post-registration) discarded it on rejection.
+        lane.candidate = INCUMBENT.copy()
+        assert lane.run().startswith("watcher: rejected")
+        payload = json.loads(sidecar_path(lane).read_text())
+        assert len(payload["rows"]) == N
+        assert payload["summary"]["diagnostic_over_tolerance"] == 0.0  # served == tinker here, no drift
 
     def test_spend_cap_refusal_journaled_as_reject(self, lane: Lane) -> None:
         lane.train_error = tk.SpendCapError("projected cost $99.00 exceeds cap $15.00; not launching")
         verdict = lane.run()
         assert verdict.startswith("watcher: rejected (projected")
-        assert lane.calls["score_frame"] == 0
+        assert lane.calls["score_rows"] == 0
+        assert lane.calls["score_local"] == 0
         assert lane.calls["download"] == 0
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
 
@@ -433,7 +490,7 @@ class TestFreshEpoch:
         evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()  # no incumbent probs for this frame
         verdict = lane.run(fresh_epoch=True)
         assert verdict.startswith("watcher: fresh-epoch promoted")
-        assert "candidate AUC" in verdict and "no incumbent gate" in verdict
+        assert "served AUC" in verdict and "no incumbent gate" in verdict
         current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
         assert current is not None and current.version != lane.incumbent.version
         assert evalset.probs_path(current.version, root=lane.eval_dir).exists()
@@ -471,7 +528,8 @@ class TestFreshEpoch:
         with pytest.raises(FreshEpochError, match="one-shot") as excinfo:
             lane.run(fresh_epoch=True)
         assert str(evalset.probs_path(lane.incumbent.version, root=lane.eval_dir)) in str(excinfo.value)
-        assert lane.calls["score_frame"] == 0
+        assert lane.calls["score_rows"] == 0
+        assert lane.calls["score_local"] == 0
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
 
 

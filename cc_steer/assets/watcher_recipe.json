@@ -12,7 +12,7 @@
   "oversample_corrective": 3.0,
   "budget_fires_per_100": 2.0,
   "spend_cap_usd": 15.0,
-  "parity_rows": 20,
-  "parity_tolerance": 0.05,
+  "diagnostic_rows": 20,
+  "diagnostic_tolerance": 0.05,
   "seed": 1729
 }

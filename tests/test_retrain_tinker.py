@@ -22,7 +22,7 @@ from cc_steer.retrain.tinker import (
     convert_peft_to_mlx,
     download_adapter,
     score_auc_tinker,
-    score_frame_tinker,
+    score_rows_tinker,
     train_lora,
 )
 
@@ -324,13 +324,13 @@ class FakeArray:
         return FakeArray(f"{self.name}.T")
 
 
-class TestScoreFrameTinker:
+class TestScoreRowsTinker:
     def test_scores_every_row_via_compute_logprobs(
         self, fake_tinker: ModuleType, stub_tokenizer: None
     ) -> None:
         FakeServiceClient.instances = []
-        frame = SimpleNamespace(ids=("a", "b", "c"), tails=("tail a", "tail b", "tail c"))
-        probs = score_frame_tinker(FakeServiceClient(), "tinker://ckpt/step2", frame, base=QWEN3_8B)
+        rows = [("a", "tail a"), ("b", "tail b"), ("c", "tail c")]
+        probs = score_rows_tinker(FakeServiceClient(), "tinker://ckpt/step2", rows, base=QWEN3_8B)
         assert set(probs) == {"a", "b", "c"}
         assert probs == {"a": pytest.approx(0.3), "b": pytest.approx(0.3), "c": pytest.approx(0.3)}
 

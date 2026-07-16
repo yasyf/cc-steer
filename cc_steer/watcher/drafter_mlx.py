@@ -121,6 +121,17 @@ class MlxDrafter:
         logp = logits - mx.logsumexp(logits)
         return float(mx.exp(logp[sentinel]))
 
+    def clear_cache(self) -> None:
+        """Release MLX's buffer cache, bounding peak memory across a full-frame scoring sweep.
+
+        MLX pools freed buffers by size, so scoring hundreds of variable-length rows
+        back-to-back grows resident memory unboundedly (the E12 Jetsam kill). Calling
+        this per row caps the working set at a single forward pass.
+        """
+        import mlx.core as mx
+
+        mx.clear_cache()
+
     def draft_suppressed(self, context_tail: str, *, max_tokens: int = MAX_DRAFT_TOKENS) -> str:
         """Greedy draft with the NO_STEER sentinel token banned: the steer a fired moment gets."""
         from mlx_lm import generate

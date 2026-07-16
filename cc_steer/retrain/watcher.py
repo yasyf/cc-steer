@@ -1,19 +1,24 @@
-"""The watcher-component retrain lane: train a LoRA on Tinker, gate it, promote it locally.
+"""The watcher-component retrain lane: train a LoRA on Tinker, gate it on what we serve, promote it.
 
 The full weekly pass for the generative watcher. It trains the E8-winning recipe on the
-curated pool (:mod:`cc_steer.retrain.data`), scores checkpoints on a carved val, gates the
-best checkpoint against the incumbent on the frozen eval with the corrected paired gate
-(:func:`~cc_steer.retrain.promotion.corrected_gate`), converts the winner to a local mlx-lm
-adapter, spot-checks Tinker-vs-serve parity through the production
-:class:`~cc_steer.watcher.drafter_mlx.MlxDrafter`, and only then registers and promotes it —
-seeding next week's incumbent probabilities. Every outcome journals one line.
+curated pool (:mod:`cc_steer.retrain.data`), scores checkpoints on a carved val via Tinker,
+converts the best checkpoint to a local mlx-lm adapter, and scores the frozen eval frame
+*through that served artifact* — the 4-bit MLX base plus the converted adapter, the exact
+thing production loads. Every promotion metric (the fresh-epoch AUC floor, the corrected
+paired gate against the incumbent via :func:`~cc_steer.retrain.promotion.corrected_gate`, the
+served threshold) reads those local probs, so the gate describes the model we actually run —
+not the full-precision Tinker frame it trained against, whose 4-bit quantization shifts
+mid-confidence predictions. Every outcome journals one line.
 
-A reject costs nothing further: the gate runs before any download or convert, and parity
-runs before any register. The spend cap is a gate outcome, not a crash — a projected
-overspend journals a reject and returns without ever constructing a Tinker client.
-:class:`WatcherRecipe` validates every knob at parse so a degenerate value never reaches
-the network. Every ``tinker`` / ``mlx`` import is lazy, behind :mod:`cc_steer.retrain.tinker`
-and :mod:`cc_steer.watcher.drafter_mlx`.
+Tinker still trains and picks the best checkpoint by val AUC; a projected overspend journals
+a reject and returns without ever constructing a Tinker client. A gate reject pays one local
+download+convert — the served artifact the gate scores through — but never a register. A
+serving-drift diagnostic samples the frame Tinker-vs-served and persists per-row diffs beside
+the run's artifacts on every outcome (reject included), but never blocks: under
+eval-what-you-serve a conversion bug surfaces directly as a served AUC at chance, which the
+floor rejects. :class:`WatcherRecipe` validates every knob at parse so a degenerate value
+never reaches the network. Every ``tinker`` / ``mlx`` import is lazy, behind
+:mod:`cc_steer.retrain.tinker` and :mod:`cc_steer.watcher.drafter_mlx`.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ if TYPE_CHECKING:
 WATCHER_COMPONENT = drafter_mlx.COMPONENT
 KEEP_VERSIONS = 3
 ADAPTER_STAGE_DIR: Path = Path.home() / ".cc-steer" / "adapters" / "staging"
+DIAGNOSTIC_NAME = "serving_diagnostic.json"
 
 
 class WatcherRetrainError(RuntimeError):
@@ -82,8 +88,8 @@ class WatcherRecipe:
         oversample_corrective: The factor corrective positives are oversampled to.
         budget_fires_per_100: The alert budget the served threshold is fitted at.
         spend_cap_usd: The hard Tinker spend cap; a projected overspend never launches.
-        parity_rows: The label-stratified rows the Tinker-vs-serve parity check compares.
-        parity_tolerance: The max absolute nosteer-prob gap parity tolerates before rejecting.
+        diagnostic_rows: The label-stratified rows the serving-drift diagnostic samples Tinker-vs-served.
+        diagnostic_tolerance: The absolute nosteer-prob gap above which a diagnostic row counts as drifted (never blocks).
         seed: The seed threaded through every deterministic step.
     """
 
@@ -100,26 +106,26 @@ class WatcherRecipe:
     oversample_corrective: float
     budget_fires_per_100: float
     spend_cap_usd: float
-    parity_rows: int
-    parity_tolerance: float
+    diagnostic_rows: int
+    diagnostic_tolerance: float
     seed: int
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "checkpoint_fracs", tuple(self.checkpoint_fracs))
-        for name in ("rank", "batch_size", "epochs", "max_tokens", "render_version", "val_n", "parity_rows", "seed"):
+        for name in ("rank", "batch_size", "epochs", "max_tokens", "render_version", "val_n", "diagnostic_rows", "seed"):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} must be an int, got {getattr(self, name)!r}")
         for name in ("learning_rate", "spend_cap_usd", "budget_fires_per_100"):
             value = getattr(self, name)
             if not (math.isfinite(value) and value > 0.0):
                 raise ValueError(f"{name} must be finite and > 0, got {value}")
-        for name in ("rank", "batch_size", "epochs", "max_tokens", "val_n", "parity_rows"):
+        for name in ("rank", "batch_size", "epochs", "max_tokens", "val_n", "diagnostic_rows"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
         if not (math.isfinite(self.oversample_corrective) and self.oversample_corrective >= 1.0):
             raise ValueError(f"oversample_corrective must be finite and >= 1.0, got {self.oversample_corrective}")
-        if not 0.0 < self.parity_tolerance < 1.0:
-            raise ValueError(f"parity_tolerance must be in (0, 1), got {self.parity_tolerance}")
+        if not 0.0 < self.diagnostic_tolerance < 1.0:
+            raise ValueError(f"diagnostic_tolerance must be in (0, 1), got {self.diagnostic_tolerance}")
         if not self.checkpoint_fracs or any(not 0.0 < frac <= 1.0 for frac in self.checkpoint_fracs):
             raise ValueError(f"every checkpoint_frac must be in (0, 1], got {self.checkpoint_fracs}")
         if self.render_version != 2:
@@ -226,17 +232,17 @@ def retrain_watcher(
     """One watcher retrain pass; returns the journaled one-line verdict.
 
     Skips when the watcher train view is unchanged and not forced. Otherwise trains the
-    recipe, gates the best checkpoint against the incumbent, and on a pass converts,
-    parity-checks, registers, promotes, and seeds the new version's probs before kicking the
-    live watch agent. Every branch — skip, spend-cap reject, gate reject, parity reject,
-    promote — journals exactly once.
+    recipe, converts the best checkpoint to the local mlx-lm artifact, scores the frozen frame
+    through that served artifact, and gates on those served probs — on a pass registering,
+    promoting, and seeding the new version's served probs before kicking the live watch agent.
+    Every branch — skip, spend-cap reject, gate reject, promote — journals exactly once, and a
+    serving-drift diagnostic persists beside the run's artifacts regardless of the outcome.
 
     ``fresh_epoch`` is the one-shot clean-slate cutover: the incumbent-relative gate
     (:func:`~cc_steer.retrain.promotion.corrected_gate`) is skipped entirely — the candidate
-    promotes on the absolute checks the lane already runs (spend cap, mlx parity) plus a single
-    below-chance refusal (sentinel AUC must beat 0.5 on the clean frame). It first refuses via
-    :class:`FreshEpochError` if any registered version already carries probs for the current
-    frozen frame, so it can only run once per frame.
+    promotes on the served AUC floor alone (finite and above chance on the clean frame). It
+    first refuses via :class:`FreshEpochError` if any registered version already carries probs
+    for the current frozen frame, so it can only run once per frame.
     """
     incumbent = registry.current(WATCHER_COMPONENT, root=registry_root)
     digest = data.train_digest(dataset_dir=dataset_dir)
@@ -301,21 +307,27 @@ def retrain_watcher(
 
     svc = captured[0]
     best_step = max(scores, key=lambda step: scores[step])
-    candidate_probs = tk.score_frame_tinker(svc, run.checkpoints[best_step], frame, base=base)
-    candidate_arr = np.array([candidate_probs[row_id] for row_id in frame.ids], dtype=np.float64)
-    eval_auc = promotion.sentinel_auc(frame.labels, candidate_arr)
+    candidate_dir = _convert_best(svc, run.checkpoints[best_step], base, recipe, adapters_dir=adapters_dir)
+    served_probs = _score_frame_local(frame, candidate_dir, recipe)
+    served_arr = np.array([served_probs[row_id] for row_id in frame.ids], dtype=np.float64)
+    eval_auc = promotion.sentinel_auc(frame.labels, served_arr)
+    # Persist the Tinker-vs-served drift sample beside the artifacts before the gate, so the
+    # evidence survives a reject; it only observes drift and never blocks the decision.
+    diagnostic = _serving_diagnostic(
+        svc, run.checkpoints[best_step], frame, served_probs, base, recipe, candidate_dir.parent / DIAGNOSTIC_NAME
+    )
 
     if incumbent_gate is None:
         if not (np.isfinite(eval_auc) and eval_auc > 0.5):
             raise WatcherRetrainError(
-                f"fresh-epoch candidate scores sentinel AUC {eval_auc} on the clean frozen frame "
+                f"fresh-epoch candidate scores served sentinel AUC {eval_auc} on the clean frozen frame "
                 f"(digest {frame.digest}); it must be finite and above chance (> 0.5) to promote"
             )
         gate_stats: dict[str, float] = {}
-        reason = f"candidate AUC {eval_auc:.4f}, no incumbent gate"
+        reason = f"served AUC {eval_auc:.4f}, no incumbent gate"
     else:
         result = promotion.corrected_gate(
-            candidate_arr,
+            served_arr,
             incumbent_gate.probs,
             candidate="candidate",
             incumbent=incumbent_gate.version,
@@ -331,26 +343,15 @@ def retrain_watcher(
                 WATCHER_COMPONENT,
                 f"rejected ({gate_verdict.reason})",
                 dataset_digest=digest,
-                metrics=_gate_stats(result),
+                metrics=_gate_stats(result) | diagnostic,
                 state_dir=state_dir,
             )
         gate_stats = _gate_stats(result)
         reason = gate_verdict.reason
 
-    candidate_dir = _convert_best(svc, run.checkpoints[best_step], base, recipe, adapters_dir=adapters_dir)
-    parity = _parity_check(frame, candidate_probs, candidate_dir, recipe)
-    if parity > recipe.parity_tolerance:
-        return promotion.journal(
-            WATCHER_COMPONENT,
-            f"rejected (parity max abs diff {parity:.4f} > tolerance {recipe.parity_tolerance})",
-            dataset_digest=digest,
-            metrics=gate_stats | {"parity_max_abs_diff": parity},
-            state_dir=state_dir,
-        )
-
     # Store on the P(NO_STEER) scale (fire iff p < it); the cut is on 1 - p, so 1 - cut (lab ~0.15, run_e12.py:116).
     fire_score_cut = promotion.threshold_for_budget(
-        1.0 - candidate_arr,
+        1.0 - served_arr,
         fires_per_100=recipe.budget_fires_per_100,
         total_turns=len(frame),
     )
@@ -367,20 +368,19 @@ def retrain_watcher(
         "tinker_checkpoint": run.checkpoints[best_step],
         "tinker_val_auc": scores[best_step],
         "eval_auc": eval_auc,
-        "parity_max_abs_diff": parity,
         **gate_stats,
+        **diagnostic,
     }
     info = register_watcher_adapter(candidate_dir, metadata=metadata, root=registry_root)
     registry.prune(WATCHER_COMPONENT, keep=KEEP_VERSIONS, root=registry_root)
-    evalset.write_probs(frame, info.version, candidate_probs, auc=eval_auc, root=eval_root)
+    evalset.write_probs(frame, info.version, served_probs, auc=eval_auc, root=eval_root)
     kicked = launchd.kickstart_watch()
     prefix = "fresh-epoch " if fresh_epoch else ""
     return promotion.journal(
         WATCHER_COMPONENT,
         f"{prefix}promoted {info.version} ({reason}); watch kickstart {'ok' if kicked else 'skipped'}",
         dataset_digest=digest,
-        metrics=gate_stats
-        | {"parity_max_abs_diff": parity, "tinker_val_auc": scores[best_step], "threshold_budget": threshold},
+        metrics=gate_stats | diagnostic | {"tinker_val_auc": scores[best_step], "threshold_budget": threshold},
         version=info.version,
         state_dir=state_dir,
     )
@@ -446,9 +446,13 @@ def _convert_best(
     return candidate_dir
 
 
-def _parity_check(
-    frame: evalset.EvalFrame, candidate_probs: dict[str, float], candidate_dir: Path, recipe: WatcherRecipe
-) -> float:
+def _score_frame_local(frame: evalset.EvalFrame, candidate_dir: Path, recipe: WatcherRecipe) -> dict[str, float]:
+    """Per-row served ``P(NO_STEER)`` for every frame row, through the converted MLX artifact.
+
+    Loads the 4-bit base plus the candidate adapter — the production serving stack — and scores
+    one row at a time, releasing MLX's buffer cache each row so peak memory stays at a single
+    forward pass (the E12 Jetsam constraint on full-frame local scoring).
+    """
     version = registry.VersionInfo(
         component=WATCHER_COMPONENT,
         version="candidate",
@@ -456,12 +460,68 @@ def _parity_check(
         metadata={"base_model": recipe.mlx_id, "render_version": recipe.render_version, "thresholds": {"budget": 0.5}},
     )
     drafter = drafter_mlx.MlxDrafter(version=version, threshold=0.5)
-    diffs = [
-        abs(drafter.nosteer_prob(frame.tails[i]) - candidate_probs[frame.ids[i]])
-        for i in _stratified_indices(frame.labels, n=recipe.parity_rows, seed=recipe.seed)
-    ]
-    del drafter
-    return max(diffs)
+    try:
+        probs: dict[str, float] = {}
+        for row_id, tail in zip(frame.ids, frame.tails, strict=True):
+            probs[row_id] = drafter.nosteer_prob(tail)
+            drafter.clear_cache()
+        return probs
+    finally:
+        del drafter
+
+
+def _serving_diagnostic(
+    svc: tinker.ServiceClient,
+    tinker_path: str,
+    frame: evalset.EvalFrame,
+    served_probs: dict[str, float],
+    base: tk.BaseModel,
+    recipe: WatcherRecipe,
+    out_path: Path,
+) -> dict[str, float]:
+    """Sample the frame Tinker-vs-served, persist per-row drift to ``out_path``, return the summary.
+
+    Observability only — the summary rides the journal metrics and the sidecar holds the per-row
+    diffs, but nothing here gates promotion: under eval-what-you-serve a conversion bug is caught
+    by the served AUC floor, not a parity threshold.
+    """
+    idx = _stratified_indices(frame.labels, n=recipe.diagnostic_rows, seed=recipe.seed)
+    tinker_probs = tk.score_rows_tinker(svc, tinker_path, [(frame.ids[i], frame.tails[i]) for i in idx], base=base)
+    diffs = {i: abs(served_probs[frame.ids[i]] - tinker_probs[frame.ids[i]]) for i in idx}
+    summary = {
+        "diagnostic_rows": float(len(idx)),
+        "diagnostic_max_abs_diff": max(diffs.values()),
+        "diagnostic_median_abs_diff": float(np.median(list(diffs.values()))),
+        "diagnostic_over_tolerance": float(sum(diff > recipe.diagnostic_tolerance for diff in diffs.values())),
+    }
+    out_path.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "dataset_digest": frame.digest,
+                    "tinker_checkpoint": tinker_path,
+                    "diagnostic_tolerance": recipe.diagnostic_tolerance,
+                    "seed": recipe.seed,
+                },
+                "summary": summary,
+                "rows": [
+                    {
+                        "index": i,
+                        "row_id": frame.ids[i],
+                        "label": bool(frame.labels[i]),
+                        "served": served_probs[frame.ids[i]],
+                        "tinker": tinker_probs[frame.ids[i]],
+                        "abs_diff": diffs[i],
+                    }
+                    for i in idx
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return summary
 
 
 def _stratified_indices(labels: np.ndarray, *, n: int, seed: int) -> list[int]:

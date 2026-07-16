@@ -39,8 +39,6 @@ if TYPE_CHECKING:
     import tinker
     from transformers import SentencePieceBackend, TokenizersBackend
 
-    from cc_steer.retrain.evalset import EvalFrame
-
 TINKER_ENV: Path = Path.home() / ".cc-steer" / "tinker.env"
 SEED = 1729
 SPEND_CAP_USD = 60.0
@@ -391,25 +389,25 @@ def score_auc_tinker(
     return {"auc": auc, "n_val": len(labels), "n_pos": int(sum(labels))}
 
 
-def score_frame_tinker(
+def score_rows_tinker(
     service_client: tinker.ServiceClient,
     model_path: str,
-    frame: EvalFrame,
+    rows: Sequence[tuple[str, str]],
     *,
     base: BaseModel,
     system: str = DRAFT_SYSTEM,
 ) -> dict[str, float]:
-    """Per-row ``P(NO_STEER)`` for every eval-frame row via Tinker ``compute_logprobs``.
+    """Per-row ``P(NO_STEER)`` for the given ``(row_id, tail)`` rows via Tinker ``compute_logprobs``.
 
     Single-shot and fail-fast — no resume cache. Scores the checkpoint at ``model_path``
-    against the frame's render-v2 tails, returning ``{row_id: P(NO_STEER)}`` for
-    :func:`~cc_steer.retrain.evalset.write_probs`.
+    against each row's render-v2 tail, returning ``{row_id: P(NO_STEER)}`` for the
+    serving-drift diagnostic that samples the frame Tinker-vs-served.
     """
     import tinker
 
     sampler = service_client.create_sampling_client(model_path=model_path)
     probs: dict[str, float] = {}
-    for row_id, tail in zip(frame.ids, frame.tails, strict=True):
+    for row_id, tail in rows:
         prefix, sentinel = prefix_and_sentinel(system, tail, base.mlx_id)
         logprobs = sampler.compute_logprobs(prompt=tinker.ModelInput.from_ints([*prefix, int(sentinel)]))
         logprobs = logprobs.result() if hasattr(logprobs, "result") else logprobs
