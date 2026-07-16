@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -148,6 +149,27 @@ async def test_sample_negatives_marks_a_dropped_only_session(
 
     again = await sample_negatives(store, [tmp_path], seed=1, sessions=10, per_session=2, min_bytes=0)
     assert again.sessions_sampled == 0
+
+
+async def test_sample_negatives_marks_zero_turn_sessions_so_budget_advances(
+    store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions = {"a0000000-0000-0000-0000-000000000000", "b0000000-0000-0000-0000-000000000000"}
+    for session in sessions:
+        write_transcript(tmp_path / "proj" / f"{session}.jsonl", [user_text("x", sessionId=session, uuid=session)])
+    monkeypatch.setattr(
+        negatives.SessionActivity,
+        "from_events",
+        staticmethod(lambda session_id, events: SimpleNamespace(turns=())),
+    )
+    first = await sample_negatives(store, [tmp_path], seed=1, sessions=1, min_bytes=0)
+    # A zero-turn transcript produces no samples but is still marked, so a fixed
+    # sessions=1 budget advances to the other candidate instead of re-parsing it.
+    assert (first.sessions_sampled, first.inserted["random_negative"]) == (1, 0)
+    assert len(await store.negative_sessions()) == 1
+    second = await sample_negatives(store, [tmp_path], seed=1, sessions=1, min_bytes=0)
+    assert second.sessions_sampled == 1
+    assert await store.negative_sessions() == sessions
 
 
 async def test_sample_negatives_excludes_turns_near_detected_events(store: FeedbackStore, tmp_path: Path) -> None:

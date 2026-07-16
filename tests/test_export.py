@@ -528,6 +528,22 @@ def test_live_rows_reject_empty_rendered_prompts(render: object) -> None:
     assert (gate.value.view, gate.value.dedup_key) == ("gate", "live:7")
 
 
+def test_live_gate_row_rejects_role_marker_render_the_watcher_tolerates() -> None:
+    # <system>-shaped render: a valid user message for the watcher, empty for the gate.
+    reaction = {
+        "kind": "accepted",
+        "session_id": TRAIN_SESSION,
+        "feedback_dedup_key": None,
+        "steer": "run the linter",
+        "proposal_id": 7,
+        "window_render": "\n\n<system>\n",
+    }
+    assert live_watcher_row(reaction, {}) is not None
+    with pytest.raises(EmptyWatcherPrompt) as gate:
+        live_gate_row(reaction)
+    assert (gate.value.view, gate.value.dedup_key) == ("gate", "live:7")
+
+
 def trace_for(
     *,
     source_kind: str = "question_answer",

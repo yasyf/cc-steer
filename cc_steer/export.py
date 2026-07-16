@@ -662,13 +662,13 @@ def live_gate_row(reaction: Mapping[str, object]) -> GateRow | None:
     _, label, confidence = entry
     session_id = str(reaction["session_id"])
     render = str(reaction["window_render"] or "")
-    validated_prompt(
-        messages_from_render(render),
-        view="gate",
-        dedup_key=f"live:{reaction['proposal_id']}",
-        session_id=session_id,
-        source_kind=LIVE_SOURCE,
-    )
+    if not gate_text_is_substantive(render):
+        raise EmptyWatcherPrompt(
+            dedup_key=f"live:{reaction['proposal_id']}",
+            session_id=session_id,
+            source_kind=LIVE_SOURCE,
+            view="gate",
+        )
     return {
         "id": f"live:{reaction['proposal_id']}",
         "text": render,

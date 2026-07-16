@@ -447,9 +447,10 @@ async def prune_empty_gate_samples(store: FeedbackStore, *, dry_run: bool) -> Ga
 
     The empties are a pure function of the stored ``window_json`` — rewound-past-content
     positives, empty-anchor negatives, and role-marker-only payloads — so no transcript is
-    re-read. Idempotent: a second pass prunes zero. The store scans, classifies, and deletes
-    in one ``BEGIN IMMEDIATE`` transaction, so every reported count reflects exactly the rows
-    deleted even under a concurrent pipeline.
+    re-read. Idempotent: a second pass prunes zero. The scan and classification run over an
+    unlocked read (reported counts come from that snapshot); only the short delete takes the
+    write transaction, which asserts its ``changes()`` against the planned count so a mid-pass
+    table change is a loud retry, not a silent miscount.
 
     Args:
         store: The open feedback store to inspect and prune.

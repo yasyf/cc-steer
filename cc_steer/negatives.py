@@ -248,10 +248,10 @@ async def sample_negatives(
     async for parsed in TranscriptParser.stream_transcripts([(path, path.stat().st_mtime) for path in chosen]):
         session_id = SessionId(Path(parsed.path).stem)
         activity = SessionActivity.from_events(session_id, parsed.events)
+        marked.append(str(session_id))
         if not activity.turns:
             continue
         batch = random_samples(activity, anchors.get(str(session_id), []), per_session=per_session, seed=seed)
         inserted["random_negative"] += await store.record_gate_samples(batch)
-        marked.append(str(session_id))
     await store.mark_sessions_sampled(marked)
     return NegativesReport(inserted=inserted, sessions_sampled=len(marked))

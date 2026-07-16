@@ -641,18 +641,26 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         *,
         dry_run: bool,
     ) -> GatePruneClassification:
-        """Scans, classifies, and deletes empty gate samples in one transaction.
+        """Scans and classifies over an unlocked read, then deletes in a short transaction.
 
-        The live delete's read snapshot is its write snapshot, so the returned
-        classification's counts reflect exactly the rows removed even if the pipeline
-        writes concurrently. ``dry_run`` classifies over an unlocked read and deletes
-        nothing.
+        Classification renders every stored window, so it runs *outside* the write
+        transaction — holding ``BEGIN IMMEDIATE`` across that O(table) work would starve
+        the pipeline's 2s busy timeout. The reported counts therefore come from the scan
+        snapshot; the delete transaction asserts its own ``changes()`` against the planned
+        key count and raises on a mismatch, so a row added or removed between scan and
+        delete is a loud retry rather than a silent miscount. ``dry_run`` deletes nothing.
         """
+        classification = classify([row async for row in await self.store.conn.execute(query)])
         if dry_run:
-            return classify([row async for row in await self.store.conn.execute(query)])
+            return classification
         async with self.store.transaction() as conn:
-            classification = classify([row async for row in await conn.execute(query)])
+            before = conn.total_changes
             await conn.executemany(DELETE_GATE_SAMPLE, [(key,) for key in classification.empty_keys])
+            if (deleted := conn.total_changes - before) != len(classification.empty_keys):
+                raise RuntimeError(
+                    f"prune deleted {deleted} rows but planned {len(classification.empty_keys)}; the gate table "
+                    "changed between scan and delete — retry with the watch daemon unloaded"
+                )
             return classification
 
     async def gate_sample_family_mismatch_keys(self) -> set[str]:
