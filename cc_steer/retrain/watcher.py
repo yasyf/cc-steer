@@ -14,10 +14,12 @@ Tinker still trains and picks the best checkpoint by val AUC; a projected oversp
 a reject and returns without ever constructing a Tinker client. A gate reject pays one local
 download+convert — the served artifact the gate scores through — but never a register. A
 serving-drift diagnostic samples the frame Tinker-vs-served and persists per-row diffs beside
-the run's artifacts on every outcome (reject included), but never blocks: under
-eval-what-you-serve a conversion bug surfaces directly as a served AUC at chance, which the
-floor rejects. :class:`WatcherRecipe` validates every knob at parse so a degenerate value
-never reaches the network. Every ``tinker`` / ``mlx`` import is lazy, behind
+the run's artifacts for every outcome that reaches a converted candidate (reject included) —
+pre-artifact rejects like the spend cap produce none. It never blocks, not even on its own
+failure: it runs behind a boundary that records a mishap and leaves the gate outcome
+untouched, and under eval-what-you-serve a conversion bug surfaces directly as a served AUC at
+chance, which the floor rejects. :class:`WatcherRecipe` validates every knob at parse so a
+degenerate value never reaches the network. Every ``tinker`` / ``mlx`` import is lazy, behind
 :mod:`cc_steer.retrain.tinker` and :mod:`cc_steer.watcher.drafter_mlx`.
 """
 
@@ -236,7 +238,8 @@ def retrain_watcher(
     through that served artifact, and gates on those served probs — on a pass registering,
     promoting, and seeding the new version's served probs before kicking the live watch agent.
     Every branch — skip, spend-cap reject, gate reject, promote — journals exactly once, and a
-    serving-drift diagnostic persists beside the run's artifacts regardless of the outcome.
+    serving-drift diagnostic persists beside the artifacts for every candidate that converts,
+    behind a boundary that keeps its own failure off the gate outcome.
 
     ``fresh_epoch`` is the one-shot clean-slate cutover: the incumbent-relative gate
     (:func:`~cc_steer.retrain.promotion.corrected_gate`) is skipped entirely — the candidate
@@ -311,11 +314,12 @@ def retrain_watcher(
     served_probs = _score_frame_local(frame, candidate_dir, recipe)
     served_arr = np.array([served_probs[row_id] for row_id in frame.ids], dtype=np.float64)
     eval_auc = promotion.sentinel_auc(frame.labels, served_arr)
-    # Persist the Tinker-vs-served drift sample beside the artifacts before the gate, so the
-    # evidence survives a reject; it only observes drift and never blocks the decision.
-    diagnostic = _serving_diagnostic(
+    # Runs before the gate so per-row evidence survives a reject; the boundary keeps its own
+    # failure off the outcome.
+    diagnostic, diag_note = _safe_serving_diagnostic(
         svc, run.checkpoints[best_step], frame, served_probs, base, recipe, candidate_dir.parent / DIAGNOSTIC_NAME
     )
+    diag_suffix = f"; {diag_note}" if diag_note else ""
 
     if incumbent_gate is None:
         if not (np.isfinite(eval_auc) and eval_auc > 0.5):
@@ -341,7 +345,7 @@ def retrain_watcher(
         if not gate_verdict.promote:
             return promotion.journal(
                 WATCHER_COMPONENT,
-                f"rejected ({gate_verdict.reason})",
+                f"rejected ({gate_verdict.reason}){diag_suffix}",
                 dataset_digest=digest,
                 metrics=_gate_stats(result) | diagnostic,
                 state_dir=state_dir,
@@ -378,7 +382,7 @@ def retrain_watcher(
     prefix = "fresh-epoch " if fresh_epoch else ""
     return promotion.journal(
         WATCHER_COMPONENT,
-        f"{prefix}promoted {info.version} ({reason}); watch kickstart {'ok' if kicked else 'skipped'}",
+        f"{prefix}promoted {info.version} ({reason}); watch kickstart {'ok' if kicked else 'skipped'}{diag_suffix}",
         dataset_digest=digest,
         metrics=gate_stats | diagnostic | {"tinker_val_auc": scores[best_step], "threshold_budget": threshold},
         version=info.version,
@@ -483,7 +487,8 @@ def _serving_diagnostic(
 
     Observability only — the summary rides the journal metrics and the sidecar holds the per-row
     diffs, but nothing here gates promotion: under eval-what-you-serve a conversion bug is caught
-    by the served AUC floor, not a parity threshold.
+    by the served AUC floor, not a parity threshold. Raises on a Tinker or sidecar-write failure;
+    the lane calls it through :func:`_safe_serving_diagnostic`, which never lets it reach the gate.
     """
     idx = _stratified_indices(frame.labels, n=recipe.diagnostic_rows, seed=recipe.seed)
     tinker_probs = tk.score_rows_tinker(svc, tinker_path, [(frame.ids[i], frame.tails[i]) for i in idx], base=base)
@@ -522,6 +527,29 @@ def _serving_diagnostic(
         + "\n"
     )
     return summary
+
+
+def _safe_serving_diagnostic(
+    svc: tinker.ServiceClient,
+    tinker_path: str,
+    frame: evalset.EvalFrame,
+    served_probs: dict[str, float],
+    base: tk.BaseModel,
+    recipe: WatcherRecipe,
+    out_path: Path,
+) -> tuple[dict[str, float], str]:
+    """Run :func:`_serving_diagnostic` behind a tight boundary so it can never disturb the outcome.
+
+    Returns ``(summary, "")`` on success. On a Tinker/API failure or a sidecar-write ``OSError`` it
+    returns ``({"diagnostic_failed": 1.0}, "<reason>")`` — a journaled metric marker plus a verdict
+    sub-note — so a diagnostic mishap records itself and the promote/reject proceeds untouched.
+    """
+    import tinker
+
+    try:
+        return _serving_diagnostic(svc, tinker_path, frame, served_probs, base, recipe, out_path), ""
+    except (tinker.TinkerError, OSError, RuntimeError) as error:
+        return {"diagnostic_failed": 1.0}, f"serving diagnostic failed ({type(error).__name__}: {error})"
 
 
 def _stratified_indices(labels: np.ndarray, *, n: int, seed: int) -> list[int]:

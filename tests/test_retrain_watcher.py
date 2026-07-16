@@ -239,6 +239,7 @@ class Lane:
     drafter_offset: float = 0.0
     convert_dropped: list[str] = field(default_factory=list)
     train_error: Exception | None = None
+    diagnostic_error: Exception | None = None
     kickstart_result: bool = True
 
     def run(self, *, force: bool = True, fresh_epoch: bool = False, recipe: WatcherRecipe = WatcherRecipe.default()) -> str:
@@ -301,6 +302,8 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
 
     def fake_score_rows(svc: Any, path: str, rows: Any, *, base: Any) -> dict[str, float]:
         obj.calls["score_rows"] += 1
+        if obj.diagnostic_error is not None:
+            raise obj.diagnostic_error
         reference = obj.tinker if obj.tinker is not None else obj.candidate
         return {row_id: float(reference[tail_index[tail]]) for row_id, tail in rows}
 
@@ -461,6 +464,27 @@ class TestRetrainWatcher:
         payload = json.loads(sidecar_path(lane).read_text())
         assert len(payload["rows"]) == N
         assert payload["summary"]["diagnostic_over_tolerance"] == 0.0  # served == tinker here, no drift
+
+    def test_diagnostic_failure_leaves_promotion_untouched(self, lane: Lane) -> None:
+        # The diagnostic is observability, never a gate: a Tinker/API failure inside it must record
+        # itself and leave a clean promote alone, not crash it into an unjournaled outcome.
+        lane.diagnostic_error = RuntimeError("Tinker returned no log probability for the sentinel token")
+        verdict = lane.run()
+        assert verdict.startswith("watcher: promoted")
+        assert "serving diagnostic failed" in verdict  # the reason is recorded on the verdict
+        current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
+        assert current is not None and current.version != lane.incumbent.version
+        assert current.metadata["diagnostic_failed"] == 1.0
+        entry = json.loads((lane.state_dir / "retrain" / "journal.jsonl").read_text().splitlines()[-1])
+        assert entry["verdict"].startswith("promoted") and "serving diagnostic failed" in entry["verdict"]
+        assert entry["metrics"]["diagnostic_failed"] == 1.0
+
+    def test_score_frame_local_maps_each_row_to_its_served_prob(self, lane: Lane) -> None:
+        # Heterogeneous per-row values: a within-stratum permutation would change this mapping, so
+        # it guards the stored per-row probs that future paired incumbent comparisons read by row id.
+        lane.candidate = np.linspace(0.02, 0.97, N)
+        probs = w._score_frame_local(lane.frame, lane.state_dir, WatcherRecipe.default())
+        assert probs == pytest.approx({rid: float(lane.candidate[i]) for i, rid in enumerate(lane.frame.ids)})
 
     def test_spend_cap_refusal_journaled_as_reject(self, lane: Lane) -> None:
         lane.train_error = tk.SpendCapError("projected cost $99.00 exceeds cap $15.00; not launching")
