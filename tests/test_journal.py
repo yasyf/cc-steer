@@ -4,12 +4,12 @@ import json
 import subprocess
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from cc_steer.journal import Journal
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def fake_cc_notes(responses: dict[tuple[str, ...], str], calls: list[list[str]]) -> Any:
@@ -61,3 +61,22 @@ def test_append_degrades_on_uninitialized_repo(tmp_path: Path, monkeypatch: pyte
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_cc_notes({}, calls))
     assert Journal(tmp_path).append("entry") is False
+
+
+@pytest.mark.parametrize(
+    ("listed", "added", "expected"),
+    [
+        pytest.param("null", "null", False, id="both-null"),
+        pytest.param("[null]", '{"id": "x"}', True, id="list-of-null-then-add"),
+        pytest.param('{"unexpected": 1}', "[]", False, id="listed-dict-not-list"),
+        pytest.param('[{"title": "cc-steer pipeline runs"}]', '{"id": "y"}', True, id="match-without-id-then-add"),
+        pytest.param("[]", "[1, 2, 3]", False, id="added-non-dict"),
+    ],
+)
+def test_append_never_raises_on_unexpected_json_shapes(
+    listed: str, added: str, expected: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    responses = {("log", "list"): listed, ("log", "add"): added, ("log", "append"): ""}
+    monkeypatch.setattr(subprocess, "run", fake_cc_notes(responses, calls))
+    assert Journal(tmp_path).append("entry") is expected

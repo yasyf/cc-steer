@@ -22,7 +22,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
@@ -64,8 +64,9 @@ class ConversionDroppedError(RuntimeError):
 class WatcherRecipe:
     """Every knob of one watcher LoRA retrain, validated at parse so no degenerate value trains.
 
-    The in-code default is the E8-winner recipe. An override JSON must carry every field
-    (missing or extra keys crash) and clears the same validation bar.
+    The packaged default (``cc_steer/assets/watcher_recipe.json``, via :meth:`default`) is the
+    E8-winner recipe. An override JSON must carry every field (missing or extra keys crash) and
+    clears the same validation bar.
 
     Attributes:
         tinker_model: The Tinker base model id to train the LoRA over.
@@ -138,6 +139,12 @@ class WatcherRecipe:
         from cc_steer.assets import WATCHER_RECIPE_PATH
 
         return cls.from_json(WATCHER_RECIPE_PATH)
+
+
+class IncumbentGate(NamedTuple):
+    version: str
+    probs: np.ndarray
+    threshold: float
 
 
 def register_watcher_adapter(
@@ -237,16 +244,23 @@ def retrain_watcher(
         return promotion.journal(
             WATCHER_COMPONENT, f"skipped (no new data at digest {digest})", dataset_digest=digest, state_dir=state_dir
         )
-    if incumbent is None and not fresh_epoch:
-        raise WatcherRetrainError(
-            "no promoted watcher incumbent to gate against; register the base adapter first "
-            "(cc-steer retrain --component watcher --register-adapter <dir> --metadata-json <json>)"
-        )
-
     frame = evalset.EvalFrame.load(root=eval_root)
-    if fresh_epoch:
-        _refuse_scored_frame(frame, eval_root=eval_root, registry_root=registry_root)
     base = _base_for(recipe)
+    # Validate the incumbent gate / one-shot guard before any Tinker spend, so a bad probs file fails free.
+    if fresh_epoch:
+        _refuse_scored_frame(frame, eval_root=eval_root)
+        incumbent_gate = None
+    else:
+        if incumbent is None:
+            raise WatcherRetrainError(
+                "no promoted watcher incumbent to gate against; register the base adapter first "
+                "(cc-steer retrain --component watcher --register-adapter <dir> --metadata-json <json>)"
+            )
+        incumbent_gate = IncumbentGate(
+            incumbent.version,
+            _load_incumbent_probs(frame, incumbent, root=eval_root),
+            float(incumbent.metadata["thresholds"]["budget"]),
+        )
 
     rows = data.load_train_rows(dataset_dir=dataset_dir)
     rows = [rows[i] for i in data.near_dup_representatives(rows, seed=recipe.seed)[0]]
@@ -291,21 +305,21 @@ def retrain_watcher(
     candidate_arr = np.array([candidate_probs[row_id] for row_id in frame.ids], dtype=np.float64)
     eval_auc = promotion.sentinel_auc(frame.labels, candidate_arr)
 
-    if fresh_epoch:
-        if eval_auc <= 0.5:
+    if incumbent_gate is None:
+        if not (np.isfinite(eval_auc) and eval_auc > 0.5):
             raise WatcherRetrainError(
-                f"fresh-epoch candidate scores sentinel AUC {eval_auc:.4f} <= 0.5 (below chance) on the clean frozen "
-                f"frame (digest {frame.digest}); refusing to promote a degenerate model"
+                f"fresh-epoch candidate scores sentinel AUC {eval_auc} on the clean frozen frame "
+                f"(digest {frame.digest}); it must be finite and above chance (> 0.5) to promote"
             )
         gate_stats: dict[str, float] = {}
         reason = f"candidate AUC {eval_auc:.4f}, no incumbent gate"
     else:
         result = promotion.corrected_gate(
             candidate_arr,
-            _load_incumbent_probs(frame, incumbent, root=eval_root),
+            incumbent_gate.probs,
             candidate="candidate",
-            incumbent=incumbent.version,
-            incumbent_threshold=float(incumbent.metadata["thresholds"]["budget"]),
+            incumbent=incumbent_gate.version,
+            incumbent_threshold=incumbent_gate.threshold,
             labels=frame.labels,
             corrective=frame.corrective,
             prose=frame.prose,
@@ -381,25 +395,22 @@ def _base_for(recipe: WatcherRecipe) -> tk.BaseModel:
     return tk.QWEN3_8B
 
 
-def _refuse_scored_frame(frame: evalset.EvalFrame, *, eval_root: Path | None, registry_root: Path | None) -> None:
-    scored = {
-        info.version: evalset.probs_path(info.version, root=eval_root)
-        for info in registry.versions(WATCHER_COMPONENT, root=registry_root)
-        if _has_frame_probs(frame, info.version, root=eval_root)
-    }
+def _refuse_scored_frame(frame: evalset.EvalFrame, *, eval_root: Path | None) -> None:
+    # Scan the probs store directly, not registry versions: an orphan probs file from a pruned
+    # version still means the frame was scored, and the one-shot cutover must refuse on it too.
+    probs_dir = evalset.eval_root(eval_root) / evalset.PROBS_DIRNAME
+    scored = [path for path in sorted(probs_dir.glob("*.json")) if _stored_digest(path) == frame.digest]
     if scored:
         raise FreshEpochError(
-            f"--fresh-epoch is a one-shot clean-slate cutover, but {len(scored)} registered version(s) already carry "
-            f"probs for the current frozen frame (digest {frame.digest}); the cutover is over. "
-            f"Files: {[str(path) for path in scored.values()]}"
+            f"--fresh-epoch is a one-shot clean-slate cutover, but {len(scored)} probs file(s) already cover the "
+            f"current frozen frame (digest {frame.digest}); the cutover is over. Files: {[str(path) for path in scored]}"
         )
 
 
-def _has_frame_probs(frame: evalset.EvalFrame, version: str, *, root: Path | None) -> bool:
-    path = evalset.probs_path(version, root=root)
-    if not path.exists():
-        return False
-    return json.loads(path.read_text())["meta"]["dataset_digest"] == frame.digest
+def _stored_digest(path: Path) -> str | None:
+    payload = json.loads(path.read_text())
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    return meta.get("dataset_digest") if isinstance(meta, dict) else None
 
 
 def _load_incumbent_probs(

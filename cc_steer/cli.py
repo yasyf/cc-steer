@@ -1158,7 +1158,7 @@ def pipeline_install_launchd(
         )
     if not retrain:
         return
-    retrain_path = launchd.install_retrain(prefix, hour=retrain_hour)
+    retrain_path = launchd.install_retrain(prefix, journal_repo, hour=retrain_hour)
     click.echo(
         f"installed {launchd.RETRAIN_LABEL} ({retrain_path}): Sundays {retrain_hour:02d}:00, gate + watcher retrain"
     )

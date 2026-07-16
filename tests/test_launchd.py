@@ -39,7 +39,7 @@ def test_pipeline_command_survives_missing_uvx(monkeypatch: pytest.MonkeyPatch) 
 
 def test_render_retrain_produces_weekly_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
-    data = plistlib.loads(launchd.render_retrain("uvx cc-steer", hour=4))
+    data = plistlib.loads(launchd.render_retrain("uvx cc-steer", None, hour=4))
     assert data["Label"] == launchd.RETRAIN_LABEL
     assert data["StartCalendarInterval"] == {"Weekday": launchd.SUNDAY, "Hour": 4, "Minute": 0}
     assert data["ProgramArguments"][:2] == ["/bin/sh", "-lc"]
@@ -48,6 +48,14 @@ def test_render_retrain_produces_weekly_agent(monkeypatch: pytest.MonkeyPatch) -
     assert 'eval "$(ccp env)"' in command
     assert data["StandardOutPath"].endswith("retrain.log")
     assert data["StandardErrorPath"].endswith("retrain.log")
+    assert "WorkingDirectory" not in data  # no journal repo -> no cwd override, mirror no-ops
+
+
+def test_render_retrain_sets_journal_repo_as_working_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
+    data = plistlib.loads(launchd.render_retrain("uvx cc-steer", Path("/repo/cc-steer")))
+    # The repo is the agent's cwd so the retrain journal's cc-notes mirror resolves it.
+    assert data["WorkingDirectory"] == "/repo/cc-steer"
 
 
 def test_retrain_command_runs_both_lanes_and_aggregates_exit_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,7 +103,7 @@ def test_install_retrain_default_prefix_resolves_the_extra(monkeypatch: pytest.M
     monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
     captured: dict[str, bytes] = {}
     monkeypatch.setattr(launchd, "_install", lambda path, plist: captured.update(plist=plist) or path)
-    launchd.install_retrain("uvx cc-steer")
+    launchd.install_retrain("uvx cc-steer", None)
     command = plistlib.loads(captured["plist"])["ProgramArguments"][2]
     assert "--from 'cc-steer[retrain]'" in command
     assert "cc-steer retrain --component gate" in command
@@ -106,7 +114,7 @@ def test_install_retrain_custom_prefix_passes_through(monkeypatch: pytest.Monkey
     monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
     captured: dict[str, bytes] = {}
     monkeypatch.setattr(launchd, "_install", lambda path, plist: captured.update(plist=plist) or path)
-    launchd.install_retrain("uv run --project /repo cc-steer")
+    launchd.install_retrain("uv run --project /repo cc-steer", None)
     command = plistlib.loads(captured["plist"])["ProgramArguments"][2]
     assert "--from 'cc-steer[retrain]'" not in command
     assert "uv run --project /repo cc-steer retrain --component gate" in command

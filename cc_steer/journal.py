@@ -38,20 +38,29 @@ class Journal:
         if self._log_id is not None:
             return self._log_id
         if (listed := self._run("log", "list", "--json", "--label", self.label)) is not None:
-            try:
-                logs = json.loads(listed or "[]")
-            except json.JSONDecodeError:
-                logs = []
-            for log in logs:
-                if log.get("title") == self.title:
-                    self._log_id = str(log["id"])
+            for log in self._parse_logs(listed):
+                if log.get("title") == self.title and (log_id := log.get("id")) is not None:
+                    self._log_id = str(log_id)
                     return self._log_id
         if (added := self._run("log", "add", self.title, "--label", self.label, "--json")) is not None:
-            try:
-                self._log_id = str(json.loads(added)["id"])
-            except (json.JSONDecodeError, KeyError):
-                return None
+            self._log_id = self._parse_id(added)
         return self._log_id
+
+    @staticmethod
+    def _parse_logs(payload: str) -> list[dict[str, object]]:
+        try:
+            data = json.loads(payload or "[]")
+        except json.JSONDecodeError:
+            return []
+        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+    @staticmethod
+    def _parse_id(payload: str) -> str | None:
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return str(log_id) if isinstance(data, dict) and (log_id := data.get("id")) is not None else None
 
     def _run(self, *args: str) -> str | None:
         try:

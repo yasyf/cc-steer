@@ -225,7 +225,7 @@ class Lane:
     frame: evalset.EvalFrame
     incumbent: registry.VersionInfo
     calls: dict[str, int] = field(
-        default_factory=lambda: {"download": 0, "convert": 0, "score_frame": 0, "kickstart": 0}
+        default_factory=lambda: {"train": 0, "download": 0, "convert": 0, "score_frame": 0, "kickstart": 0}
     )
     candidate: np.ndarray = field(default_factory=lambda: CANDIDATE_WIN.copy())
     drafter_offset: float = 0.0
@@ -279,6 +279,7 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
     def fake_train_lora(
         datums: Any, base: Any, *, steps: int, checkpoint_fractions: Any, on_checkpoint: Any, **_: Any
     ) -> SimpleNamespace:
+        obj.calls["train"] += 1
         if obj.train_error is not None:
             raise obj.train_error
         svc = SimpleNamespace(name="svc")
@@ -420,10 +421,11 @@ class TestRetrainWatcher:
         assert excinfo.value.dropped == ["linear_attn.in_proj_qkv"]
         assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
 
-    def test_missing_incumbent_probs_fails_loud(self, lane: Lane) -> None:
+    def test_missing_incumbent_probs_fails_loud_before_training(self, lane: Lane) -> None:
         evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()
         with pytest.raises(WatcherRetrainError, match="--seed-incumbent-probs"):
             lane.run()
+        assert lane.calls["train"] == 0  # validate the incumbent gate before any Tinker spend
 
 
 class TestFreshEpoch:
@@ -441,9 +443,28 @@ class TestFreshEpoch:
         below_chance = np.full(N, 0.9)
         below_chance[10:] = 0.1  # negatives fire hardest -> sentinel AUC 0.0, below chance
         lane.candidate = below_chance
-        with pytest.raises(WatcherRetrainError, match="below chance"):
+        with pytest.raises(WatcherRetrainError, match="above chance"):
             lane.run(fresh_epoch=True)
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_refuses_non_finite_auc(self, lane: Lane, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A single-class frame makes sklearn return NaN; `nan <= 0.5` is False, so require finite explicitly.
+        evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()
+        monkeypatch.setattr(promotion, "sentinel_auc", lambda *_a, **_k: float("nan"))
+        with pytest.raises(WatcherRetrainError, match="finite"):
+            lane.run(fresh_epoch=True)
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_refuses_on_orphan_probs_from_pruned_version(self, lane: Lane) -> None:
+        evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()  # the registered incumbent's probs
+        # An orphan probs file from a pruned version still covers the current frame -> the cutover is over.
+        orphan = evalset.write_probs(
+            lane.frame, "pruned-v000", {rid: 0.5 for rid in lane.frame.ids}, auc=0.5, root=lane.eval_dir
+        )
+        with pytest.raises(FreshEpochError, match="one-shot") as excinfo:
+            lane.run(fresh_epoch=True)
+        assert str(orphan) in str(excinfo.value)
+        assert lane.calls["train"] == 0
 
     def test_refuses_when_frame_already_scored(self, lane: Lane) -> None:
         # The lane seeds incumbent probs for the current frame; the one-shot guard fires before training.

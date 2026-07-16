@@ -94,17 +94,22 @@ def render(prefix: str, journal_repo: Path | None, *, hour: int = 3) -> bytes:
     )
 
 
-def render_retrain(prefix: str, *, hour: int = 4) -> bytes:
-    """The plist for the weekly retrain agent: Sundays at ``hour``."""
-    return plistlib.dumps(
-        {
-            "Label": RETRAIN_LABEL,
-            "ProgramArguments": ["/bin/sh", "-lc", retrain_command(prefix)],
-            "StartCalendarInterval": {"Weekday": SUNDAY, "Hour": hour, "Minute": 0},
-            "StandardOutPath": str(LOG_DIR / "retrain.log"),
-            "StandardErrorPath": str(LOG_DIR / "retrain.log"),
-        }
-    )
+def render_retrain(prefix: str, journal_repo: Path | None, *, hour: int = 4) -> bytes:
+    """The plist for the weekly retrain agent: Sundays at ``hour``.
+
+    ``journal_repo`` becomes the agent's working directory so the retrain journal's cc-notes
+    mirror resolves that repo; without one the unattended agent has no cwd repo and it no-ops.
+    """
+    plist: dict[str, object] = {
+        "Label": RETRAIN_LABEL,
+        "ProgramArguments": ["/bin/sh", "-lc", retrain_command(prefix)],
+        "StartCalendarInterval": {"Weekday": SUNDAY, "Hour": hour, "Minute": 0},
+        "StandardOutPath": str(LOG_DIR / "retrain.log"),
+        "StandardErrorPath": str(LOG_DIR / "retrain.log"),
+    }
+    if journal_repo is not None:
+        plist["WorkingDirectory"] = str(journal_repo)
+    return plistlib.dumps(plist)
 
 
 def render_watch(prefix: str) -> bytes:
@@ -136,9 +141,9 @@ def retrain_prefix(prefix: str) -> str:
     return RETRAIN_EXTRA_PREFIX if prefix == DEFAULT_PREFIX else prefix
 
 
-def install_retrain(prefix: str, *, hour: int = 4) -> Path:
+def install_retrain(prefix: str, journal_repo: Path | None, *, hour: int = 4) -> Path:
     """Writes and (re)loads the weekly retrain agent; returns the plist path."""
-    return _install(retrain_agent_path(), render_retrain(retrain_prefix(prefix), hour=hour))
+    return _install(retrain_agent_path(), render_retrain(retrain_prefix(prefix), journal_repo, hour=hour))
 
 
 def watch_prefix(prefix: str) -> str:
