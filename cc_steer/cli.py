@@ -16,7 +16,7 @@ from cc_transcript import CLAUDE_PROJECTS_DIR
 from cc_steer import hooks as hook_wiring
 from cc_steer import launchd, registry
 from cc_steer.claude import claude_available
-from cc_steer.context_rebuild import rebuild_contexts, rebuild_lock
+from cc_steer.context_rebuild import prune_empty_gate_samples, rebuild_contexts, rebuild_lock
 from cc_steer.dashboard import build_app
 from cc_steer.evaluate import evaluate, flip_report
 from cc_steer.journal import Journal
@@ -172,6 +172,41 @@ async def rebuild_context(db: Path | None, dry_run: bool) -> None:
         )
     for failure in report.parse_failures:
         click.echo(f"skipped unparseable copy {failure.path}: {failure.error}", err=True)
+
+
+@main.command(name="prune-gate-samples")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@click.option("--dry-run", is_flag=True, help="Preview the full report without deleting anything.")
+@coro
+async def prune_gate_samples_(db: Path | None, dry_run: bool) -> None:
+    """Delete gate samples whose rendered text has no substantive content.
+
+    Rewound-past-content positives and empty-anchor negatives are a pure function
+    of the stored window — no transcript is re-read. Run with the watch daemon
+    unloaded; the pass is idempotent, so a second run prunes zero.
+    """
+    path = db or FeedbackStore.default_path()
+    async with rebuild_lock(path):
+        async with await FeedbackStore.open(path) as store:
+            report = await prune_empty_gate_samples(store, dry_run=dry_run)
+    click.echo(
+        f"scanned {report.scanned}, pruned {report.pruned}"
+        + (" [dry run — nothing written]" if dry_run else "")
+    )
+    click.echo("  pruned by kind: " + "  ".join(f"{kind} {count}" for kind, count in report.pruned_by_kind.items()))
+    click.echo(
+        "  pruned positive by offset: "
+        + "  ".join(f"{offset} {count}" for offset, count in report.pruned_positive_by_offset.items())
+    )
+    click.echo(
+        "  surviving positive by offset: "
+        + "  ".join(f"{offset} {count}" for offset, count in report.surviving_positive_by_offset.items())
+    )
 
 
 @main.command()

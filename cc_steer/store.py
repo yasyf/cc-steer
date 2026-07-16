@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 import aiosqlite
+from cc_transcript.context import ContextWindow
 from cc_transcript.ids import EventUuid, SessionId
 from cc_transcript.judge import VerdictStoreMixin
 from cc_transcript.judge.verdicts import EVENT_COLUMNS, hydratable
@@ -27,7 +28,7 @@ from cc_transcript.mining import Stats, event_row
 from cc_transcript.mining.store import now
 from cc_transcript.store import FileStateStore
 
-from cc_steer.rendering import has_substantive_content, messages
+from cc_steer.rendering import has_substantive_content, has_substantive_gate_content, messages
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -578,6 +579,11 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     async def record_gate_samples(self, samples: Sequence[GateSample]) -> int:
         """Records gate training samples idempotently, keyed by ``sample_key``.
 
+        The single insert choke point drops any sample whose window renders no
+        substantive gate content — a rewound-past-content positive or an
+        empty-anchor negative is not valid model input and never reaches the
+        table (mirrors accrual's empty-context quarantine at its own insert seam).
+
         Args:
             samples: The samples to persist; re-inserting an existing key is a no-op.
 
@@ -589,7 +595,11 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             before = conn.total_changes
             await conn.executemany(
                 INSERT_GATE_SAMPLE,
-                [gate_sample_row(sample, created_at) for sample in samples],
+                [
+                    gate_sample_row(sample, created_at)
+                    for sample in samples
+                    if has_substantive_gate_content(ContextWindow.from_json(sample.window_json))
+                ],
             )
             return conn.total_changes - before
 

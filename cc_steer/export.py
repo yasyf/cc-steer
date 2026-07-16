@@ -490,6 +490,13 @@ def gate_row(row: Row) -> GateRow | None:
         window = ContextWindow.from_json(str(row["window_json"]))
     except (ValueError, KeyError):
         return None
+    validated_prompt(
+        watcher_prompt(window),
+        view="gate",
+        dedup_key=str(row["sample_key"]),
+        session_id=str(row["session_id"]),
+        source_kind=str(row["source_kind"]),
+    )
     return {
         "id": str(row["sample_key"]),
         "text": gate_text(window),

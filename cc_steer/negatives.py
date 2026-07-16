@@ -28,7 +28,7 @@ from cc_transcript.context import ContextWindow
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import sample_windows
 
-from cc_steer.rendering import truncated
+from cc_steer.rendering import has_substantive_gate_content, truncated
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -98,8 +98,11 @@ def event_samples(rows: Sequence[Mapping[str, object]], *, offsets: int = W_MAX,
     """Builds positive windows and hard negatives from judged events' stored context.
 
     Steering events yield one row per rewind offset (0 through ``offsets - 1``,
-    stopping once nothing remains to rewind); rejected events yield one
-    offset-0 hard negative each.
+    stopping once nothing remains to rewind or the rewound window renders no
+    substantive gate content — a deeper rewind can only lose more, so it never
+    emits an empty positive); rejected events yield one offset-0 hard negative
+    each. The insert choke point (:meth:`FeedbackStore.record_gate_samples`) is
+    the backstop that drops any empty sample of any kind.
     """
     samples: list[GateSample] = []
     for row in rows:
@@ -116,7 +119,7 @@ def event_samples(rows: Sequence[Mapping[str, object]], *, offsets: int = W_MAX,
         }
         if bool(row["is_steering"]):
             for k in range(offsets):
-                if (rewound := truncated(window, k)) is None:
+                if (rewound := truncated(window, k)) is None or not has_substantive_gate_content(rewound):
                     break
                 samples.append(
                     GateSample(

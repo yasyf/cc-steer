@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 from cc_transcript.activity import SessionActivity
-from cc_transcript.context import ContextWindow
-from cc_transcript.ids import SessionId
+from cc_transcript.context import ContextWindow, TurnRef
+from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import DedupKey
 
 import cc_steer.context_rebuild as context_rebuild
@@ -23,6 +23,7 @@ from cc_steer.context_rebuild import (
     CopyCandidates,
     DetectorDrift,
     parse_copy,
+    prune_empty_gate_samples,
     rebuild_contexts,
 )
 from cc_steer.detectors import detect, plan_reviews
@@ -147,6 +148,28 @@ def gate_sample(
     )
 
 
+async def seed_gate_samples_raw(store: FeedbackStore, samples: list[GateSample]) -> None:
+    # Bypass record_gate_samples' substantive-content guard to stage legacy rows
+    # (empty rewinds / broken windows) the rebuild is expected to reconcile away.
+    for sample in samples:
+        await store.store.conn.execute(
+            "INSERT INTO gate_sample (sample_key, kind, dedup_key, session_id, anchor_uuid, occurred_at, "
+            "offset_turns, window_json, seed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                sample.sample_key,
+                sample.kind,
+                sample.dedup_key,
+                sample.session_id,
+                sample.anchor_uuid,
+                sample.occurred_at,
+                sample.offset_turns,
+                sample.window_json,
+                sample.seed,
+                "2026-01-01T00:00:00",
+            ),
+        )
+
+
 async def test_rebuild_recovers_context_and_second_run_is_a_noop(
     store: FeedbackStore, projects_root: Path, tmp_path: Path
 ) -> None:
@@ -201,17 +224,19 @@ async def test_rebuild_repairs_existing_gate_sample_windows(
     )
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
 
-    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(rebuilt=1, gate_repaired=4)
+    # current.window's deepest rewind is the bare leading assistant turn, so the
+    # regenerated family is {pos:0, pos:1} — the empty offset is never created.
+    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(rebuilt=1, gate_repaired=3)
     samples = await store.gate_samples()
     assert {str(sample["sample_key"]) for sample in samples} == {
         f"hard:{candidate.dedup_key}",
-        *(f"pos:{candidate.dedup_key}:{offset}" for offset in range(3)),
+        *(f"pos:{candidate.dedup_key}:{offset}" for offset in range(2)),
     }
     by_key = {str(sample["sample_key"]): str(sample["window_json"]) for sample in samples}
     assert by_key[f"hard:{candidate.dedup_key}"] == current.window.to_json()
     assert all(
         by_key[f"pos:{candidate.dedup_key}:{offset}"] == truncated(current.window, offset).to_json()
-        for offset in range(3)
+        for offset in range(2)
     )
 
 
@@ -226,7 +251,10 @@ async def test_rebuild_shortens_an_existing_positive_gate_family(
     assert candidate.dedup_key == shortened.dedup_key
     assert sum(truncated(shortened.window, offset) is not None for offset in range(6)) == 2
     await store.record_file_scan("/obsolete/.cc-pushback/shorten.jsonl", 1.0, [candidate])
-    await store.record_gate_samples(
+    # The deepest rewind renders empty (leading zero-length assistant turn), so it is
+    # staged raw as a legacy row; the rebuild deletes it, shortening the family.
+    await seed_gate_samples_raw(
+        store,
         [
             gate_sample(
                 candidate,
@@ -237,7 +265,7 @@ async def test_rebuild_shortens_an_existing_positive_gate_family(
             )
             for offset in range(3)
             if (rewound := truncated(candidate.window, offset)) is not None
-        ]
+        ],
     )
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", shortened_entries)
 
@@ -262,11 +290,12 @@ async def test_rebuild_lengthens_an_existing_positive_gate_family(
     )
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
 
-    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(rebuilt=1, gate_repaired=3)
+    # The rebuilt window supports offsets 0 and 1; its deepest rewind is empty and
+    # is never generated, so the family lengthens to {pos:0, pos:1}, not {0, 1, 2}.
+    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(rebuilt=1, gate_repaired=2)
     assert {str(sample["sample_key"]) for sample in await store.gate_samples()} == {
         f"pos:{candidate.dedup_key}:0",
         f"pos:{candidate.dedup_key}:1",
-        f"pos:{candidate.dedup_key}:2",
     }
 
 
@@ -586,7 +615,8 @@ async def test_second_rebuild_heals_a_gate_sample_inserted_after_the_first_pass(
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
 
     assert await rebuild_contexts(store, (projects_root,)) == rebuild_report()
-    await store.record_gate_samples(
+    await seed_gate_samples_raw(
+        store,
         [
             gate_sample(
                 candidate,
@@ -594,11 +624,14 @@ async def test_second_rebuild_heals_a_gate_sample_inserted_after_the_first_pass(
                 "positive_window",
                 window_json=replace(candidate.window, before=()).to_json(),
             )
-        ]
+        ],
     )
 
-    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(gate_repaired=3)
+    # Healing regenerates only the substantive rewinds — the empty deepest offset is
+    # never re-created, so the family lands at {0, 1} with the offset-0 window fixed.
+    assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(gate_repaired=2)
     samples = {str(sample["sample_key"]): sample for sample in await store.gate_samples()}
+    assert set(samples) == {f"pos:{candidate.dedup_key}:0", f"pos:{candidate.dedup_key}:1"}
     assert str(samples[f"pos:{candidate.dedup_key}:0"]["window_json"]) == candidate.window.to_json()
     assert await rebuild_contexts(store, (projects_root,)) == rebuild_report()
 
@@ -694,7 +727,7 @@ async def test_rebuild_dry_run_reports_real_changes_without_writing(
         quarantined=1,
         rows_at_start=2,
         rows_at_end=2,
-        gate_repaired=3,
+        gate_repaired=2,
     )
     assert await snapshot() == before
     assert await rebuild_contexts(store, (projects_root,)) == dry_run
@@ -762,3 +795,57 @@ async def test_rebuild_lock_is_released_when_holder_exits_without_unlocking(tmp_
 async def test_rebuild_skips_locking_for_an_in_memory_database(projects_root: Path) -> None:
     async with await FeedbackStore.open(Path(":memory:")) as memory_store:
         assert await rebuild_contexts(memory_store, (projects_root,)) == rebuild_report(found=0)
+
+
+async def insert_gate_sample(
+    store: FeedbackStore,
+    sample_key: str,
+    kind: str,
+    offset_turns: int,
+    before: tuple[TurnRef, ...],
+    *,
+    trigger: TurnRef | None = None,
+) -> None:
+    window = ContextWindow(
+        anchor=EventRef(SessionId(SESSION), EventUuid("u1")),
+        before=before,
+        trigger=trigger,
+        after=(),
+        fidelity="full",
+        preview_chars=200,
+    )
+    await store.store.conn.execute(
+        "INSERT INTO gate_sample (sample_key, kind, dedup_key, session_id, anchor_uuid, occurred_at, "
+        "offset_turns, window_json, seed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (sample_key, kind, None, SESSION, "u1", None, offset_turns, window.to_json(), 0, "2026-01-01T00:00:00"),
+    )
+
+
+async def seed_empty_and_substantive_gate_samples(store: FeedbackStore) -> None:
+    content = (TurnRef(role="assistant", refs=(), preview="ran the tests", tool_digests=()),)
+    empty = (TurnRef(role="assistant", refs=(), preview="", tool_digests=()),)
+    steer = TurnRef(role="user", refs=(), preview="no, do it differently", tool_digests=())
+    await insert_gate_sample(store, "pos:p1:0", "positive_window", 0, content, trigger=steer)
+    await insert_gate_sample(store, "pos:p1:1", "positive_window", -1, empty, trigger=steer)
+    await insert_gate_sample(store, "pos:p1:2", "positive_window", -2, empty, trigger=steer)
+    await insert_gate_sample(store, "rand:r1", "random_negative", 0, empty)
+    await insert_gate_sample(store, "hard:h1", "hard_negative", 0, content, trigger=steer)
+
+
+async def test_prune_dry_run_reports_the_empties_without_deleting(store: FeedbackStore) -> None:
+    await seed_empty_and_substantive_gate_samples(store)
+    report = await prune_empty_gate_samples(store, dry_run=True)
+    assert (report.scanned, report.pruned) == (5, 3)
+    assert report.pruned_by_kind == {"positive_window": 2, "random_negative": 1}
+    assert report.pruned_positive_by_offset == {-2: 1, -1: 1}
+    assert report.surviving_positive_by_offset == {0: 1}
+    assert len(await store.gate_samples()) == 5
+
+
+async def test_prune_deletes_the_empties_and_is_idempotent(store: FeedbackStore) -> None:
+    await seed_empty_and_substantive_gate_samples(store)
+    first = await prune_empty_gate_samples(store, dry_run=False)
+    assert first.pruned == 3
+    assert {str(row["sample_key"]) for row in await store.gate_samples()} == {"pos:p1:0", "hard:h1"}
+    second = await prune_empty_gate_samples(store, dry_run=False)
+    assert (second.scanned, second.pruned) == (2, 0)

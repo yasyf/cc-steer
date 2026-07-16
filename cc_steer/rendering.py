@@ -199,6 +199,18 @@ def gate_text(window: ContextWindow) -> str:
     return "\n\n".join(f"<{message['role']}>\n{message['content']}" for message in watcher_prompt(window))
 
 
+def has_substantive_gate_content(window: ContextWindow) -> bool:
+    """Whether :func:`gate_text` for ``window`` carries content beneath its role markup.
+
+    The single window-level predicate the sampler's insert choke point and the
+    export invariant share, equivalent by construction to stripping the role
+    blocks off :func:`gate_text` and checking for a non-empty remainder: a
+    rewound-past-content positive or an empty-anchor negative renders to bare
+    ``<assistant>\\n`` and is not a valid gate sample.
+    """
+    return has_substantive_content(watcher_prompt(window))
+
+
 def tail_messages(prompt: Sequence[Message], cap: int = DRAFT_CHAR_CAP) -> list[Message]:
     """The most recent whole messages fitting in ``cap`` chars of content.
 

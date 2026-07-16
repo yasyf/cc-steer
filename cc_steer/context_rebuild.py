@@ -20,7 +20,7 @@ from cc_transcript.parser import parse_events_async
 
 from cc_steer.detectors import detect
 from cc_steer.negatives import W_MAX, GateSample, truncated
-from cc_steer.rendering import has_substantive_content, messages
+from cc_steer.rendering import has_substantive_content, has_substantive_gate_content, messages
 from cc_steer.store import REBUILD_QUARANTINE_REASONS
 from cc_steer.watcher.live import scrub_events
 
@@ -43,6 +43,7 @@ FROM gate_sample
 WHERE dedup_key IS NOT NULL AND kind IN ('positive_window', 'hard_negative')
 ORDER BY dedup_key, id
 """
+PRUNE_GATE_QUERY = "SELECT sample_key, kind, offset_turns, window_json FROM gate_sample ORDER BY id"
 ROWS_COUNT_QUERY = "SELECT COUNT(*) AS n FROM feedback_events"
 SESSION_BATCH_SIZE = 20
 PARSE_CONCURRENCY = 8
@@ -80,6 +81,27 @@ class ContextRebuildReport:
     family_mismatches: int = 0
     drifted: tuple[DetectorDrift, ...] = ()
     parse_failures: tuple[CopyParseFailure, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GatePruneReport:
+    """Counts from one idempotent empty-gate-sample prune pass.
+
+    Attributes:
+        scanned: Every gate sample considered.
+        pruned: Samples deleted because their gate text has no substantive content.
+        pruned_by_kind: Deleted counts keyed by sample kind.
+        pruned_positive_by_offset: Deleted ``positive_window`` counts keyed by
+            rewind offset — the over-rewound tail this pass trims.
+        surviving_positive_by_offset: Kept ``positive_window`` counts keyed by
+            rewind offset — the rewind distribution left standing.
+    """
+
+    scanned: int
+    pruned: int
+    pruned_by_kind: Mapping[str, int]
+    pruned_positive_by_offset: Mapping[int, int]
+    surviving_positive_by_offset: Mapping[int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,7 +353,7 @@ def positive_gate_samples(parent: GateSampleParent, seed: int) -> tuple[GateSamp
             seed=seed,
         )
         for offset in range(W_MAX)
-        if (rewound := truncated(window, offset)) is not None
+        if (rewound := truncated(window, offset)) is not None and has_substantive_gate_content(rewound)
     )
 
 
@@ -377,6 +399,59 @@ async def repair_gate_samples(
         GATE_SAMPLES_QUERY,
         lambda rows: gate_sample_repairs(parents, rows),
     )
+
+
+def empty_gate_sample_keys(rows: Sequence[Row]) -> tuple[str, ...]:
+    return tuple(
+        str(row["sample_key"])
+        for row in rows
+        if not has_substantive_gate_content(ContextWindow.from_json(str(row["window_json"])))
+    )
+
+
+def gate_prune_repairs(rows: Sequence[Row]) -> GateSampleRepairs:
+    return GateSampleRepairs((), empty_gate_sample_keys(rows), ())
+
+
+async def prune_empty_gate_samples(store: FeedbackStore, *, dry_run: bool) -> GatePruneReport:
+    """Deletes every gate sample whose rendered gate text has no substantive content.
+
+    The empties are a pure function of the stored ``window_json`` — rewound-past-content
+    positives and empty-anchor negatives — so no transcript is re-read. Idempotent: a
+    second pass prunes zero. The delete recomputes empties inside its own transaction
+    (read snapshot is write snapshot); running with the watch daemon unloaded keeps that
+    snapshot equal to the report's, which the planned-vs-deleted check enforces.
+
+    Args:
+        store: The open feedback store to inspect and prune.
+        dry_run: Compute the full report without deleting anything.
+
+    Returns:
+        The prune counts and the positive-rewind distribution before and after.
+    """
+    rows = [row async for row in await store.store.conn.execute(PRUNE_GATE_QUERY)]
+    empty = set(empty_gate_sample_keys(rows))
+    positive = [row for row in rows if str(row["kind"]) == "positive_window"]
+    report = GatePruneReport(
+        scanned=len(rows),
+        pruned=len(empty),
+        pruned_by_kind=dict(Counter(str(row["kind"]) for row in rows if str(row["sample_key"]) in empty)),
+        pruned_positive_by_offset=dict(
+            sorted(Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) in empty).items())
+        ),
+        surviving_positive_by_offset=dict(
+            sorted(Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) not in empty).items())
+        ),
+    )
+    if dry_run:
+        return report
+    deleted = await store.repair_gate_samples(PRUNE_GATE_QUERY, gate_prune_repairs)
+    if deleted != report.pruned:
+        raise RuntimeError(
+            f"prune deleted {deleted} rows but planned {report.pruned}; the gate table changed mid-pass — "
+            "run with the watch daemon unloaded"
+        )
+    return report
 
 
 async def execute_context_rebuild(

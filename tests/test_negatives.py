@@ -4,7 +4,8 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from cc_transcript.context import ContextWindow
+from cc_transcript.context import ContextWindow, TurnRef
+from cc_transcript.ids import EventRef, EventUuid, SessionId
 
 from cc_steer.negatives import event_samples, sample_negatives
 from tests.builders import assistant_text, user_text, write_transcript
@@ -40,6 +41,29 @@ def test_event_samples_rewinds_positives_until_nothing_remains() -> None:
     assert [turn.preview for turn in window.before] == ["please fix the bug", "I rewrote the module"]
     rewound = ContextWindow.from_json(samples[1].window_json)
     assert [turn.preview for turn in rewound.before] == ["please fix the bug"]
+
+
+def leading_empty_window(session: str, uuid: str) -> str:
+    # A zero-length leading assistant turn, content only in the trailing user turn.
+    return ContextWindow(
+        anchor=EventRef(SessionId(session), EventUuid(uuid)),
+        before=(
+            TurnRef(role="assistant", refs=(), preview="", tool_digests=()),
+            TurnRef(role="user", refs=(), preview="drop the vendored copy", tool_digests=()),
+        ),
+        trigger=TurnRef(role="user", refs=(), preview="no, do it differently", tool_digests=()),
+        after=(),
+        fidelity="full",
+        preview_chars=200,
+    ).to_json()
+
+
+def test_event_samples_stops_rewinding_before_the_window_goes_empty() -> None:
+    row = event_row("k-empty", steering=True) | {"context_json": leading_empty_window(TRAIN_SESSION, "u-empty")}
+    samples = event_samples([row], offsets=6)
+    # Offset -1 rewinds to the bare leading assistant turn, so rewinding stops at 0.
+    assert [sample.offset_turns for sample in samples] == [0]
+    assert samples[0].sample_key == "pos:k-empty:0"
 
 
 def test_event_samples_emits_one_hard_negative_per_rejected_event() -> None:

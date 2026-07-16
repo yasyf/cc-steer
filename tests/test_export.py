@@ -18,6 +18,7 @@ from cc_steer.export import (
     dpo_row,
     evidence_entry,
     export,
+    gate_row,
     kto_row,
     live_gate_row,
     live_watcher_row,
@@ -642,3 +643,30 @@ class TestWatcherV2:
         assert row is not None
         assert (row["source_kind"], row["session_id"]) == ("", TRAIN_SESSION)
         assert row["label"] is False
+
+
+def gate_input(
+    sample_key: str, *, before: tuple[TurnRef, ...], trigger: TurnRef | None = None, kind: str = "positive_window"
+) -> dict[str, object]:
+    return {
+        "sample_key": sample_key,
+        "kind": kind,
+        "offset_turns": 0,
+        "category": "",
+        "source_kind": "transcript_message",
+        "session_id": TRAIN_SESSION,
+        "window_json": window(TRAIN_SESSION, "u9", before=before, trigger=trigger),
+    }
+
+
+def test_gate_row_emits_a_substantive_window() -> None:
+    row = gate_row(gate_input("s1", before=(turn("user", "add a test"), turn("assistant", "added it"))))
+    assert row is not None
+    assert (row["id"], row["label"]) == ("s1", True)
+    assert "added it" in row["text"]
+
+
+def test_gate_row_raises_on_a_window_with_no_substantive_content() -> None:
+    with pytest.raises(EmptyWatcherPrompt) as raised:
+        gate_row(gate_input("s2", before=(turn("assistant", ""),), trigger=turn("user", "no, do it differently")))
+    assert (raised.value.view, raised.value.dedup_key, raised.value.session_id) == ("gate", "s2", TRAIN_SESSION)

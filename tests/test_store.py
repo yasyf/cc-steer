@@ -5,13 +5,15 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
+from cc_transcript.context import ContextWindow, TurnRef
 from cc_transcript.corrections import Correction, CorrectionLog
-from cc_transcript.ids import EventUuid, SessionId
+from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import FEEDBACK_DDL as BASE_FEEDBACK_DDL
 from cc_transcript.mining import DedupKey
 from cc_transcript.store import FileStateStore
 
 from cc_steer.detectors import detect
+from cc_steer.negatives import GateSample
 from cc_steer.refine import RefinedPair, Refinement
 from cc_steer.rendering import has_substantive_content, messages
 from cc_steer.store import ACCRUED_EMPTY_REASON, FEEDBACK_DDL, TRIAGE_DDL, FeedbackStore
@@ -623,3 +625,35 @@ async def test_triage_stats_counts_by_category(store: FeedbackStore) -> None:
 async def test_dedup_keys_returns_every_event_key(store: FeedbackStore) -> None:
     keys = await seeded_keys(store)
     assert await store.dedup_keys() == set(keys)
+
+
+def gate_sample(sample_key: str, *, before: tuple[TurnRef, ...]) -> GateSample:
+    window = ContextWindow(
+        anchor=EventRef(SessionId("sess-0"), EventUuid("u1")),
+        before=before,
+        trigger=None,
+        after=(),
+        fidelity="full",
+        preview_chars=200,
+    )
+    return GateSample(
+        sample_key=sample_key,
+        kind="random_negative",
+        dedup_key=None,
+        session_id="sess-0",
+        anchor_uuid="u1",
+        occurred_at=None,
+        offset_turns=0,
+        window_json=window.to_json(),
+        seed=0,
+    )
+
+
+async def test_record_gate_samples_drops_windows_with_no_substantive_content(store: FeedbackStore) -> None:
+    content = TurnRef(role="assistant", refs=(), preview="ran the tests", tool_digests=())
+    empty = TurnRef(role="assistant", refs=(), preview="", tool_digests=())
+    inserted = await store.record_gate_samples(
+        [gate_sample("substantive", before=(content,)), gate_sample("empty", before=(empty,))]
+    )
+    assert inserted == 1
+    assert {str(row["sample_key"]) for row in await store.gate_samples()} == {"substantive"}
