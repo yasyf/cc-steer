@@ -20,6 +20,7 @@ so a caller can score mid-run.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     import tinker
-    from transformers import PreTrainedTokenizerBase
+    from transformers import SentencePieceBackend, TokenizersBackend
 
     from cc_steer.retrain.evalset import EvalFrame
 
@@ -59,7 +60,7 @@ STD_MODULES = (
 )
 
 PEFT_KEY = re.compile(r"base_model\.model\.(model\.layers\.\d+\.(.+?))\.lora_([AB])\.weight")
-TOKENIZERS: dict[str, PreTrainedTokenizerBase] = {}
+TOKENIZERS: dict[str, TokenizersBackend | SentencePieceBackend] = {}
 
 
 class SpendCapError(RuntimeError):
@@ -165,12 +166,14 @@ def load_key(*, path: Path | None = None) -> None:
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def tokenizer(mlx_id: str) -> PreTrainedTokenizerBase:
+def tokenizer(mlx_id: str) -> TokenizersBackend | SentencePieceBackend:
     """The local chat tokenizer for ``mlx_id`` (same vocab as Tinker's server), cached per id."""
     from transformers import AutoTokenizer
 
     if mlx_id not in TOKENIZERS:
-        TOKENIZERS[mlx_id] = AutoTokenizer.from_pretrained(mlx_id)
+        if (tok := AutoTokenizer.from_pretrained(mlx_id)) is None:
+            raise RuntimeError(f"AutoTokenizer returned None for {mlx_id}")
+        TOKENIZERS[mlx_id] = tok
     return TOKENIZERS[mlx_id]
 
 
@@ -376,7 +379,9 @@ def score_auc_tinker(
         prefix, sentinel = prefix_and_sentinel(row["system"], row["user"], mlx_id)
         logprobs = sampler.compute_logprobs(prompt=tinker.ModelInput.from_ints([*prefix, int(sentinel)]))
         logprobs = logprobs.result() if hasattr(logprobs, "result") else logprobs
-        probs.append(float(np.exp(logprobs[-1])))
+        if (logprob := logprobs[-1]) is None:
+            raise RuntimeError("Tinker returned no log probability for the sentinel token")
+        probs.append(math.exp(logprob))
         labels.append(row["assistant"].strip() != NO_STEER)
     if not np.isfinite(auc := float(roc_auc_score(labels, [1.0 - p for p in probs]))):
         raise NonFiniteAUCError(
@@ -408,7 +413,9 @@ def score_frame_tinker(
         prefix, sentinel = prefix_and_sentinel(system, tail, base.mlx_id)
         logprobs = sampler.compute_logprobs(prompt=tinker.ModelInput.from_ints([*prefix, int(sentinel)]))
         logprobs = logprobs.result() if hasattr(logprobs, "result") else logprobs
-        probs[row_id] = float(np.exp(logprobs[-1]))
+        if (logprob := logprobs[-1]) is None:
+            raise RuntimeError("Tinker returned no log probability for the sentinel token")
+        probs[row_id] = math.exp(logprob)
     return probs
 
 
