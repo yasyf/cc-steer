@@ -1,1 +1,1 @@
-{"v":1,"lamport":1,"ops":[{"kind":"create_log","nonce":"d531bceea83a80d588b7182e9a833f79","title":"cc-steer retrain journal","tags":["retrain"],"anchors":[]}]}
+{"v":1,"lamport":2,"ops":[{"kind":"append_entry","text":"gate: fresh-epoch promoted v002-20260716-b76e7342c983 (no incumbent) — pr_auc=0.9007 ece=0.3840 recall@2/100=0.0252 threshold=0.9985"}]}
