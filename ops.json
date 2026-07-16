@@ -1,1 +1,1 @@
-{"v":1,"lamport":2,"ops":[{"kind":"verify_note","witness":[{"anchor":{"kind":"commit","value":"ca5b90406d8b1c92b958aacc1e0f9594424708c7"},"oid":"ca5b90406d8b1c92b958aacc1e0f9594424708c7"},{"anchor":{"kind":"dir","value":"cc_steer/retrain"},"oid":"908935bd3c130eba4dbf917c38337fa14214ce8a"}],"verified_commit":"3a0b56e26f9ca08dcdd6359b88113da555a9bd03"}]}
+{"v":1,"lamport":3,"ops":[{"kind":"add_superseded_by","id":"b947728e953e686084b3e750704890b00d3c0f76"}]}
