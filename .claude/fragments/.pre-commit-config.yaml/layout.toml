@@ -1,4 +1,4 @@
-fragments = ["cc-skills:precommit-base"]
+fragments = ["cc-skills:precommit-base", "exclude-fixtures"]
 
 [sources.cc-skills]
 source = "github:yasyf/cc-skills@main"

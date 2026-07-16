@@ -1,0 +1,3 @@
+# Byte-exact prompt fixtures assert their trailing bytes (incl. no final
+# newline); hygiene hooks must not rewrite them.
+exclude: ^tests/fixtures/

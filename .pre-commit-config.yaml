@@ -22,3 +22,7 @@ repos:
         # (banners, social cards) to just under 1 MiB.
         args: [--maxkb=1024]
       - id: detect-private-key
+
+# Byte-exact prompt fixtures assert their trailing bytes (incl. no final
+# newline); hygiene hooks must not rewrite them.
+exclude: ^tests/fixtures/
