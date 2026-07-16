@@ -1,1 +1,1 @@
-{"v":1,"lamport":3,"ops":[{"kind":"append_entry","text":"watcher: rejected (parity max abs diff 0.2603 \u003e tolerance 0.05)"}]}
+{"v":1,"lamport":4,"ops":[{"kind":"append_entry","text":"watcher: rejected (candidate AUC 0.1500 \u003c= incumbent 0.1500); serving diagnostic failed (RuntimeError: reject diagnostic failed)"}]}
