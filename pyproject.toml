@@ -128,5 +128,5 @@ select = ["E", "F", "I", "UP"]
 
 [dependency-groups]
 docs = [
-    "great-docs>=0.14",
+    "great-docs>=0.15,<0.16",
 ]

@@ -375,7 +375,7 @@ requires-dist = [
 provides-extras = ["embed", "gate", "mlx", "retrain", "dev"]
 
 [package.metadata.requires-dev]
-docs = [{ name = "great-docs", specifier = ">=0.14" }]
+docs = [{ name = "great-docs", specifier = ">=0.15,<0.16" }]
 
 [[package]]
 name = "cc-transcript"
