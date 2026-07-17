@@ -73,6 +73,10 @@ class NonFiniteAUCError(RuntimeError):
     """A scored AUC is non-finite (a single-class validation set), so it cannot rank checkpoints."""
 
 
+class TinkerCallError(RuntimeError):
+    """A Tinker API call failed; raised in place of the SDK's own errors so callers never import ``tinker``."""
+
+
 @dataclass(frozen=True, slots=True)
 class BaseModel:
     """A trainable base: its Tinker id, local 4-bit MLX id, depth, and whether it serves locally.
@@ -405,12 +409,18 @@ def score_rows_tinker(
     """
     import tinker
 
-    sampler = service_client.create_sampling_client(model_path=model_path)
+    try:
+        sampler = service_client.create_sampling_client(model_path=model_path)
+    except tinker.TinkerError as error:
+        raise TinkerCallError(f"create_sampling_client failed for {model_path}") from error
     probs: dict[str, float] = {}
     for row_id, tail in rows:
         prefix, sentinel = prefix_and_sentinel(system, tail, base.mlx_id)
-        logprobs = sampler.compute_logprobs(prompt=tinker.ModelInput.from_ints([*prefix, int(sentinel)]))
-        logprobs = logprobs.result() if hasattr(logprobs, "result") else logprobs
+        try:
+            logprobs = sampler.compute_logprobs(prompt=tinker.ModelInput.from_ints([*prefix, int(sentinel)]))
+            logprobs = logprobs.result() if hasattr(logprobs, "result") else logprobs
+        except tinker.TinkerError as error:
+            raise TinkerCallError(f"compute_logprobs failed for row {row_id}") from error
         if (logprob := logprobs[-1]) is None:
             raise RuntimeError("Tinker returned no log probability for the sentinel token")
         probs[row_id] = math.exp(logprob)

@@ -540,15 +540,15 @@ def _safe_serving_diagnostic(
 ) -> tuple[dict[str, float], str]:
     """Run :func:`_serving_diagnostic` behind a tight boundary so it can never disturb the outcome.
 
-    Returns ``(summary, "")`` on success. On a Tinker/API failure or a sidecar-write ``OSError`` it
-    returns ``({"diagnostic_failed": 1.0}, "<reason>")`` — a journaled metric marker plus a verdict
-    sub-note — so a diagnostic mishap records itself and the promote/reject proceeds untouched.
+    Returns ``(summary, "")`` on success. On a Tinker/API failure (arriving as
+    :class:`~cc_steer.retrain.tinker.TinkerCallError`, so this module never imports ``tinker``) or a
+    sidecar-write ``OSError`` it returns ``({"diagnostic_failed": 1.0}, "<reason>")`` — a journaled
+    metric marker plus a verdict sub-note — so a diagnostic mishap records itself and the
+    promote/reject proceeds untouched.
     """
-    import tinker
-
     try:
         return _serving_diagnostic(svc, tinker_path, frame, served_probs, base, recipe, out_path), ""
-    except (tinker.TinkerError, OSError, RuntimeError) as error:
+    except (OSError, RuntimeError) as error:
         return {"diagnostic_failed": 1.0}, f"serving diagnostic failed ({type(error).__name__}: {error})"
 
 
