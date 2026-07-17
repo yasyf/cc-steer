@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-07-17
+## [0.15.0] - 2026-07-17
 
 ### Changed
 - **The watcher retrain now runs on `experiment-at-home` 0.6's pipelined Tinker
@@ -53,6 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `experiment-at-home[gate]>=0.6,<0.7`. `ConversionDroppedError` is deleted:
   athome's converter crashes before registration on any unfusable tensor, so
   the guarded state is unrepresentable.
+
+## [0.14.0] - 2026-07-17
+
+### Fixed
+- The serving-diagnostic wrapper no longer imports `tinker`, so the suite runs
+  without the `retrain` extra: SDK failures convert to `TinkerCallError` (a
+  `RuntimeError`) at the boundary where tinker is genuinely required, and the
+  wrapper catches `(OSError, RuntimeError)`. Superseded in 0.15.0, where the
+  module moved to `experiment-at-home` entirely.
+
+## [0.13.0] - 2026-07-16
+
+### Fixed
+- Live-path gate hardening from the 59d7e3fd review residuals: the gate render
+  is validated with the same substantive-text predicate the freeze path uses
+  (a role-marker-only render now raises `EmptyWatcherPrompt` instead of
+  freezing empty), prune classification moved outside the write transaction,
+  and zero-turn sessions are marked rather than re-scanned.
 
 ## [0.12.1] - 2026-07-14
 
