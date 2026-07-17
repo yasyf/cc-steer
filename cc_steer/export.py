@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
@@ -27,6 +28,7 @@ from huggingface_hub import HfApi
 
 from cc_steer.enrich import SOURCE
 from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
+from cc_steer.retrain.data import HF_PUSH_NAME
 from cc_steer.rendering import (
     NO_STEER,
     Message,
@@ -340,12 +342,27 @@ class ExportReport:
         out: The directory the per-config parquet files and dataset card landed in.
         pushed: Whether the configs were pushed to the HuggingFace repo.
         quarantined: Excluded live-reaction counts keyed by quarantine reason.
+        hf_revision: The final config push's HuggingFace commit SHA, or None without a push.
     """
 
     counts: Mapping[str, Mapping[str, int]]
     out: Path
     pushed: bool
     quarantined: Mapping[str, int] = field(default_factory=dict)
+    hf_revision: str | None = None
+
+
+def _write_hf_push(out: Path, *, repo_id: str, hf_revision: str) -> None:
+    path = out / HF_PUSH_NAME
+    pending = path.with_name(f"{path.name}.tmp")
+    pending.write_text(
+        json.dumps(
+            {"hf_revision": hf_revision, "repo_id": repo_id, "ts": datetime.now(UTC).isoformat()},
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    pending.replace(path)
 
 
 def evidence_entry(correction: Correction) -> Evidence:
@@ -919,13 +936,17 @@ async def export(
             noise_count=sum(not trace["is_steering"] for trace in traces),
         )
     )
+    hf_revision = None
     if push_to is not None:
-        for config, splits in built.items():
-            splits.push_to_hub(push_to, config_name=config, private=True)
+        hf_revision = [
+            splits.push_to_hub(push_to, config_name=config, private=True).oid for config, splits in built.items()
+        ][-1]
         HfApi().upload_file(path_or_fileobj=card, path_in_repo="README.md", repo_id=push_to, repo_type="dataset")
+        _write_hf_push(out, repo_id=push_to, hf_revision=hf_revision)
     return ExportReport(
         counts=counts,
         out=out,
         pushed=push_to is not None,
         quarantined={LIVE_EMPTY_WINDOW_REASON: len(labelled_reactions) - len(live_reactions)},
+        hf_revision=hf_revision,
     )

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 DATASET_DIR: Path = Path.home() / ".cc-steer" / "dataset"
+HF_PUSH_NAME = ".hf_push.json"
 DIGEST_CHARS = 16
 SEED = 1729
 VAL_N = 200
@@ -155,6 +156,16 @@ def load_train_rows(*, dataset_dir: Path | None = None) -> list[WatcherRow]:
 def train_digest(*, dataset_dir: Path | None = None) -> DatasetDigest:
     """The watcher train view's content digest — what :func:`~cc_steer.retrain.promotion.should_retrain` triggers on."""
     return dataset_digest(load_train_table(dataset_dir=dataset_dir).to_pylist())
+
+
+def hf_revision(*, dataset_dir: Path | None = None) -> str | None:
+    """The HuggingFace revision recorded by the latest successful dataset push, if any."""
+    path = (dataset_dir or DATASET_DIR) / HF_PUSH_NAME
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return None
+    return json.loads(raw)["hf_revision"]
 
 
 def training_sample(row: WatcherRow, *, system: str, cap: int = DRAFT_CHAR_CAP) -> dict[str, Any]:

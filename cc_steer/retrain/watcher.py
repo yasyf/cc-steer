@@ -282,9 +282,14 @@ def retrain_watcher(
     """
     incumbent = registry.current(WATCHER_COMPONENT, root=registry_root)
     digest = data.train_digest(dataset_dir=dataset_dir)
+    hf_revision = data.hf_revision(dataset_dir=dataset_dir)
     if not promotion.should_retrain(incumbent, digest, force=force):
         return promotion.journal(
-            WATCHER_COMPONENT, f"skipped (no new data at digest {digest})", dataset_digest=digest, state_dir=state_dir
+            WATCHER_COMPONENT,
+            f"skipped (no new data at digest {digest})",
+            dataset_digest=digest,
+            hf_revision=hf_revision,
+            state_dir=state_dir,
         )
     frame = evalset.EvalFrame.load(root=eval_root)
     base = _base_for(recipe)
@@ -385,7 +390,13 @@ def retrain_watcher(
     try:
         outcome, diagnostic, diag_note = anyio.run(run)
     except (SpendExceeded, InsufficientData) as error:
-        return promotion.journal(WATCHER_COMPONENT, f"rejected ({error})", dataset_digest=digest, state_dir=state_dir)
+        return promotion.journal(
+            WATCHER_COMPONENT,
+            f"rejected ({error})",
+            dataset_digest=digest,
+            hf_revision=hf_revision,
+            state_dir=state_dir,
+        )
 
     served_probs = outcome.served
     served_arr = np.array([served_probs[row_id] for row_id in frame.ids], dtype=np.float64)
@@ -405,6 +416,7 @@ def retrain_watcher(
             WATCHER_COMPONENT,
             f"rejected ({outcome.verdict.reason}){diag_suffix}",
             dataset_digest=digest,
+            hf_revision=hf_revision,
             metrics=outcome.verdict.stats | diagnostic,
             state_dir=state_dir,
         )
@@ -425,6 +437,7 @@ def retrain_watcher(
         "render_version": recipe.render_version,
         "thresholds": {"budget": threshold},
         "dataset_digest": digest,
+        **({"hf_revision": hf_revision} if hf_revision is not None else {}),
         "rank": recipe.rank,
         "learning_rate": recipe.learning_rate,
         "steps": steps,
@@ -444,6 +457,7 @@ def retrain_watcher(
         WATCHER_COMPONENT,
         f"{prefix}promoted {info.version} ({reason}); watch kickstart {'ok' if kicked else 'skipped'}{diag_suffix}",
         dataset_digest=digest,
+        hf_revision=hf_revision,
         metrics=gate_stats | diagnostic | {"tinker_val_auc": best_val_auc, "threshold_budget": threshold},
         version=info.version,
         state_dir=state_dir,

@@ -433,12 +433,27 @@ class TestRetrainWatcher:
         assert current.metadata["thresholds"]["budget"] == pytest.approx(expected_threshold)
         assert current.metadata["thresholds"]["budget"] < 0.5  # p-scale, not the fire-score scale
         assert current.metadata["render_version"] == 2
+        assert "hf_revision" not in current.metadata
         assert "tinker_checkpoint" in current.metadata
         assert "diagnostic_max_abs_diff" in current.metadata
         remaining = [info.version for info in registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)]
         assert len(remaining) == w.KEEP_VERSIONS
         assert lane.incumbent.version not in remaining  # the oldest version was the one pruned
         assert evalset.probs_path(current.version, root=lane.eval_dir).exists()
+        entry = json.loads((lane.state_dir / "retrain" / "journal.jsonl").read_text())
+        assert "hf_revision" not in entry
+
+    def test_hf_revision_threads_to_registry_and_journal(self, lane: Lane) -> None:
+        (lane.dataset_dir / data.HF_PUSH_NAME).write_text(
+            json.dumps({"hf_revision": "sha-watcher", "repo_id": "u/r", "ts": "2026-07-17T00:00:00+00:00"})
+        )
+        verdict = lane.run()
+        assert verdict.startswith("watcher: promoted")
+        current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
+        assert current is not None
+        assert current.metadata["hf_revision"] == "sha-watcher"
+        entry = json.loads((lane.state_dir / "retrain" / "journal.jsonl").read_text())
+        assert entry["hf_revision"] == "sha-watcher"
 
     def test_reject_at_gate_after_materialize_never_registers(self, lane: Lane) -> None:
         # The gate scores through the materialized artifact, so a reject pays one materialize + local

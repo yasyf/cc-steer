@@ -130,6 +130,7 @@ def journal(
     verdict: str,
     *,
     dataset_digest: str,
+    hf_revision: str | None = None,
     metrics: Mapping[str, float] | None = None,
     version: str | None = None,
     state_dir: Path | None = None,
@@ -148,6 +149,7 @@ def journal(
         "component": component,
         "verdict": verdict,
         "dataset_digest": dataset_digest,
+        **({"hf_revision": hf_revision} if hf_revision is not None else {}),
         "metrics": dict(metrics or {}),
         "version": version,
     }

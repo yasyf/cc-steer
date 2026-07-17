@@ -275,7 +275,9 @@ def train_gate(*, dataset_dir: Path | None = None, eval_root: Path | None = None
     return Candidate(model=model, temperature=temperature, metrics=metrics)
 
 
-def register_candidate(candidate: Candidate, *, digest: str, root: Path | None = None) -> registry.VersionInfo:
+def register_candidate(
+    candidate: Candidate, *, digest: str, hf_revision: str | None = None, root: Path | None = None
+) -> registry.VersionInfo:
     """Serialize per the shared artifact spec, then register, promote, and prune to ``KEEP_VERSIONS``."""
     import io
 
@@ -297,6 +299,7 @@ def register_candidate(candidate: Candidate, *, digest: str, root: Path | None =
         {ARTIFACT_NAME: buffer.getvalue()},
         {
             "dataset_digest": digest,
+            **({"hf_revision": hf_revision} if hf_revision is not None else {}),
             "config": dict(RECIPE),
             "metrics": dict(candidate.metrics),
             "thresholds": {THRESHOLD_KEY: candidate.metrics[THRESHOLD_METRIC]},
@@ -336,9 +339,14 @@ def retrain_gate(
     """
     incumbent = registry.current(COMPONENT, root=registry_root)
     digest = gate_train_digest(dataset_dir=dataset_dir)
+    hf_revision = data.hf_revision(dataset_dir=dataset_dir)
     if not promotion.should_retrain(incumbent, digest, force=force):
         return promotion.journal(
-            COMPONENT, f"skipped (no new data at digest {digest})", dataset_digest=digest, state_dir=state_dir
+            COMPONENT,
+            f"skipped (no new data at digest {digest})",
+            dataset_digest=digest,
+            hf_revision=hf_revision,
+            state_dir=state_dir,
         )
     candidate = train_gate(dataset_dir=dataset_dir, eval_root=eval_root)
     if incumbent is None or fresh_epoch:
@@ -359,10 +367,20 @@ def retrain_gate(
         incumbent_version = incumbent.version if incumbent is not None else "?"
         line = f"{prefix}rejected ({verdict.reason}); incumbent {incumbent_version} stays — {summary}"
     else:
-        version = (info := register_candidate(candidate, digest=digest, root=registry_root)).version
+        version = (
+            info := register_candidate(
+                candidate, digest=digest, hf_revision=hf_revision, root=registry_root
+            )
+        ).version
         line = f"{prefix}promoted {info.version} ({verdict.reason}) — {summary}"
     return promotion.journal(
-        COMPONENT, line, dataset_digest=digest, metrics=candidate.metrics, version=version, state_dir=state_dir
+        COMPONENT,
+        line,
+        dataset_digest=digest,
+        hf_revision=hf_revision,
+        metrics=candidate.metrics,
+        version=version,
+        state_dir=state_dir,
     )
 
 

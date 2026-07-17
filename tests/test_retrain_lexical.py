@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from cc_steer import registry
-from cc_steer.retrain import lexical, promotion
+from cc_steer.retrain import data, lexical, promotion
 from cc_steer.watcher.gate import ARTIFACT_NAME, THRESHOLD_KEY, LexicalGate
 
 if TYPE_CHECKING:
@@ -107,6 +107,7 @@ class TestRetrainGate:
         assert first.startswith("gate: promoted")
         promoted = registry.current("gate", root=roots["registry"])
         assert promoted is not None
+        assert "hf_revision" not in promoted.metadata
         assert len(registry.versions("gate", root=roots["registry"])) == 1
 
         second = lexical.retrain_gate(
@@ -121,6 +122,30 @@ class TestRetrainGate:
         # A reject never registers a new version, and the incumbent is untouched.
         assert len(registry.versions("gate", root=roots["registry"])) == 1
         assert registry.current("gate", root=roots["registry"]).version == promoted.version
+        entries = [
+            json.loads(line) for line in (roots["state"] / "retrain" / "journal.jsonl").read_text().splitlines()
+        ]
+        assert all("hf_revision" not in entry for entry in entries)
+
+    def test_hf_revision_threads_to_registry_and_journal(
+        self, dataset_dir: Path, eval_dir: Path, roots: dict[str, Path]
+    ) -> None:
+        (dataset_dir / data.HF_PUSH_NAME).write_text(
+            json.dumps({"hf_revision": "sha-gate", "repo_id": "u/r", "ts": "2026-07-17T00:00:00+00:00"})
+        )
+        verdict = lexical.retrain_gate(
+            force=True,
+            dataset_dir=dataset_dir,
+            eval_root=eval_dir,
+            registry_root=roots["registry"],
+            state_dir=roots["state"],
+        )
+        assert verdict.startswith("gate: promoted")
+        current = registry.current("gate", root=roots["registry"])
+        assert current is not None
+        assert current.metadata["hf_revision"] == "sha-gate"
+        entry = json.loads((roots["state"] / "retrain" / "journal.jsonl").read_text())
+        assert entry["hf_revision"] == "sha-gate"
 
     def test_skip_when_digest_unchanged(self, dataset_dir: Path, roots: dict[str, Path]) -> None:
         digest = lexical.gate_train_digest(dataset_dir=dataset_dir)

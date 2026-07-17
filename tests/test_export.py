@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import datasets
@@ -28,6 +30,7 @@ from cc_steer.export import (
     watcher_positive,
 )
 from cc_steer.refine import RefinedPair, Refinement
+from cc_steer.retrain.data import HF_PUSH_NAME
 from cc_steer.triage import AUDIT_VERSION, JUDGE, PROMPT_VERSION, Verdict
 from cc_steer.watcher.delivery import ShadowDelivery
 from cc_steer.watcher.live import LiveConfig, MailboxDelivery
@@ -242,6 +245,8 @@ async def out(store: FeedbackStore, tmp_path: Path) -> Path:
         "watcher": {"train": 1, "test": 1},
     }
     assert report.pushed is False
+    assert report.hf_revision is None
+    assert not (report.out / HF_PUSH_NAME).exists()
     return report.out
 
 
@@ -441,15 +446,17 @@ async def test_export_push_uploads_every_config_and_the_card(
 ) -> None:
     pushes: list[dict[str, object]] = []
     uploads: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        datasets.DatasetDict,
-        "push_to_hub",
-        lambda self, repo_id, **kwargs: pushes.append({"repo_id": repo_id} | kwargs),
-    )
+
+    def push(self: datasets.DatasetDict, repo_id: str, **kwargs: object) -> SimpleNamespace:
+        pushes.append({"repo_id": repo_id} | kwargs)
+        return SimpleNamespace(oid=f"sha-{kwargs['config_name']}")
+
+    monkeypatch.setattr(datasets.DatasetDict, "push_to_hub", push)
     monkeypatch.setattr(huggingface_hub.HfApi, "upload_file", lambda self, **kwargs: uploads.append(kwargs))
     await seed(store)
     report = await export(store, out=tmp_path / "dataset", push_to="u/r")
     assert report.pushed is True
+    assert report.hf_revision == "sha-watcher"
     assert len(pushes) == 6
     assert {push["config_name"] for push in pushes} == {"traces", "sft", "dpo", "kto", "gate", "watcher"}
     assert all(push["repo_id"] == "u/r" and push["private"] is True for push in pushes)
@@ -461,6 +468,10 @@ async def test_export_push_uploads_every_config_and_the_card(
             "repo_type": "dataset",
         }
     ]
+    sidecar = json.loads((report.out / HF_PUSH_NAME).read_text())
+    ts = datetime.fromisoformat(sidecar.pop("ts"))
+    assert ts.tzinfo is not None and ts.utcoffset() == timedelta(0)
+    assert sidecar == {"hf_revision": "sha-watcher", "repo_id": "u/r"}
 
 
 async def test_export_push_failure_propagates_after_local_write(
@@ -477,6 +488,7 @@ async def test_export_push_failure_propagates_after_local_write(
     for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
         assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
     assert (dataset_dir / "README.md").is_file()
+    assert not (dataset_dir / HF_PUSH_NAME).exists()
 
 
 async def test_export_adds_live_reaction_rows_to_watcher_and_gate(store: FeedbackStore, tmp_path: Path) -> None:

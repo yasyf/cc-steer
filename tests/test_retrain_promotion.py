@@ -136,6 +136,12 @@ class TestShouldRetrain:
     def test_changed_digest_retrains(self) -> None:
         assert should_retrain(version_info("d1"), "d2", force=False)
 
+    def test_missing_digest_retrains(self) -> None:
+        incumbent = registry.VersionInfo(
+            component="watcher", version="v001-20260101-abcdef123456", path=Path("/x"), metadata={}
+        )
+        assert should_retrain(incumbent, "d1", force=False)
+
 
 class TestJournal:
     def test_appends_exact_json_and_returns_line(self, tmp_path: Path) -> None:
@@ -159,6 +165,20 @@ class TestJournal:
             "dataset_digest": "abc123",
             "metrics": {"auc": 0.8},
             "version": "v005",
+        }
+
+    def test_appends_hf_revision_only_when_provided(self, tmp_path: Path) -> None:
+        journal("gate", "promoted v002", dataset_digest="d2", hf_revision="sha-gate", state_dir=tmp_path)
+        entry = json.loads((tmp_path / "retrain" / "journal.jsonl").read_text())
+        ts = datetime.fromisoformat(entry.pop("ts"))
+        assert ts.tzinfo is not None and ts.utcoffset() == timedelta(0)
+        assert entry == {
+            "component": "gate",
+            "dataset_digest": "d2",
+            "hf_revision": "sha-gate",
+            "metrics": {},
+            "verdict": "promoted v002",
+            "version": None,
         }
 
     def test_appends_one_line_per_call(self, tmp_path: Path) -> None:
