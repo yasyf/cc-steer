@@ -91,7 +91,9 @@ def test_install_live_adds_a_synchronous_userpromptsubmit_group(tmp_path: Path) 
 
 def test_live_command_is_a_version_pinned_fail_open_wrapper() -> None:
     command = hooks.live_command()
-    assert command == "out=$(uvx --from 'cc-steer>=0.11' cc-steer live hook 2>/dev/null) && printf '%s' \"$out\"; exit 0"
+    assert command == (
+        "out=$(uvx --from 'cc-steer>=0.11' cc-steer live hook 2>/dev/null) && printf '%s' \"$out\"; exit 0"
+    )
     assert f"cc-steer>={hooks.LIVE_MIN_VERSION}" in command
     assert command.endswith("; exit 0")
     assert "2>/dev/null" in command

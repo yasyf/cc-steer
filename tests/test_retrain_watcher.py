@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from athome.llm.spend import SpendExceeded
+from athome.train import (
+    Adapter,
+    EvalRow,
+    InsufficientData,
+    RetrainOutcome,
+    SavedCheckpoint,
+    ScoredSequence,
+    TrainReport,
+)
 
 from cc_steer import launchd, registry
-from cc_steer.retrain import data, evalset, promotion
-from cc_steer.retrain import tinker as tk
+from cc_steer.retrain import data, evalset, promotion, sentinel
 from cc_steer.retrain import watcher as w
 from cc_steer.retrain.evalset import ProbsStoreError
-from cc_steer.retrain.watcher import ConversionDroppedError, FreshEpochError, WatcherRecipe, WatcherRetrainError
+from cc_steer.retrain.watcher import FreshEpochError, WatcherRecipe, WatcherRetrainError
 from cc_steer.watcher import drafter_mlx
 
 if TYPE_CHECKING:
@@ -36,7 +45,7 @@ def default_kwargs() -> dict[str, Any]:
         "mlx_id": "mlx-community/Qwen3-8B-4bit",
         "rank": 32,
         "learning_rate": 1e-4,
-        "batch_size": 4,
+        "batch_size": 16,
         "epochs": 2,
         "checkpoint_fracs": [0.25, 0.5, 0.75, 1.0],
         "max_tokens": 4096,
@@ -57,6 +66,7 @@ class TestWatcherRecipe:
         assert recipe == WatcherRecipe(**default_kwargs())
         assert recipe.checkpoint_fracs == (0.25, 0.5, 0.75, 1.0)
         assert recipe.rank == 32
+        assert recipe.batch_size == 16
         assert recipe.spend_cap_usd == 15.0
         assert recipe.seed == 1729
 
@@ -225,24 +235,19 @@ class Lane:
     frame: evalset.EvalFrame
     incumbent: registry.VersionInfo
     calls: dict[str, int] = field(
-        default_factory=lambda: {
-            "train": 0,
-            "download": 0,
-            "convert": 0,
-            "score_rows": 0,
-            "score_local": 0,
-            "kickstart": 0,
-        }
+        default_factory=lambda: {"retrain": 0, "materialize": 0, "score": 0, "score_local": 0, "kickstart": 0}
     )
     candidate: np.ndarray = field(default_factory=lambda: CANDIDATE_WIN.copy())
     tinker: np.ndarray | None = None
     drafter_offset: float = 0.0
-    convert_dropped: list[str] = field(default_factory=list)
     train_error: Exception | None = None
+    materialize_error: Exception | None = None
     diagnostic_error: Exception | None = None
     kickstart_result: bool = True
 
-    def run(self, *, force: bool = True, fresh_epoch: bool = False, recipe: WatcherRecipe = WatcherRecipe.default()) -> str:
+    def run(
+        self, *, force: bool = True, fresh_epoch: bool = False, recipe: WatcherRecipe = WatcherRecipe.default()
+    ) -> str:
         return w.retrain_watcher(
             force=force,
             fresh_epoch=fresh_epoch,
@@ -282,42 +287,65 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
     obj = Lane(dataset_dir, eval_dir, registry_root, tmp_path / "state", frame, incumbent)
     tail_index = {frame.tails[i]: i for i in range(len(frame))}
 
-    def fake_build_datum(messages: list[dict[str, str]], mlx_id: str) -> SimpleNamespace:
-        return SimpleNamespace(model_input=SimpleNamespace(length=10))
+    def fake_eval_row(system: str, user: str, mlx_id: str) -> EvalRow:
+        # Encode the frame index in tokens[0] so the fake backend.score can map a diagnostic row back
+        # to its reference prob; val rows (not in the frame) fall back to 0 and are never scored.
+        return EvalRow(tokens=(tail_index.get(user, 0),), weights=(1.0,))
 
-    def fake_train_lora(
-        datums: Any, base: Any, *, steps: int, checkpoint_fractions: Any, on_checkpoint: Any, **_: Any
-    ) -> SimpleNamespace:
-        obj.calls["train"] += 1
+    async def fake_retrain(
+        backend: Any,
+        spec: Any,
+        *,
+        checkpoints: Any,
+        eval_rows: Any,
+        select: Any,
+        artifact_scorer: Any,
+        gate: Any,
+        work_dir: Path,
+        sink: Any,
+    ) -> RetrainOutcome:
+        obj.calls["retrain"] += 1
         if obj.train_error is not None:
             raise obj.train_error
-        svc = SimpleNamespace(name="svc")
-        ckpt_steps = sorted({max(1, min(steps, round(frac * steps))) for frac in checkpoint_fractions})
-        for step in ckpt_steps:
-            on_checkpoint(step, f"tinker://ckpt/{step}", svc, base)
-        return SimpleNamespace(checkpoints={step: f"tinker://ckpt/{step}" for step in ckpt_steps})
+        steps = spec.hyperparams.steps
+        saved = tuple(
+            SavedCheckpoint(
+                step=step,
+                path=f"tinker://ckpt/{step}",
+                final=(step == steps),
+                scores=tuple(
+                    ScoredSequence(logprob=-0.01 * (i + 1) - 0.001 * step, weight=1.0) for i in range(len(eval_rows))
+                ),
+            )
+            for step in (*checkpoints.steps_for(steps), steps)
+        )
+        best = max(saved, key=select)
+        if obj.materialize_error is not None:
+            raise obj.materialize_error
+        adapter_dir = work_dir / "adapter"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        (adapter_dir / drafter_mlx.ADAPTER_NAME).write_bytes(b"cand")
+        (adapter_dir / drafter_mlx.ADAPTER_CONFIG_NAME).write_text("{}")
+        obj.calls["materialize"] += 1
+        adapter = Adapter(step=best.step, adapter_dir=adapter_dir, train_cost_usd=1.23)
+        served = artifact_scorer(adapter)
+        verdict = gate(served)
+        report = TrainReport(method="sft", steps=(), checkpoints=saved, dropped=0, wall_s=0.0, train_cost_usd=1.23)
+        return RetrainOutcome(report=report, best=best, adapter=adapter, served=served, verdict=verdict)
 
-    def fake_score_auc(svc: Any, path: str, valid_rows: Any, mlx_id: str) -> dict[str, float]:
-        return {"auc": 0.7 + int(path.rsplit("/", 1)[1]) * 0.01}
+    class FakeBackend:
+        @classmethod
+        def from_settings(cls) -> FakeBackend:
+            return cls()
 
-    def fake_score_rows(svc: Any, path: str, rows: Any, *, base: Any) -> dict[str, float]:
-        obj.calls["score_rows"] += 1
-        if obj.diagnostic_error is not None:
-            raise obj.diagnostic_error
-        reference = obj.tinker if obj.tinker is not None else obj.candidate
-        return {row_id: float(reference[tail_index[tail]]) for row_id, tail in rows}
-
-    def fake_download(svc: Any, path: str, out: Path) -> Path:
-        obj.calls["download"] += 1
-        out.mkdir(parents=True, exist_ok=True)
-        return out
-
-    def fake_convert(peft: Path, out: Path, *, num_layers: int, rank: int) -> dict[str, Any]:
-        obj.calls["convert"] += 1
-        out.mkdir(parents=True, exist_ok=True)
-        (out / drafter_mlx.ADAPTER_NAME).write_bytes(b"cand")
-        (out / drafter_mlx.ADAPTER_CONFIG_NAME).write_text("{}")
-        return {"dropped": list(obj.convert_dropped), "covered": [], "n_lora_weights": 1}
+        async def score(
+            self, path: str, rows: Any, *, base: Any, max_usd: float | None = None
+        ) -> tuple[ScoredSequence, ...]:
+            obj.calls["score"] += 1
+            if obj.diagnostic_error is not None:
+                raise obj.diagnostic_error
+            reference = obj.tinker if obj.tinker is not None else obj.candidate
+            return tuple(ScoredSequence(logprob=math.log(float(reference[row.tokens[0]])), weight=1.0) for row in rows)
 
     class FakeDrafter:
         def __init__(
@@ -336,12 +364,10 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
         obj.calls["kickstart"] += 1
         return obj.kickstart_result
 
-    monkeypatch.setattr(tk, "build_datum", fake_build_datum)
-    monkeypatch.setattr(tk, "train_lora", fake_train_lora)
-    monkeypatch.setattr(tk, "score_auc_tinker", fake_score_auc)
-    monkeypatch.setattr(tk, "score_rows_tinker", fake_score_rows)
-    monkeypatch.setattr(tk, "download_adapter", fake_download)
-    monkeypatch.setattr(tk, "convert_peft_to_mlx", fake_convert)
+    monkeypatch.setattr(w, "load_key", lambda **_: None)
+    monkeypatch.setattr(w, "TinkerBackend", FakeBackend)
+    monkeypatch.setattr(w, "athome_retrain", fake_retrain)
+    monkeypatch.setattr(sentinel, "sentinel_eval_row", fake_eval_row)
     monkeypatch.setattr(drafter_mlx, "MlxDrafter", FakeDrafter)
     monkeypatch.setattr(launchd, "kickstart_watch", fake_kickstart)
     return obj
@@ -365,7 +391,7 @@ class TestRetrainWatcher:
         registry.promote(w.WATCHER_COMPONENT, matched.version, root=lane.registry_root)
         verdict = lane.run(force=False)
         assert verdict == f"watcher: skipped (no new data at digest {digest})"
-        assert lane.calls["score_rows"] == 0
+        assert lane.calls["retrain"] == 0
         assert lane.calls["score_local"] == 0
 
     def test_promote_registers_prunes_writes_probs_and_kickstarts(
@@ -400,7 +426,9 @@ class TestRetrainWatcher:
         assert current is not None and current.version != lane.incumbent.version
         # FH1: thresholds["budget"] is the P(NO_STEER)-scale cut 1 - fire_score_cut (~0.01 here), not the 0.99 fire cut.
         expected_threshold = 1.0 - promotion.threshold_for_budget(
-            1.0 - CANDIDATE_WIN, fires_per_100=w.WatcherRecipe.default().budget_fires_per_100, total_turns=len(lane.frame)
+            1.0 - CANDIDATE_WIN,
+            fires_per_100=w.WatcherRecipe.default().budget_fires_per_100,
+            total_turns=len(lane.frame),
         )
         assert current.metadata["thresholds"]["budget"] == pytest.approx(expected_threshold)
         assert current.metadata["thresholds"]["budget"] < 0.5  # p-scale, not the fire-score scale
@@ -412,15 +440,15 @@ class TestRetrainWatcher:
         assert lane.incumbent.version not in remaining  # the oldest version was the one pruned
         assert evalset.probs_path(current.version, root=lane.eval_dir).exists()
 
-    def test_reject_at_gate_after_convert_never_registers(self, lane: Lane) -> None:
-        # The gate scores through the converted artifact, so a reject pays one download + convert +
-        # local scoring pass + diagnostic, but never registers a new version or kicks the daemon.
+    def test_reject_at_gate_after_materialize_never_registers(self, lane: Lane) -> None:
+        # The gate scores through the materialized artifact, so a reject pays one materialize + local
+        # scoring pass + diagnostic, but never registers a new version or kicks the daemon.
         lane.candidate = INCUMBENT.copy()  # served AUC ties the incumbent -> the watcher bar rejects
         verdict = lane.run()
         assert verdict.startswith("watcher: rejected")
-        assert lane.calls["download"] == 1
-        assert lane.calls["convert"] == 1
+        assert lane.calls["materialize"] == 1
         assert lane.calls["score_local"] == 1
+        assert lane.calls["score"] == 1  # the diagnostic still runs, before the verdict acts
         assert lane.calls["kickstart"] == 0
         assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
@@ -487,26 +515,34 @@ class TestRetrainWatcher:
         assert probs == pytest.approx({rid: float(lane.candidate[i]) for i, rid in enumerate(lane.frame.ids)})
 
     def test_spend_cap_refusal_journaled_as_reject(self, lane: Lane) -> None:
-        lane.train_error = tk.SpendCapError("projected cost $99.00 exceeds cap $15.00; not launching")
+        lane.train_error = SpendExceeded("projected $99.0000 exceeds cap $15.0000")
         verdict = lane.run()
         assert verdict.startswith("watcher: rejected (projected")
-        assert lane.calls["score_rows"] == 0
+        assert lane.calls["score"] == 0
         assert lane.calls["score_local"] == 0
-        assert lane.calls["download"] == 0
+        assert lane.calls["materialize"] == 0
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
 
-    def test_dropped_conversion_aborts_before_register(self, lane: Lane) -> None:
-        lane.convert_dropped = ["linear_attn.in_proj_qkv"]
-        with pytest.raises(ConversionDroppedError, match="half-converted") as excinfo:
+    def test_insufficient_data_journaled_as_reject(self, lane: Lane) -> None:
+        lane.train_error = InsufficientData(3, 16)
+        verdict = lane.run()
+        assert verdict.startswith("watcher: rejected")
+        assert lane.calls["materialize"] == 0
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_materialize_failure_aborts_before_register(self, lane: Lane) -> None:
+        # An unfusable-tensor failure during materialize raises out of retrain and must abort before any
+        # register, so a half-converted adapter is never promoted.
+        lane.materialize_error = ValueError("mlx-lm cannot fuse 1 trained tensor(s): ['linear_attn.in_proj_qkv']")
+        with pytest.raises(ValueError, match="cannot fuse"):
             lane.run()
-        assert excinfo.value.dropped == ["linear_attn.in_proj_qkv"]
         assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
 
     def test_missing_incumbent_probs_fails_loud_before_training(self, lane: Lane) -> None:
         evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()
         with pytest.raises(WatcherRetrainError, match="--seed-incumbent-probs"):
             lane.run()
-        assert lane.calls["train"] == 0  # validate the incumbent gate before any Tinker spend
+        assert lane.calls["retrain"] == 0  # validate the incumbent gate before any Tinker spend
 
 
 class TestFreshEpoch:
@@ -545,15 +581,14 @@ class TestFreshEpoch:
         with pytest.raises(FreshEpochError, match="one-shot") as excinfo:
             lane.run(fresh_epoch=True)
         assert str(orphan) in str(excinfo.value)
-        assert lane.calls["train"] == 0
+        assert lane.calls["retrain"] == 0
 
     def test_refuses_when_frame_already_scored(self, lane: Lane) -> None:
         # The lane seeds incumbent probs for the current frame; the one-shot guard fires before training.
         with pytest.raises(FreshEpochError, match="one-shot") as excinfo:
             lane.run(fresh_epoch=True)
         assert str(evalset.probs_path(lane.incumbent.version, root=lane.eval_dir)) in str(excinfo.value)
-        assert lane.calls["score_rows"] == 0
-        assert lane.calls["score_local"] == 0
+        assert lane.calls["retrain"] == 0
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
 
 

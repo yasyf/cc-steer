@@ -22,7 +22,7 @@ dependencies = [
     "cc-transcript>=13.1,<14",
     "click>=8",
     "datasets>=3.2",
-    "experiment-at-home>=0.4",
+    "experiment-at-home[gate]>=0.6,<0.7",
     "fastapi>=0.115",
     "huggingface-hub>=0.27",
     "numpy>=2",
@@ -46,9 +46,8 @@ mlx = [
 ]
 retrain = [
     "cc-steer[gate,mlx]",
-    "tinker>=0.22.7,<0.23",
     "pyarrow>=18",
-    "experiment-at-home[research,llm,train]>=0.4,<0.5",
+    "experiment-at-home[train]>=0.6,<0.7",
 ]
 dev = [
     "cc-steer[gate]",

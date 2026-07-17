@@ -186,7 +186,10 @@ async def seed_proposals(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def plant_reply(store: FeedbackStore, *, session: str, occurred: str, text: str, key: str) -> None:
     async with store.store.transaction() as conn:
-        await conn.execute(INSERT_EVENT, (key, "transcript_message", session, f"u-{key}", occurred, text, "{}", "{}", "2.0.0", occurred, None))
+        await conn.execute(
+            INSERT_EVENT,
+            (key, "transcript_message", session, f"u-{key}", occurred, text, "{}", "{}", "2.0.0", occurred, None),
+        )
 
 
 async def test_attribute_reactions_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

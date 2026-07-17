@@ -80,7 +80,7 @@ def decide(config: LiveConfig, *, origin: str | None, cwd: str, held_out: bool, 
 
 
 def resolve(conn: sqlite3.Connection, config: LiveConfig, *, session_id: str, cwd: str, at: datetime) -> str | None:
-    """Under a write lock: expire stale and superseded steers, claim the session's freshest queued one, return its emission.
+    """Expire stale and superseded steers, claim the session's freshest queued one, and return its emission.
 
     The whole verdict runs in one ``BEGIN IMMEDIATE`` transaction so concurrent hooks serialize; the
     claim is conditional on the row still being ``queued`` and emits only when it wins that update, so two

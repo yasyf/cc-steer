@@ -158,7 +158,10 @@ def test_scrub_events_leaves_untagged_events_untouched() -> None:
 
 
 def test_scrub_text_strips_multiple_spans_linearly() -> None:
-    text = "<cc-steer-proposal id=1>one</cc-steer-proposal>\nkeep me\n<cc-steer-proposal id=2>two</cc-steer-proposal>\ntail"
+    text = (
+        "<cc-steer-proposal id=1>one</cc-steer-proposal>\nkeep me\n"
+        "<cc-steer-proposal id=2>two</cc-steer-proposal>\ntail"
+    )
     assert scrub_text(text) == "keep me\ntail"
 
 

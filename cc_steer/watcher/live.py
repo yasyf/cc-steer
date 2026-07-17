@@ -226,7 +226,9 @@ class LiveConfig:
 
     def allows(self, project: str) -> bool:
         """Whether ``project`` is covered by ``allow_projects`` (exact dir or a descendant)."""
-        return any(project == allowed or project.startswith(f"{allowed.rstrip('/')}/") for allowed in self.allow_projects)
+        return any(
+            project == allowed or project.startswith(f"{allowed.rstrip('/')}/") for allowed in self.allow_projects
+        )
 
     def to_toml(self) -> str:
         """The config as ``live.toml`` text — the round-trip inverse of :meth:`load`."""
@@ -406,7 +408,7 @@ class MailboxDelivery:
         return by_state | {"delivered_today": delivered_today}
 
     async def expire_all_queued(self, *, at: datetime | None = None) -> int:
-        """Expires every queued delivery and returns how many — the backlog flush behind ``live off`` and a mode change."""
+        """Expire every queued delivery and return how many — the backlog flush for ``live off`` and mode changes."""
         cur = await self.conn.execute(
             "UPDATE deliveries SET state = 'expired', decided_at = ? WHERE state = 'queued'",
             ((at or datetime.now(UTC)).isoformat(),),

@@ -6,6 +6,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-17
+
+### Changed
+- **The watcher retrain now runs on `experiment-at-home` 0.6's pipelined Tinker
+  engine** instead of cc-steer's own training loop. The old loop was the Tinker
+  SDK's documented anti-pattern — it awaited every forward-backward and optim
+  step round trip (~3 clock cycles per step where 1 suffices) and scored each
+  checkpoint with hundreds of serial per-row calls; the new lane submits each
+  step's pair together under a submit-ahead queue and scores every checkpoint
+  with one batched forward riding the same stream. `retrain_watcher` hands
+  `athome.train.retrain` the whole pipeline shape and supplies only domain
+  callables: sentinel eval rows, checkpoint selection by sentinel AUC, local
+  MLX scoring of the exact artifact that will serve, and the corrected gate.
+  Registration, promotion, pruning, and the journal stay in cc-steer,
+  post-return, unchanged in shape — metadata keys, `journal.jsonl` records,
+  and the `serving_diagnostic.json` sidecar are byte-compatible.
+- **`batch_size` 16 (was 4)** in the packaged watcher recipe — ~4x fewer
+  optimizer steps at the same token budget and cost. The learning rate
+  deliberately stays `1e-4` (not silently retuned); the AUC checkpoint pick
+  and the corrected gate revalidate the new dynamics on the next run, and a
+  reject is the designed containment. The step count now derives from the
+  curated pool size rather than the post-length-filter survivor count —
+  over-length rows drop inside athome after the count is fixed, a
+  near-nil drift for short chat turns.
+- The LoRA scale served after conversion is now read from Tinker's own PEFT
+  `adapter_config.json` (athome's converter) instead of a hardcoded
+  `alpha=32`. Nothing ever served at the wrong scale — both values agreed —
+  but the agreement was coincidence, not an invariant; now it is structural.
+- The gate statistics (`sign_test_p`, `threshold_for_budget`,
+  `matched_fire_mask`, `sentinel_auc`, `corrected_gate`, `GateResult`) moved
+  to `athome.train.gate` and are re-exported from `cc_steer.retrain.promotion`
+  unchanged. The port makes fire orientation explicit (higher-is-fire) and
+  fixes a latent float-floor defect that could drop one fire from an integer
+  budget; a field-for-field golden replay pinned numerical equivalence.
+- Sentinel-row construction moved to `cc_steer.retrain.sentinel`, expressed as
+  pre-tokenized `EvalRow`s over `athome.train.data`'s tokenizer helpers — the
+  NO_STEER-divergence trick is unchanged (verified byte-identical datum
+  construction over 300 real pool rows before the cutover).
+
+### Removed
+- `cc_steer/retrain/tinker.py` — the bespoke Tinker client, trainer, scorers,
+  and PEFT→MLX converter (464 lines) are gone; `experiment-at-home[train]`
+  provides all of it. The `tinker` dependency left `pyproject.toml` with it
+  (athome's `train` extra carries the SDK), and the core dependency is now
+  `experiment-at-home[gate]>=0.6,<0.7`. `ConversionDroppedError` is deleted:
+  athome's converter crashes before registration on any unfusable tensor, so
+  the guarded state is unrepresentable.
+
 ## [0.12.1] - 2026-07-14
 
 ### Fixed

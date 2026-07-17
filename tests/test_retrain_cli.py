@@ -38,12 +38,14 @@ def test_gate_dispatch_passes_force(runner: CliRunner, monkeypatch: pytest.Monke
 def test_fresh_epoch_threads_to_both_lanes(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
-        lexical, "retrain_gate", lambda *, force, fresh_epoch: seen.update(gate=fresh_epoch) or "gate: fresh-epoch promoted v001-x"
+        lexical,
+        "retrain_gate",
+        lambda *, force, fresh_epoch: seen.update(gate=fresh_epoch) or "gate: fresh-epoch promoted v001-x",
     )
     monkeypatch.setattr(
         w,
         "retrain_watcher",
-        lambda *, force, fresh_epoch, recipe: seen.update(watcher=fresh_epoch) or "watcher: fresh-epoch promoted v002-x",
+        lambda *, force, fresh_epoch, recipe: seen.update(watcher=fresh_epoch) or "watcher: fresh-epoch promoted v002",
     )
     assert runner.invoke(main, ["retrain", "--component", "gate", "--fresh-epoch"]).exit_code == 0
     assert runner.invoke(main, ["retrain", "--component", "watcher", "--fresh-epoch"]).exit_code == 0
