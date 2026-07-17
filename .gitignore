@@ -41,3 +41,8 @@ coverage.xml
 great-docs/
 docs/scripts/.gd-build/
 /lab
+
+# Codex ask scratch
+.codex-scratch/
+codex-q-*
+codex-r-*
