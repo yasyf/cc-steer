@@ -1,0 +1,25 @@
+Adversarial refuter pass on the "c5" lane in /Users/yasyf/Code/cc-steer-c5.
+
+Get the lane diff yourself with:
+  cd /Users/yasyf/Code/cc-steer-c5 && jj diff --from main --to @ --git
+Read surrounding code as needed to understand context (not just the diff hunks).
+
+Hunt REAL defects only, focused on:
+1. Provenance: is `CommitInfo.oid` actually captured and threaded through to the journal and registry metadata? Verify there's no silent None/null masking a missing write on new rows.
+2. Backward compatibility: do pre-provenance journal rows (written before this change, lacking the new oid/provenance fields) still parse correctly? Specifically confirm `should_retrain` logic is unbroken by rows that lack the new fields.
+3. No live/network pushes happen in the test suite (tests must not actually push to HF, git remotes, etc. — they should be mocked/fake).
+
+Do NOT report style, lint, or mechanical findings (formatting, naming, import order, etc.) — only real functional/correctness defects.
+
+For each finding report:
+- file (absolute path)
+- line number
+- one-sentence summary
+- a concrete failure scenario: specific inputs/state that leads to a wrong outcome
+- severity: critical / major / minor
+
+Then independently run the lane's tests:
+  cd /Users/yasyf/Code/cc-steer-c5 && uv run pytest
+Report the exact pass/fail result and any failing test names/output. A red suite is itself a critical finding.
+
+Finally, give an overall verdict: PASS only if the test suite is green AND there are no critical or major findings. Otherwise FAIL. State the verdict explicitly as "VERDICT: PASS" or "VERDICT: FAIL" on its own line, followed by a bulleted list of all findings (or "No findings" if none).

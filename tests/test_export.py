@@ -30,7 +30,7 @@ from cc_steer.export import (
     watcher_positive,
 )
 from cc_steer.refine import RefinedPair, Refinement
-from cc_steer.retrain.data import HF_PUSH_NAME
+from cc_steer.retrain.data import HF_PUSH_NAME, hf_revision
 from cc_steer.triage import AUDIT_VERSION, JUDGE, PROMPT_VERSION, Verdict
 from cc_steer.watcher.delivery import ShadowDelivery
 from cc_steer.watcher.live import LiveConfig, MailboxDelivery
@@ -441,6 +441,18 @@ async def test_export_survives_a_corpus_with_zero_judged_events(store: FeedbackS
     assert "0 steering vs 0 noise at" in card
 
 
+async def test_export_without_push_invalidates_previous_hf_revision(store: FeedbackStore, tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / HF_PUSH_NAME).write_text(json.dumps({"hf_revision": "sha-old", "repo_id": "u/r"}))
+    await seed(store)
+
+    report = await export(store, out=dataset_dir)
+
+    assert report.hf_revision is None
+    assert hf_revision(dataset_dir=dataset_dir) is None
+
+
 async def test_export_push_uploads_every_config_and_the_card(
     store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -483,12 +495,14 @@ async def test_export_push_failure_propagates_after_local_write(
     monkeypatch.setattr(datasets.DatasetDict, "push_to_hub", down)
     await seed(store)
     dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / HF_PUSH_NAME).write_text(json.dumps({"hf_revision": "sha-old", "repo_id": "u/r"}))
     with pytest.raises(RuntimeError, match="hub is down"):
         await export(store, out=dataset_dir, push_to="u/r")
     for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
         assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
     assert (dataset_dir / "README.md").is_file()
-    assert not (dataset_dir / HF_PUSH_NAME).exists()
+    assert hf_revision(dataset_dir=dataset_dir) is None
 
 
 async def test_export_adds_live_reaction_rows_to_watcher_and_gate(store: FeedbackStore, tmp_path: Path) -> None:

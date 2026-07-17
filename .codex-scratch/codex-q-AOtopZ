@@ -1,0 +1,16 @@
+Fix pass on lane /Users/yasyf/Code/cc-steer-c5.
+
+Adversarial review finding (JSON):
+[{"file":"/Users/yasyf/Code/cc-steer-c5/cc_steer/export.py","line":940,"summary":"A local-only or failed HF push leaves an existing stale .hf_push.json untouched, so hf_revision() keeps reporting a prior dataset's revision.","failure_scenario":"Dataset A is pushed and records sha-A in .hf_push.json; later the corpus changes and dataset B is exported into the same directory with push_to=None (or the push fails and the pipeline falls back locally). B's parquet files replace A's on disk, but hf_revision() still returns sha-A, so the journal/registry record B's dataset_digest against A's stale HF revision, corrupting provenance and any downstream should_retrain logic keyed on revision.","severity":"major"}]
+
+Task:
+1. Read /Users/yasyf/Code/cc-steer-c5/cc_steer/export.py around line 940 (and the .hf_push.json write/read logic, hf_revision()) to verify this finding is real. Reproduce cheaply if possible (trace the code paths for: push succeeds, push_to=None/local-only export, push fails).
+2. If real, fix it — the stale .hf_push.json marker file should not be trusted / should be invalidated or removed when a new local export happens without a corresponding successful push for that export. Follow repo conventions in AGENTS.md/STYLEGUIDE.md (functional style, no defensive coding, minimal changes, match surrounding code).
+3. If disputed (not real, or already handled), do NOT change code for it — just note why with one-line reasoning. Never silently drop a finding either way.
+4. Rerun the lane's test suite: `cd /Users/yasyf/Code/cc-steer-c5 && uv run pytest` — get it green (fix any regressions caused by your change; do not otherwise touch unrelated failures unless caused by your edit).
+5. Commit your fix: check if /Users/yasyf/Code/cc-steer-c5/.jj exists; if so `jj commit -m "fix(export): address review findings"`, else `git commit -m "fix(export): address review findings"`. Do NOT push, do NOT run any other VCS ops, do NOT touch /Users/yasyf/Code/cc-steer-lab.
+6. Do NOT run live MLX/Tinker/paid-LLM calls; tests are mocked already.
+
+Report back: what you found (real or disputed, with reasoning), the fix made (files + key diff), the test command and its result tail, and the commit hash/summary.
+
+If the task shape turns out different than described (e.g. line 940 doesn't correspond to this logic at all, or the finding is fundamentally not applicable), STOP and report that clearly instead of improvising a large detour — describe what you found and 2-4 options instead of guessing.

@@ -924,6 +924,7 @@ async def export(
         for config, splits in by_config.items()
     }
     counts = {config: {split: len(rows) for split, rows in splits.items()} for config, splits in by_config.items()}
+    (out / HF_PUSH_NAME).unlink(missing_ok=True)
     for config, splits in built.items():
         (out / config).mkdir(parents=True, exist_ok=True)
         for split, dataset in splits.items():
