@@ -30,6 +30,7 @@ implies a hosted serving path, a downstream deployment decision outside this mod
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import shutil
@@ -132,8 +133,13 @@ def observe_fit_score(
     picks the argmax over :attr:`~athome.train.TrainReport.checkpoints`; ``score`` evaluates that one
     checkpoint over the full sentinel frame; the fire score ``1 - P(NO_STEER)`` yields the AUC. The
     only on-disk footprint is the run journal in a throwaway staging dir, removed on success and on
-    failure. ``score``'s budget is the harness cap minus the fit's metered spend, so the pinned cap
-    bounds fit and score together.
+    failure.
+
+    The pinned harness cap — not the recipe's own ``spend_cap_usd`` — bounds the whole invocation:
+    the fit is run under it, and ``score``'s budget is the pinned cap minus the fit's metered spend,
+    so the pinned cap bounds fit and score together. Binding the fit to the recipe cap would starve a
+    pricier arm whose identical schedule bills past that cap (the 9B fit projects ~3.3x the 8B fit),
+    even when the pinned cap has ample room for both.
     """
     ADAPTER_STAGE_DIR.mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix="watcher-sweep-", dir=ADAPTER_STAGE_DIR))
@@ -141,7 +147,10 @@ def observe_fit_score(
     async def run() -> float:
         frame_rows = tuple(sentinel.sentinel_eval_row(DRAFT_SYSTEM, tail, recipe.mlx_id) for tail in frame.tails)
         report = await backend.fit(
-            plan.spec, sink=RunSink.open(work_dir / RUN_JOURNAL_NAME), checkpoints=plan.policy, eval_rows=plan.eval_rows
+            dataclasses.replace(plan.spec, max_usd=spend_cap_usd),
+            sink=RunSink.open(work_dir / RUN_JOURNAL_NAME),
+            checkpoints=plan.policy,
+            eval_rows=plan.eval_rows,
         )
         best = max(report.checkpoints, key=plan.select)
         scored = await backend.score(best.path, frame_rows, base=arm, max_usd=spend_cap_usd - report.train_cost_usd)

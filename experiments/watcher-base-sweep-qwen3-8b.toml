@@ -7,9 +7,10 @@
 # the orchestrator clones the recipe per arm, swapping its base ids. --arm pins this arm and
 # --spend-cap-usd pins the harness cap; score-watcher refuses (never clamps) a recipe that drifts off
 # the pinned arm or whose spend_cap_usd exceeds the pinned cap. The pinned cap bounds fit + score
-# together and sizes for worst-case metric spend per unit (recipe fit cap $15 + Tinker-frame score
-# headroom); every score-watcher invocation (the preflight baseline, each candidate, an infra retry)
-# is individually bounded by it. [budget].max_usd is athome's driver/proposal-spend backstop and the
+# together — the sweep runs the fit under it, not under the recipe's own spend_cap_usd — and sizes for
+# worst-case metric spend per unit: the default recipe's fit + full-frame score project ~$8 on this
+# arm, and the cap sits above that with headroom. Every score-watcher invocation (the preflight
+# baseline, each candidate, an infra retry) is individually bounded by it. [budget].max_usd is athome's driver/proposal-spend backstop and the
 # proposer's per-unit grant — athome does not meter the metric_command's Tinker spend, so it is not a
 # bound on metric spend; --spend-cap-usd is the only metric-spend guard.
 #

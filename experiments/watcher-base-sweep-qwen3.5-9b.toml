@@ -8,9 +8,13 @@
 # the orchestrator clones the recipe per arm, swapping its base ids. --arm pins this arm and
 # --spend-cap-usd pins the harness cap; score-watcher refuses (never clamps) a recipe that drifts off
 # the pinned arm or whose spend_cap_usd exceeds the pinned cap. The pinned cap bounds fit + score
-# together and sizes for worst-case metric spend per unit; the 9B fit and Tinker-frame score bill
-# more per token than the smaller arms, so the cap is higher. Every score-watcher invocation (the
-# preflight baseline, each candidate, an infra retry) is individually bounded by it. [budget].max_usd
+# together — the sweep runs the fit under it, not under the recipe's own spend_cap_usd — and sizes
+# for worst-case metric spend per unit. The 9B bills ~3.3x the 8B per-token train rate on an identical
+# schedule, so the default recipe's fit alone projects ~$26.85 (against the smaller arms' single
+# digits) and fit + full-frame score ~$27.37; the cap sits above that with headroom, well past the
+# recipe's own $15 fit cap, which on this arm the fit would blow through. Every score-watcher
+# invocation (the preflight baseline, each candidate, an infra retry) is individually bounded by it.
+# [budget].max_usd
 # is athome's driver/proposal-spend backstop and the proposer's per-unit grant — athome does not meter
 # the metric_command's Tinker spend, so it is not a bound on metric spend; --spend-cap-usd is the only
 # metric-spend guard.
@@ -23,7 +27,7 @@
 # The real run is the orchestrator's later gated call; nothing here spends on its own.
 
 name = "watcher-base-sweep-qwen3.5-9b"
-metric_command = ["cc-steer", "score-watcher", "--recipe", "watcher_recipe.json", "--arm", "qwen3.5-9b", "--spend-cap-usd", "24.0"]
+metric_command = ["cc-steer", "score-watcher", "--recipe", "watcher_recipe.json", "--arm", "qwen3.5-9b", "--spend-cap-usd", "30.0"]
 metric_key = "metric"
 direction = "max"
 mutable_paths = ["watcher_recipe.json"]

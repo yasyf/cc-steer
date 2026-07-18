@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import anyio
 import numpy as np
@@ -16,13 +17,34 @@ from athome.research import loop
 from athome.research.driver import StubDriver, StubProposal
 from athome.research.spec import Budget, ExperimentSpec
 from athome.train import BASE_MODELS, METRIC_FILE, METRIC_KEY
-from athome.train.spec import EvalRow
+from athome.train.spec import EvalRow, Hyperparams, Rows, TinkerSettings, TrainSpec
 
 from cc_steer.retrain import sweep
 from cc_steer.retrain.watcher import WatcherRecipe
 
 EXPERIMENTS = Path(__file__).resolve().parents[1] / "experiments"
 ARMS = ("qwen3-8b", "qwen3.5-4b", "qwen3.5-9b")
+
+
+class RecipeTokenLoad(NamedTuple):
+    train_tokens: int
+    eval_datum_tokens: int
+    snapshots: int
+    score_prefill_tokens: int
+    score_rows: int
+
+
+# The measured token load of the untouched default recipe on each arm — the exact schedule
+# TinkerBackend.fit projects and the full sentinel frame score bills, captured from athome 0.7.1's
+# real render + assemble path over the frozen frame. It sizes the pinned --spend-cap-usd: the load is
+# the same on every arm (the recipe is base-swap-cloned, nothing else), so the dollar projection scales
+# purely with the arm's per-Mtok price. It reproduces fit=$26.8499 / score=$0.5176 for the 9B at the
+# real price sheet — the numbers that make the old $24 cap (and the recipe's $15 fit cap) unusable.
+DEFAULT_RECIPE_TOKEN_LOAD = {
+    "qwen3-8b": RecipeTokenLoad(19_181_870, 382_164, 4, 1_146_257, 628),
+    "qwen3.5-4b": RecipeTokenLoad(19_669_672, 391_602, 4, 1_174_401, 628),
+    "qwen3.5-9b": RecipeTokenLoad(19_669_672, 391_602, 4, 1_174_401, 628),
+}
 
 
 def rebased(arm: str) -> WatcherRecipe:
@@ -152,8 +174,10 @@ class FakeBackend:
         self.score_calls: list[SimpleNamespace] = []
         self.materialized: list[object] = []
         self.trained: list[object] = []
+        self.fit_spec: object = None
 
     async def fit(self, spec: object, *, sink: object, checkpoints: object, eval_rows: object) -> SimpleNamespace:
+        self.fit_spec = spec
         return SimpleNamespace(checkpoints=self.checkpoints, train_cost_usd=self.train_cost_usd)
 
     async def score(self, path: str, rows: object, *, base: object, max_usd: float) -> tuple[SimpleNamespace, ...]:
@@ -191,8 +215,17 @@ def stub_plan() -> SimpleNamespace:
         SimpleNamespace(step=150, path="tinker://ckpt-c"),
     ]
     select = {"tinker://ckpt-a": 0.6, "tinker://ckpt-b": 0.9, "tinker://ckpt-c": 0.7}
+    # A real (frozen) TrainSpec so observe_fit_score's dataclasses.replace(..., max_usd=harness_cap)
+    # is exercised as it runs in production; max_usd=15.0 is the recipe's own fit cap the sweep overrides.
+    spec = TrainSpec(
+        name="watcher-base-sweep-stub",
+        base=BASE_MODELS["qwen3.5-9b"],
+        dataset=Rows(examples=()),
+        hyperparams=Hyperparams(steps=3, batch_size=1),
+        max_usd=15.0,
+    )
     return SimpleNamespace(
-        spec=SimpleNamespace(),
+        spec=spec,
         policy=SimpleNamespace(),
         eval_rows=(),
         select=lambda checkpoint: select[checkpoint.path],
@@ -223,6 +256,16 @@ class TestFitScoreComposition:
         backend = FakeBackend(checkpoints, perfect_scores(), train_cost_usd=13.0)
         self._run(backend, plan, tmp_path, monkeypatch, spend_cap_usd=20.0)
         assert backend.score_calls[0].max_usd == pytest.approx(7.0)
+
+    def test_fit_is_bound_by_harness_cap_not_recipe_cap(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The pinned cap must bound fit + score together, so the fit runs under the harness cap, not the
+        # recipe's own spend_cap_usd. Binding the fit to the $15 recipe cap starves the pricier 9B arm,
+        # whose identical schedule projects ~$26.85 (> $15) and can never establish a baseline.
+        plan, checkpoints = stub_plan()
+        assert plan.spec.max_usd == 15.0  # the recipe's own fit cap
+        backend = FakeBackend(checkpoints, perfect_scores(), train_cost_usd=13.0)
+        self._run(backend, plan, tmp_path, monkeypatch, spend_cap_usd=24.0)
+        assert backend.fit_spec.max_usd == 24.0  # overridden to the harness cap, not the recipe's $15
 
     def test_staging_removed_on_success(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         plan, checkpoints = stub_plan()
@@ -258,12 +301,23 @@ class TestSweepSpec:
         assert spec.metric_file == METRIC_FILE
 
     @pytest.mark.parametrize("arm", ARMS)
-    def test_pinned_cap_covers_recipe_default_fit_plus_headroom(self, arm: str) -> None:
-        # --spend-cap-usd is the only metric-spend guard; it must cover the default recipe's fit cap
-        # ($15) with headroom for the Tinker-frame score, so the default recipe never self-refuses.
+    def test_pinned_cap_covers_default_recipe_fit_plus_score_projection(self, arm: str) -> None:
+        # The real guard finding #2's weaker "cap > $15" check missed: project the default recipe's
+        # actual fit schedule and full-frame score cost at athome's real price sheet, and assert the
+        # pinned --spend-cap-usd covers both. The token load is the same identical schedule on every
+        # arm, so the projection scales purely with the arm's per-Mtok price — the 9B bills 3.325x the
+        # 8B train rate, which a cap sized by arm rather than by price silently under-provisions.
+        price = TinkerSettings.model_fields["price_per_mtok"].default_factory()[BASE_MODELS[arm].tinker]
+        load = DEFAULT_RECIPE_TOKEN_LOAD[arm]
+        fit = (load.train_tokens * price.train + load.eval_datum_tokens * load.snapshots * price.prefill) / 1e6
+        score = (load.score_prefill_tokens * price.prefill + load.score_rows * price.sample) / 1e6
         spec = ExperimentSpec.load(EXPERIMENTS / f"watcher-base-sweep-{arm}.toml")
         command = spec.metric_command
-        assert float(command[command.index("--spend-cap-usd") + 1]) > WatcherRecipe.default().spend_cap_usd
+        cap = float(command[command.index("--spend-cap-usd") + 1])
+        # observe_fit_score binds the fit to this cap (not the recipe's $15) and gives the score the
+        # remainder, so both the fit alone and fit + score must fit under the pinned cap.
+        assert fit <= cap, f"{arm}: default-recipe fit projects ${fit:.4f}, over the pinned cap ${cap:.4f}"
+        assert fit + score <= cap, f"{arm}: fit+score projects ${fit + score:.4f}, over the pinned cap ${cap:.4f}"
 
     @pytest.mark.parametrize("arm", ARMS)
     def test_budget_max_usd_is_a_driver_backstop_not_metric_spend(self, arm: str) -> None:
