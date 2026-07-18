@@ -720,7 +720,7 @@ wheels = [
 
 [[package]]
 name = "experiment-at-home"
-version = "0.7.0"
+version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -731,9 +731,9 @@ dependencies = [
     { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pydantic-settings", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/98/c3/e8e2ebd8ac79c1eb060e1d768865605e24415812313a6dfb4a843b210169/experiment_at_home-0.7.0.tar.gz", hash = "sha256:47617f9af4088e87f445ee74291d4cf300237c39575ae4234ad707f00c01c774", size = 177553, upload-time = "2026-07-18T05:06:57.002Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/68/0eeb64d0387c03b622697b090766356715e2eae54cf69503e5be1cafb878/experiment_at_home-0.7.1.tar.gz", hash = "sha256:0c81036c0dc2ce997fe76b2c647ccec0d899e6cecc5c6a5f8080522701e8386d", size = 177701, upload-time = "2026-07-18T07:13:58.714Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/06/154388ba92c42f7744b306d8aaac6b06ce508f2bad2411e87d9dd010cc2c/experiment_at_home-0.7.0-py3-none-any.whl", hash = "sha256:0ed401cf834d610374c8b0118aac04deb9c40517b7e7ccb9e1c46a1b43dece16", size = 219655, upload-time = "2026-07-18T05:06:55.644Z" },
+    { url = "https://files.pythonhosted.org/packages/34/49/651fc775c03deb759700355b623e7cbbdab22a1ed855f13bd8d706c9a80c/experiment_at_home-0.7.1-py3-none-any.whl", hash = "sha256:aee61a6fc0f92e01e58c8b58e64306f7f60d428d8236aa32701e9dad0ac02439", size = 219972, upload-time = "2026-07-18T07:13:57.107Z" },
 ]
 
 [package.optional-dependencies]
