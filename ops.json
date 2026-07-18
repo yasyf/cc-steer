@@ -1,1 +1,1 @@
-{"v":1,"lamport":4,"ops":[{"kind":"append_entry","text":"watcher: rejected (candidate AUC 0.1500 \u003c= incumbent 0.1500); serving diagnostic failed (RuntimeError: reject diagnostic failed)"}]}
+{"v":1,"lamport":5,"session":"2a4798ff-cc88-4a29-8fd1-e06f78268b10","ops":[{"kind":"append_entry","text":"watcher: fresh-epoch promoted v002-20260718-cdfabf2f3a48 (served AUC 0.9317, no incumbent gate); watch kickstart ok"}]}
