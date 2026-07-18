@@ -939,9 +939,10 @@ async def export(
     )
     hf_revision = None
     if push_to is not None:
-        hf_revision = [
-            splits.push_to_hub(push_to, config_name=config, private=True).oid for config, splits in built.items()
-        ][-1]
+        pushes = [splits.push_to_hub(push_to, config_name=config, private=True) for config, splits in built.items()]
+        if (commit := pushes[-1]) is None:
+            raise RuntimeError(f"hub push for {push_to} returned no commit; the export would lose its provenance")
+        hf_revision = commit.oid
         HfApi().upload_file(path_or_fileobj=card, path_in_repo="README.md", repo_id=push_to, repo_type="dataset")
         _write_hf_push(out, repo_id=push_to, hf_revision=hf_revision)
     return ExportReport(
