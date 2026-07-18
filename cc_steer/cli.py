@@ -1005,6 +1005,29 @@ def retrain_(
     )
 
 
+@main.command(name="score-watcher")
+@click.option(
+    "--recipe",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="JSON recipe to score; defaults to the packaged E8-winner recipe.",
+)
+def score_watcher_(recipe: Path | None) -> None:
+    """Score one watcher recipe through the served-MLX instrument and write ``.athome-metric.json``.
+
+    The pure-observer metric command the base-model sweep's ExperimentSpec invokes: it trains and
+    scores the recipe and reports the served sentinel AUC on the athome metric channel, with no
+    registry, journal, or promotion side effects. Run from the experiment working directory so the
+    metric lands beside it.
+    """
+    from cc_steer.retrain import sweep, watcher
+
+    metric = sweep.score_watcher(
+        recipe=watcher.WatcherRecipe.from_json(recipe) if recipe is not None else watcher.WatcherRecipe.default()
+    )
+    click.echo(f"watcher score: served sentinel AUC {metric:.4f}")
+
+
 @main.command(name="freeze-eval")
 def freeze_eval_() -> None:
     """Freeze the gate and watcher eval views from the current export into ~/.cc-steer/eval/.

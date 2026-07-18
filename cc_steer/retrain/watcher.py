@@ -63,6 +63,10 @@ from cc_steer.watcher import drafter_mlx
 from cc_steer.watcher.cascade import DRAFT_SYSTEM
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from athome.train import EvalRow
+
     from cc_steer.retrain.promotion import GateResult
 
 WATCHER_COMPONENT = drafter_mlx.COMPONENT
@@ -169,6 +173,17 @@ class IncumbentGate(NamedTuple):
     version: str
     probs: np.ndarray
     threshold: float
+
+
+class TrainPlan(NamedTuple):
+    """The training request plus the two scoring closures derived from one recipe over a frame's val split."""
+
+    spec: TrainSpec
+    policy: CheckpointPolicy
+    eval_rows: tuple[EvalRow, ...]
+    val_labels: np.ndarray
+    select: Callable[[SavedCheckpoint], float]
+    artifact_scorer: Callable[[Adapter], dict[str, float]]
 
 
 def load_key(*, path: Path | None = None) -> None:
@@ -309,41 +324,11 @@ def retrain_watcher(
             float(incumbent.metadata["thresholds"]["budget"]),
         )
 
-    rows = data.load_train_rows(dataset_dir=dataset_dir)
-    rows = [rows[i] for i in data.near_dup_representatives(rows, seed=recipe.seed)[0]]
-    val, rest = data.carve_val(rows, n=min(recipe.val_n, len(rows) // 10), seed=recipe.seed)
-    pool = data.oversample_corrective_to(
-        data.balance_no_steer(rest, seed=recipe.seed)[0], factor=recipe.oversample_corrective, seed=recipe.seed
-    )[0]
-
-    examples = tuple(_sft_example(row) for row in pool)
-    val_labels = np.array([row.label for row in val], dtype=bool)
-    eval_rows = tuple(sentinel.sentinel_eval_row(DRAFT_SYSTEM, row.draft_text(), recipe.mlx_id) for row in val)
-    steps = recipe.epochs * math.ceil(len(examples) / recipe.batch_size)
-
-    spec = TrainSpec(
-        name=WATCHER_COMPONENT,
-        base=base,
-        dataset=Rows(examples=examples),
-        hyperparams=Hyperparams(
-            steps=steps,
-            batch_size=recipe.batch_size,
-            learning_rate=recipe.learning_rate,
-            max_seq_len=recipe.max_tokens,
-            seed=recipe.seed,
-        ),
-        method="sft",
-        lora=LoraSpec(rank=recipe.rank),
-        max_usd=recipe.spend_cap_usd,
+    spec, policy, eval_rows, val_labels, select, artifact_scorer = build_train_plan(
+        recipe, frame, base, dataset_dir=dataset_dir
     )
-    policy = CheckpointPolicy(at=tuple(frac for frac in recipe.checkpoint_fracs if frac < 1.0))
+    steps = spec.hyperparams.steps
     warranted = frame.corrective & frame.prose
-
-    def select(saved: SavedCheckpoint) -> float:
-        return sentinel.checkpoint_auc(val_labels, saved)
-
-    def artifact_scorer(adapter: Adapter) -> dict[str, float]:
-        return _score_frame_local(frame, adapter.adapter_dir, recipe)
 
     def gate(_served: dict[str, float]) -> GateVerdict:
         # The incumbent-relative decision needs the async judged gate, so it is made in run() below via
@@ -478,6 +463,58 @@ def retrain_watcher(
         metrics=gate_stats | diagnostic | {"tinker_val_auc": best_val_auc, "threshold_budget": threshold},
         version=info.version,
         state_dir=state_dir,
+    )
+
+
+def build_train_plan(
+    recipe: WatcherRecipe, frame: evalset.EvalFrame, base: BaseModelSpec, *, dataset_dir: Path | None = None
+) -> TrainPlan:
+    """The :class:`~athome.train.TrainSpec` and scoring closures for one recipe over ``frame``'s val split.
+
+    Curates the training pool (near-dup collapse, negative balance, corrective oversample), renders the
+    carved-out val split as sentinel eval rows, and derives the checkpoint-selecting ``select`` and the
+    served-MLX ``artifact_scorer``. Shared by the promotion pass (:func:`retrain_watcher`) and the
+    base-model sweep's pure-observer scorer (:mod:`cc_steer.retrain.sweep`) so both train and score
+    through one instrument.
+    """
+    rows = data.load_train_rows(dataset_dir=dataset_dir)
+    rows = [rows[i] for i in data.near_dup_representatives(rows, seed=recipe.seed)[0]]
+    val, rest = data.carve_val(rows, n=min(recipe.val_n, len(rows) // 10), seed=recipe.seed)
+    pool = data.oversample_corrective_to(
+        data.balance_no_steer(rest, seed=recipe.seed)[0], factor=recipe.oversample_corrective, seed=recipe.seed
+    )[0]
+    examples = tuple(_sft_example(row) for row in pool)
+    val_labels = np.array([row.label for row in val], dtype=bool)
+    eval_rows = tuple(sentinel.sentinel_eval_row(DRAFT_SYSTEM, row.draft_text(), recipe.mlx_id) for row in val)
+    spec = TrainSpec(
+        name=WATCHER_COMPONENT,
+        base=base,
+        dataset=Rows(examples=examples),
+        hyperparams=Hyperparams(
+            steps=recipe.epochs * math.ceil(len(examples) / recipe.batch_size),
+            batch_size=recipe.batch_size,
+            learning_rate=recipe.learning_rate,
+            max_seq_len=recipe.max_tokens,
+            seed=recipe.seed,
+        ),
+        method="sft",
+        lora=LoraSpec(rank=recipe.rank),
+        max_usd=recipe.spend_cap_usd,
+    )
+
+    def select(saved: SavedCheckpoint) -> float:
+        return sentinel.checkpoint_auc(val_labels, saved)
+
+    def artifact_scorer(adapter: Adapter) -> dict[str, float]:
+        return _score_frame_local(frame, adapter.adapter_dir, recipe)
+
+    return TrainPlan(
+        spec=spec,
+        policy=CheckpointPolicy(at=tuple(frac for frac in recipe.checkpoint_fracs if frac < 1.0)),
+        eval_rows=eval_rows,
+        val_labels=val_labels,
+        select=select,
+        artifact_scorer=artifact_scorer,
     )
 
 
