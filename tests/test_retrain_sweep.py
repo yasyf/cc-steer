@@ -22,10 +22,10 @@ SPEC_PATH = Path(__file__).resolve().parents[1] / "experiments" / "watcher-base-
 STUB_SCORER = (
     "import json\n"
     "from pathlib import Path\n"
-    "import anyio\n"
-    "from athome.train import write_metric\n"
+    "from cc_steer.retrain import sweep\n"
+    "from cc_steer.retrain.watcher import WatcherRecipe\n"
     "knob = json.loads(Path('watcher_recipe.json').read_text())['knob']\n"
-    "anyio.run(write_metric, float(knob))\n"
+    "sweep.score_watcher(WatcherRecipe.default(), train_and_score=lambda recipe, *, dataset_dir, eval_root: float(knob))\n"
 )
 
 
@@ -137,7 +137,8 @@ def init_repo(tmp_path: Path) -> Path:
 
 class TestStubDriverDryRun:
     def test_full_loop_keeps_the_strict_improvements(self, tmp_path: Path) -> None:
-        # Spend-free dry run of the greedy loop; the stub scorer stands in for the paid metric_command.
+        # Spend-free dry run of the greedy loop: the metric_command drives the real sweep.score_watcher
+        # observer with an injected stub train_and_score, so the loop exercises cc-steer's sweep code.
         repo = init_repo(tmp_path)
         spec = ExperimentSpec(
             name="watcher-base-sweep-dryrun",

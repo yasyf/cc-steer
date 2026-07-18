@@ -1017,8 +1017,8 @@ def score_watcher_(recipe: Path | None) -> None:
 
     The pure-observer metric command the base-model sweep's ExperimentSpec invokes: it trains and
     scores the recipe and reports the served sentinel AUC on the athome metric channel, with no
-    registry, journal, or promotion side effects. Run from the experiment working directory so the
-    metric lands beside it.
+    registry, retrain-journal, or promotion side effects. Run from the experiment working directory so
+    the metric lands beside it.
     """
     from cc_steer.retrain import sweep, watcher
 

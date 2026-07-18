@@ -7,8 +7,9 @@ arm-parameterized instrument that runs the moment a second arm becomes servable:
 :func:`servable_arms` enumerates the servable bases, :func:`base_for_recipe` resolves the arm a
 recipe trains on, and :func:`score_watcher` trains and scores one recipe through the served-MLX
 instrument and reports the served sentinel AUC via :func:`athome.train.write_metric` with zero
-registry, journal, or promotion side effects — the sweep loop owns keep/discard, this stays a
-measurement. ``experiments/watcher-base-sweep.toml`` is the per-arm
+registry, retrain-journal, or promotion side effects — the sweep loop owns keep/discard, this stays
+a measurement (athome's mandatory per-run progress sink is a throwaway work-dir instrument, not the
+retrain journal). ``experiments/watcher-base-sweep.toml`` is the per-arm
 :class:`~athome.research.spec.ExperimentSpec` whose ``metric_command`` invokes ``cc-steer
 score-watcher``; its ``metric_key`` is ``"metric"`` to match :func:`~athome.train.write_metric`'s
 channel.
@@ -77,7 +78,10 @@ def paid_train_and_score(recipe: WatcherRecipe, *, dataset_dir: Path | None, eva
     own spend cap, materializes the best checkpoint into the local MLX serving stack, and scores the
     frozen eval frame through it — the exact instrument the promotion pass gates on, minus the gate.
     Never called by the test suite (:func:`score_watcher` takes an injected scorer); the orchestrator
-    runs it behind its own spend gate.
+    runs it behind its own spend gate. athome requires a per-run :class:`~athome.progress.RunSink`, so
+    this opens ``progress.jsonl`` in a throwaway staging work dir — the same per-run instrument
+    :func:`~cc_steer.retrain.watcher.retrain_watcher` opens, distinct from the ``~/.cc-steer`` retrain
+    journal this observer never touches.
     """
     import tempfile
     from pathlib import Path
@@ -127,8 +131,8 @@ def score_watcher(
     Trains and scores ``recipe`` through the served-MLX instrument, then writes the served sentinel
     AUC to ``.athome-metric.json`` in the working directory via :func:`athome.train.write_metric` —
     the structured channel the sweep's :class:`~athome.research.spec.ExperimentSpec` reads. Unlike
-    :func:`~cc_steer.retrain.watcher.retrain_watcher` it never registers, promotes, journals, or
-    writes incumbent probs: the sweep loop owns keep/discard, so this is measurement only. The paid
+    :func:`~cc_steer.retrain.watcher.retrain_watcher` it never registers, promotes, writes the retrain
+    journal, or writes incumbent probs: the sweep loop owns keep/discard, so this is measurement only. The paid
     ``train_and_score`` is injectable so tests exercise the wiring without spend.
 
     Returns:
