@@ -58,7 +58,7 @@ from athome.train.gate import GateVerdict
 from athome.train.tinker import TinkerBackend
 
 from cc_steer import launchd, registry
-from cc_steer.retrain import data, evalset, promotion, sentinel
+from cc_steer.retrain import data, evalset, judged, promotion, sentinel
 from cc_steer.watcher import drafter_mlx
 from cc_steer.watcher.cascade import DRAFT_SYSTEM
 
@@ -345,19 +345,32 @@ def retrain_watcher(
     def artifact_scorer(adapter: Adapter) -> dict[str, float]:
         return _score_frame_local(frame, adapter.adapter_dir, recipe)
 
-    def gate(served: dict[str, float]) -> GateVerdict:
-        if incumbent_gate is None:
-            return GateVerdict(promote=True, reason="fresh-epoch floor deferred", stats={})
+    def gate(_served: dict[str, float]) -> GateVerdict:
+        # The incumbent-relative decision needs the async judged gate, so it is made in run() below via
+        # judged_gate; athome only records this placeholder, which the fresh-epoch floor never consults.
+        return GateVerdict(promote=True, reason="deferred to judged gate", stats={})
+
+    async def judged_gate(gate_state: IncumbentGate, served: dict[str, float]) -> GateVerdict:
         served_arr = np.array([served[row_id] for row_id in frame.ids], dtype=np.float64)
+        candidate_fire, incumbent_fire = 1.0 - served_arr, 1.0 - gate_state.probs
+        incumbent_fire_threshold = 1.0 - gate_state.threshold
+        harmful = await judged.judged_harmful_favors_incumbent(
+            candidate_fire_scores=candidate_fire,
+            incumbent_fire_scores=incumbent_fire,
+            incumbent_fire_threshold=incumbent_fire_threshold,
+            frame=frame,
+            warranted=warranted,
+            root=eval_root,
+        )
         result = promotion.corrected_gate(
-            1.0 - served_arr,
-            1.0 - incumbent_gate.probs,
+            candidate_fire,
+            incumbent_fire,
             candidate="candidate",
-            incumbent=incumbent_gate.version,
-            incumbent_fire_threshold=1.0 - incumbent_gate.threshold,
+            incumbent=gate_state.version,
+            incumbent_fire_threshold=incumbent_fire_threshold,
             labels=frame.labels,
             warranted=warranted,
-            harmful_favors_incumbent=None,
+            harmful_favors_incumbent=harmful,
         )
         verdict = promotion.watcher_promotable(result)
         return GateVerdict(promote=bool(verdict.promote), reason=verdict.reason, stats=_gate_stats(result))
@@ -369,7 +382,7 @@ def retrain_watcher(
     work_dir = Path(tempfile.mkdtemp(prefix="watcher-", dir=stage))
     sink = RunSink.open(work_dir / RUN_JOURNAL_NAME)
 
-    async def run() -> tuple[RetrainOutcome, dict[str, float], str]:
+    async def run() -> tuple[RetrainOutcome, GateVerdict, dict[str, float], str]:
         outcome = await athome_retrain(
             backend,
             spec,
@@ -383,12 +396,16 @@ def retrain_watcher(
         )
         # Runs after materialization but before the verdict acts, so per-row evidence survives a reject;
         # the boundary keeps its own failure off the outcome.
-        return (outcome, *await _safe_serving_diagnostic(
+        diagnostic, diag_note = await _safe_serving_diagnostic(
             backend, outcome.best.path, frame, outcome.served, base, recipe, work_dir / DIAGNOSTIC_NAME
-        ))
+        )
+        # The incumbent-relative gate — free metrics plus the judged harmful-fire term that buys opus
+        # votes — runs here in the async path; fresh-epoch has no incumbent and rides the served AUC floor.
+        verdict = await judged_gate(incumbent_gate, outcome.served) if incumbent_gate is not None else outcome.verdict
+        return outcome, verdict, diagnostic, diag_note
 
     try:
-        outcome, diagnostic, diag_note = anyio.run(run)
+        outcome, verdict, diagnostic, diag_note = anyio.run(run)
     except (SpendExceeded, InsufficientData) as error:
         return promotion.journal(
             WATCHER_COMPONENT,
@@ -411,18 +428,18 @@ def retrain_watcher(
             )
         gate_stats: dict[str, float] = {}
         reason = f"served AUC {eval_auc:.4f}, no incumbent gate"
-    elif not outcome.verdict.promote:
+    elif not verdict.promote:
         return promotion.journal(
             WATCHER_COMPONENT,
-            f"rejected ({outcome.verdict.reason}){diag_suffix}",
+            f"rejected ({verdict.reason}){diag_suffix}",
             dataset_digest=digest,
             hf_revision=hf_revision,
-            metrics=outcome.verdict.stats | diagnostic,
+            metrics=verdict.stats | diagnostic,
             state_dir=state_dir,
         )
     else:
-        gate_stats = outcome.verdict.stats
-        reason = outcome.verdict.reason
+        gate_stats = verdict.stats
+        reason = verdict.reason
 
     # Store on the P(NO_STEER) scale (fire iff p < it); the cut is on 1 - p, so 1 - cut (lab ~0.15, run_e12.py:116).
     fire_score_cut = promotion.threshold_for_budget(

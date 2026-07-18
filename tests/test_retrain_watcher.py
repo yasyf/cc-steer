@@ -21,7 +21,7 @@ from athome.train import (
 )
 
 from cc_steer import launchd, registry
-from cc_steer.retrain import data, evalset, promotion, sentinel
+from cc_steer.retrain import data, evalset, judged, promotion, sentinel
 from cc_steer.retrain import watcher as w
 from cc_steer.retrain.evalset import ProbsStoreError
 from cc_steer.retrain.watcher import FreshEpochError, WatcherRecipe, WatcherRetrainError
@@ -235,7 +235,9 @@ class Lane:
     frame: evalset.EvalFrame
     incumbent: registry.VersionInfo
     calls: dict[str, int] = field(
-        default_factory=lambda: {"retrain": 0, "materialize": 0, "score": 0, "score_local": 0, "kickstart": 0}
+        default_factory=lambda: {
+            "retrain": 0, "materialize": 0, "score": 0, "score_local": 0, "kickstart": 0, "judged": 0
+        }
     )
     candidate: np.ndarray = field(default_factory=lambda: CANDIDATE_WIN.copy())
     tinker: np.ndarray | None = None
@@ -244,6 +246,7 @@ class Lane:
     materialize_error: Exception | None = None
     diagnostic_error: Exception | None = None
     kickstart_result: bool = True
+    judged_harmful: bool = False
 
     def run(
         self, *, force: bool = True, fresh_epoch: bool = False, recipe: WatcherRecipe = WatcherRecipe.default()
@@ -364,6 +367,13 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
         obj.calls["kickstart"] += 1
         return obj.kickstart_result
 
+    async def fake_judged(**_kwargs: Any) -> bool:
+        # The judged gate buys opus votes behind a golden gate; the lane stubs the whole flow and only
+        # feeds the harmful-fire aggregate back into corrected_gate. TestJudgedGate exercises the real path.
+        obj.calls["judged"] += 1
+        return obj.judged_harmful
+
+    monkeypatch.setattr(judged, "judged_harmful_favors_incumbent", fake_judged)
     monkeypatch.setattr(w, "load_key", lambda **_: None)
     monkeypatch.setattr(w, "TinkerBackend", FakeBackend)
     monkeypatch.setattr(w, "athome_retrain", fake_retrain)
@@ -464,6 +474,18 @@ class TestRetrainWatcher:
         assert lane.calls["materialize"] == 1
         assert lane.calls["score_local"] == 1
         assert lane.calls["score"] == 1  # the diagnostic still runs, before the verdict acts
+        assert lane.calls["kickstart"] == 0
+        assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
+        assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version
+
+    def test_judged_harm_refuses_promotion_despite_free_pass(self, lane: Lane) -> None:
+        # The candidate clears every free-metric bar, but the judged gate finds its disagreement fires
+        # net harmful; corrected_gate.promote must refuse and the pass rejects without registering.
+        lane.judged_harmful = True
+        verdict = lane.run()
+        assert verdict.startswith("watcher: rejected")
+        assert "harmful_favors_incumbent=True" in verdict
+        assert lane.calls["judged"] == 1
         assert lane.calls["kickstart"] == 0
         assert len(registry.versions(w.WATCHER_COMPONENT, root=lane.registry_root)) == 1
         assert registry.current(w.WATCHER_COMPONENT, root=lane.registry_root).version == lane.incumbent.version

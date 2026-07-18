@@ -8,7 +8,10 @@ fire signal as athome eval rows, and :func:`athome.train.retrain` trains a LoRA 
 Thinking Machines' managed Tinker API under a hard spend cap and scores checkpoints.
 :mod:`~cc_steer.retrain.evalset` freezes the promotion eval and stores incumbent
 probabilities. :mod:`~cc_steer.retrain.promotion` runs the free-metric promotion
-bars and journals every verdict. The two component lanes tie it together:
+bars and journals every verdict, and :mod:`~cc_steer.retrain.judged` extends the
+watcher bar with an opus panel that grades the disagreement fires behind a golden
+gate when free metrics alone cannot tell a helpful extra fire from noise. The two
+component lanes tie it together:
 :mod:`~cc_steer.retrain.lexical` retrains the stage-1 gate, and
 :mod:`~cc_steer.retrain.watcher` trains, gates, converts, and promotes the stage-2
 LoRA watcher.

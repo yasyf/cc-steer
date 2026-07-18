@@ -76,10 +76,24 @@ class Verdict:
 
 
 def watcher_promotable(result: GateResult) -> Verdict:
-    """The free-metric watcher bar: strict AUC beat, budget held, coverage wins >= losses.
+    """The watcher bar: the judged verdict when it exists, else the free-metric bar.
 
-    Fails closed on a non-finite AUC: a NaN on either side is a degenerate score, never a beat.
+    Once the harmful-fire judging has run, :attr:`GateResult.promote` folds the free metrics
+    together with the judged term, so it is authoritative — a ``harmful_favors_incumbent`` verdict
+    refuses promotion even when the free metrics pass. While judging is pending
+    (``result.promote is None``) this falls back to the free-metric bar: a strict AUC beat, the fire
+    budget held, and coverage wins at least matching losses. Fails closed on a non-finite AUC: a NaN
+    on either side is a degenerate score, never a beat.
     """
+    if result.promote is not None:
+        return Verdict(
+            result.promote,
+            f"judged gate {'promotes' if result.promote else 'refuses'}: "
+            f"harmful_favors_incumbent={result.harmful_favors_incumbent}, coverage "
+            f"{result.coverage_wins}/{result.coverage_losses} (sig {result.coverage_sig}), "
+            f"budget {'held' if result.budget_held else 'exceeded'}, "
+            f"AUC {result.cell_auc:.4f} vs {result.incumbent_auc:.4f}",
+        )
     if not all(
         np.isfinite(value)
         for value in (result.cell_auc, result.incumbent_auc, result.coverage_wins, result.coverage_losses)

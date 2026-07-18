@@ -79,6 +79,32 @@ class TestWatcherBar:
         assert watcher_promotable(gate_result(**overrides)) == expected
 
 
+class TestJudgedVerdictDecides:
+    def test_harmful_refuses_despite_free_pass(self) -> None:
+        # Free metrics pass (the gate_result default), but the judged term vetoes: promote is False.
+        verdict = watcher_promotable(gate_result(harmful_favors_incumbent=True, promote=False))
+        assert verdict.promote is False
+        assert "refuses" in verdict.reason and "harmful_favors_incumbent=True" in verdict.reason
+
+    def test_clean_judged_verdict_promotes(self) -> None:
+        verdict = watcher_promotable(gate_result(harmful_favors_incumbent=False, promote=True))
+        assert verdict.promote is True
+        assert "promotes" in verdict.reason and "harmful_favors_incumbent=False" in verdict.reason
+
+    def test_free_pass_failure_refuses_even_when_not_harmful(self) -> None:
+        # promote is folded from free_pass AND the judged term; a failed free metric refuses too.
+        verdict = watcher_promotable(
+            gate_result(harmful_favors_incumbent=False, promote=False, coverage_sig=False)
+        )
+        assert verdict.promote is False
+
+    def test_pending_judgment_falls_back_to_free_metric_bar(self) -> None:
+        # promote is None while judging is pending -> the free-metric bar decides, unchanged.
+        assert watcher_promotable(gate_result()) == Verdict(
+            True, "candidate AUC 0.8000 > incumbent 0.7000, budget held, coverage 5 >= 0"
+        )
+
+
 class TestGateBar:
     def test_no_incumbent_promotes(self) -> None:
         assert gate_promotable(GOOD, None) == Verdict(True, "no incumbent")
