@@ -375,8 +375,8 @@ requires-dist = [
     { name = "cc-transcript", specifier = ">=13.1,<14" },
     { name = "click", specifier = ">=8" },
     { name = "datasets", specifier = ">=3.2" },
-    { name = "experiment-at-home", extras = ["gate"], specifier = ">=0.6,<0.7" },
-    { name = "experiment-at-home", extras = ["train"], marker = "extra == 'retrain'", specifier = ">=0.6,<0.7" },
+    { name = "experiment-at-home", extras = ["gate"], specifier = ">=0.7,<0.8" },
+    { name = "experiment-at-home", extras = ["train"], marker = "extra == 'retrain'", specifier = ">=0.7,<0.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.27" },
@@ -720,7 +720,7 @@ wheels = [
 
 [[package]]
 name = "experiment-at-home"
-version = "0.6.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -731,9 +731,9 @@ dependencies = [
     { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pydantic-settings", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/91/e7/dc83402f52ac2d345fadfa08511e0535fbc844d5e87c59c0afff5b570b25/experiment_at_home-0.6.0.tar.gz", hash = "sha256:bb302586b4679269e354b3de46de42eebfd5c005114b7e01ac2f71451dcd2d82", size = 133428, upload-time = "2026-07-17T12:51:31.061Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/98/c3/e8e2ebd8ac79c1eb060e1d768865605e24415812313a6dfb4a843b210169/experiment_at_home-0.7.0.tar.gz", hash = "sha256:47617f9af4088e87f445ee74291d4cf300237c39575ae4234ad707f00c01c774", size = 177553, upload-time = "2026-07-18T05:06:57.002Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fa/d1/8ecb96211373f8f884acb491270a86ef5075b8ec554c830e55b17b5a7efe/experiment_at_home-0.6.0-py3-none-any.whl", hash = "sha256:d58459c60eaa36e0ee465e2e9a2fa205196fe4143d8f0eca93b75c0b6d22a3ab", size = 168449, upload-time = "2026-07-17T12:51:29.631Z" },
+    { url = "https://files.pythonhosted.org/packages/db/06/154388ba92c42f7744b306d8aaac6b06ce508f2bad2411e87d9dd010cc2c/experiment_at_home-0.7.0-py3-none-any.whl", hash = "sha256:0ed401cf834d610374c8b0118aac04deb9c40517b7e7ccb9e1c46a1b43dece16", size = 219655, upload-time = "2026-07-18T05:06:55.644Z" },
 ]
 
 [package.optional-dependencies]
