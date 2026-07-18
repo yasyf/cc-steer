@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, NamedTuple
 import anyio
 import numpy as np
 from athome.errors import AthomeError
-from athome.llm.spend import SpendExceeded
 from athome.progress import RunSink
 from athome.train import (
     BASE_MODELS,
@@ -51,11 +50,13 @@ from athome.train import (
     Rows,
     SavedCheckpoint,
     SftExample,
+    SpendExceeded,
+    SpendGuard,
+    TinkerBackend,
     TrainSpec,
 )
 from athome.train import retrain as athome_retrain
 from athome.train.gate import GateVerdict
-from athome.train.tinker import TinkerBackend
 
 from cc_steer import launchd, registry
 from cc_steer.retrain import data, evalset, judged, promotion, sentinel
@@ -374,6 +375,7 @@ def retrain_watcher(
             spec,
             checkpoints=policy,
             eval_rows=eval_rows,
+            budget=SpendGuard(max_usd=recipe.spend_cap_usd),
             select=select,
             artifact_scorer=artifact_scorer,
             gate=gate,
@@ -607,7 +609,7 @@ async def _serving_diagnostic(
     """
     idx = _stratified_indices(frame.labels, n=recipe.diagnostic_rows, seed=recipe.seed)
     rows = [sentinel.sentinel_eval_row(DRAFT_SYSTEM, frame.tails[i], recipe.mlx_id) for i in idx]
-    scored = await backend.score(tinker_path, rows, base=base, max_usd=recipe.spend_cap_usd)
+    scored = await backend.score(tinker_path, rows, base=base, budget=SpendGuard(max_usd=recipe.spend_cap_usd))
     tinker_probs = {frame.ids[i]: math.exp(scored[k].logprob) for k, i in enumerate(idx)}
     diffs = {i: abs(served_probs[frame.ids[i]] - tinker_probs[frame.ids[i]]) for i in idx}
     summary = {

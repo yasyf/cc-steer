@@ -323,6 +323,7 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
         *,
         checkpoints: Any,
         eval_rows: Any,
+        budget: Any,
         select: Any,
         artifact_scorer: Any,
         gate: Any,
@@ -352,7 +353,7 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
         (adapter_dir / drafter_mlx.ADAPTER_NAME).write_bytes(b"cand")
         (adapter_dir / drafter_mlx.ADAPTER_CONFIG_NAME).write_text("{}")
         obj.calls["materialize"] += 1
-        adapter = Adapter(step=best.step, adapter_dir=adapter_dir, train_cost_usd=1.23)
+        adapter = Adapter(step=best.step, adapter_dir=adapter_dir, train_cost_usd=1.23, sampler_path=best.path)
         served = artifact_scorer(adapter)
         verdict = gate(served)
         report = TrainReport(method="sft", steps=(), checkpoints=saved, dropped=0, wall_s=0.0, train_cost_usd=1.23)
@@ -364,7 +365,7 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
             return cls()
 
         async def score(
-            self, path: str, rows: Any, *, base: Any, max_usd: float | None = None
+            self, path: str, rows: Any, *, base: Any, budget: Any = None
         ) -> tuple[ScoredSequence, ...]:
             obj.calls["score"] += 1
             if obj.diagnostic_error is not None:

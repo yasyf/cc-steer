@@ -16,7 +16,7 @@ import pytest
 from athome.research import loop
 from athome.research.driver import StubDriver, StubProposal
 from athome.research.spec import Budget, ExperimentSpec
-from athome.train import BASE_MODELS, METRIC_FILE, METRIC_KEY
+from athome.train import BASE_MODELS, METRIC_FILE, METRIC_KEY, SpendGuard
 from athome.train.spec import EvalRow, Hyperparams, Rows, TinkerSettings, TrainSpec
 
 from cc_steer.retrain import sweep
@@ -175,13 +175,20 @@ class FakeBackend:
         self.materialized: list[object] = []
         self.trained: list[object] = []
         self.fit_spec: object = None
+        self.fit_budget: SpendGuard | None = None
+        self.score_budget: SpendGuard | None = None
 
-    async def fit(self, spec: object, *, sink: object, checkpoints: object, eval_rows: object) -> SimpleNamespace:
+    async def fit(self, spec: object, *, sink: object, budget: SpendGuard, checkpoints: object, eval_rows: object) -> SimpleNamespace:
+        # Mirror athome's fit: the run drains and its actual cost is recorded against the shared envelope,
+        # so a score threaded the same budget reserves against the drawn-down remainder.
         self.fit_spec = spec
+        self.fit_budget = budget
+        await budget.record(0.0, self.train_cost_usd)
         return SimpleNamespace(checkpoints=self.checkpoints, train_cost_usd=self.train_cost_usd)
 
-    async def score(self, path: str, rows: object, *, base: object, max_usd: float) -> tuple[SimpleNamespace, ...]:
-        self.score_calls.append(SimpleNamespace(path=path, rows=rows, base=base, max_usd=max_usd))
+    async def score(self, path: str, rows: object, *, base: object, budget: SpendGuard) -> tuple[SimpleNamespace, ...]:
+        self.score_budget = budget
+        self.score_calls.append(SimpleNamespace(path=path, rows=rows, base=base, budget=budget))
         if self.score_error is not None:
             raise self.score_error
         return self.scores
@@ -237,7 +244,7 @@ class TestFitScoreComposition:
         monkeypatch.setattr(sweep, "ADAPTER_STAGE_DIR", tmp_path / "staging")
         monkeypatch.setattr(sweep.sentinel, "sentinel_eval_row", lambda system, user, mlx_id: EvalRow(tokens=(0,), weights=(1.0,)))
         return sweep.observe_fit_score(
-            backend, rebased("qwen3.5-9b"), BASE_MODELS["qwen3.5-9b"], stub_frame(), plan, spend_cap_usd=spend_cap_usd
+            backend, rebased("qwen3.5-9b"), stub_frame(), plan, spend_cap_usd=spend_cap_usd
         )
 
     def test_scores_selected_checkpoint_never_materializes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,20 +259,23 @@ class TestFitScoreComposition:
         assert backend.trained == []
 
     def test_score_budget_is_cap_minus_fit_cost(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # One SpendGuard spans fit and score: the fit's recorded $13 actual draws down the $20 cap, so
+        # the shared envelope the score reserves against has exactly $7 of headroom left.
         plan, checkpoints = stub_plan()
         backend = FakeBackend(checkpoints, perfect_scores(), train_cost_usd=13.0)
         self._run(backend, plan, tmp_path, monkeypatch, spend_cap_usd=20.0)
-        assert backend.score_calls[0].max_usd == pytest.approx(7.0)
+        assert backend.score_budget is backend.fit_budget
+        assert backend.score_budget.max_usd - backend.score_budget.spent == pytest.approx(7.0)
 
     def test_fit_is_bound_by_harness_cap_not_recipe_cap(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The pinned cap must bound fit + score together, so the fit runs under the harness cap, not the
         # recipe's own spend_cap_usd. Binding the fit to the $15 recipe cap starves the pricier 9B arm,
         # whose identical schedule projects ~$26.85 (> $15) and can never establish a baseline.
         plan, checkpoints = stub_plan()
-        assert plan.spec.max_usd == 15.0  # the recipe's own fit cap
+        assert plan.spec.max_usd == 15.0  # the recipe's own (spec-declared) cap; athome's fit no longer reads it
         backend = FakeBackend(checkpoints, perfect_scores(), train_cost_usd=13.0)
         self._run(backend, plan, tmp_path, monkeypatch, spend_cap_usd=24.0)
-        assert backend.fit_spec.max_usd == 24.0  # overridden to the harness cap, not the recipe's $15
+        assert backend.fit_budget.max_usd == 24.0  # the fit's envelope is the harness cap, not the recipe's $15
 
     def test_staging_removed_on_success(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         plan, checkpoints = stub_plan()

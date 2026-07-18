@@ -8,7 +8,7 @@ zero registry, retrain-journal, or promotion side effects — the sweep loop own
 stays a measurement.
 
 The instrument is uniform for every arm: the sentinel AUC of the selected checkpoint scored in the
-**Tinker frame** via :meth:`athome.train.tinker.TinkerBackend.score` over the frozen sentinel frame.
+**Tinker frame** via :meth:`athome.train.TinkerBackend.score` over the frozen sentinel frame.
 The scoring path composes hosted ``fit`` + hosted ``score`` directly and never routes through
 athome's ``train``/``retrain``/``materialize``, which refuse a non-locally-servable base up front;
 composing the two primitives keeps the measurement identical across qwen3-8b, qwen3.5-4b, and
@@ -30,7 +30,6 @@ implies a hosted serving path, a downstream deployment decision outside this mod
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 import shutil
@@ -41,8 +40,7 @@ from typing import TYPE_CHECKING, Protocol
 import anyio
 import numpy as np
 from athome.progress import RunSink
-from athome.train import BASE_MODELS, write_metric
-from athome.train.tinker import TinkerBackend
+from athome.train import BASE_MODELS, SpendGuard, TinkerBackend, observe, write_metric
 
 from cc_steer.retrain import evalset, promotion, sentinel
 from cc_steer.retrain.watcher import (
@@ -119,7 +117,6 @@ def base_for_recipe(recipe: WatcherRecipe, models: Mapping[str, BaseModelSpec] =
 def observe_fit_score(
     backend: TinkerBackend,
     recipe: WatcherRecipe,
-    arm: BaseModelSpec,
     frame: evalset.EvalFrame,
     plan: TrainPlan,
     *,
@@ -127,34 +124,35 @@ def observe_fit_score(
 ) -> float:
     """Fit the recipe, select the strongest checkpoint, score it in the Tinker frame, return its sentinel AUC.
 
-    The uniform instrument, composed from the two hosted primitives so it never touches
-    ``train``/``retrain``/``materialize``: ``fit`` runs the training schedule and scores every
-    checkpoint's val eval on the turnstile; ``plan.select`` (the promotion pass's own checkpoint math)
-    picks the argmax over :attr:`~athome.train.TrainReport.checkpoints`; ``score`` evaluates that one
-    checkpoint over the full sentinel frame; the fire score ``1 - P(NO_STEER)`` yields the AUC. The
-    only on-disk footprint is the run journal in a throwaway staging dir, removed on success and on
-    failure.
+    The uniform instrument, composed by :func:`athome.train.observe` so it never touches
+    ``train``/``retrain``/``materialize``: ``observe`` fits the schedule (scoring every checkpoint's
+    val eval on the turnstile), argmaxes ``plan.select`` — the promotion pass's own checkpoint math —
+    over the saved checkpoints, and scores that one winner over the full sentinel frame. The fire
+    score ``1 - P(NO_STEER)`` over the returned rows yields the AUC. The only on-disk footprint is the
+    run journal in a throwaway staging dir, removed on success and on failure.
 
-    The pinned harness cap — not the recipe's own ``spend_cap_usd`` — bounds the whole invocation:
-    the fit is run under it, and ``score``'s budget is the pinned cap minus the fit's metered spend,
-    so the pinned cap bounds fit and score together. Binding the fit to the recipe cap would starve a
-    pricier arm whose identical schedule bills past that cap (the 9B fit projects ~3.3x the 8B fit),
-    even when the pinned cap has ample room for both.
+    One :class:`~athome.train.SpendGuard` capped at the pinned harness ``spend_cap_usd`` — not the
+    recipe's own ``spec.max_usd`` — is threaded through both billable calls, so the fit's metered
+    actuals draw down what the score may still reserve and the one cap bounds fit and score together.
+    Binding the fit to the recipe cap would starve a pricier arm whose identical schedule bills past
+    that cap (the 9B fit projects ~3.3x the 8B fit), even when the pinned cap has ample room for both.
     """
     ADAPTER_STAGE_DIR.mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix="watcher-sweep-", dir=ADAPTER_STAGE_DIR))
 
     async def run() -> float:
         frame_rows = tuple(sentinel.sentinel_eval_row(DRAFT_SYSTEM, tail, recipe.mlx_id) for tail in frame.tails)
-        report = await backend.fit(
-            dataclasses.replace(plan.spec, max_usd=spend_cap_usd),
+        outcome = await observe(
+            backend,
+            plan.spec,
+            frame_rows,
+            budget=SpendGuard(max_usd=spend_cap_usd),
+            select=plan.select,
             sink=RunSink.open(work_dir / RUN_JOURNAL_NAME),
             checkpoints=plan.policy,
             eval_rows=plan.eval_rows,
         )
-        best = max(report.checkpoints, key=plan.select)
-        scored = await backend.score(best.path, frame_rows, base=arm, max_usd=spend_cap_usd - report.train_cost_usd)
-        fire = 1.0 - np.exp(np.array([sequence.logprob for sequence in scored], dtype=np.float64))
+        fire = 1.0 - np.exp(np.array([sequence.logprob for sequence in outcome.scored], dtype=np.float64))
         return promotion.sentinel_auc(frame.labels, fire)
 
     try:
@@ -181,7 +179,7 @@ def paid_train_and_score(
     frame = evalset.EvalFrame.load(root=eval_root)
     plan = build_train_plan(recipe, frame, arm, dataset_dir=dataset_dir)
     load_key()
-    return observe_fit_score(TinkerBackend.from_settings(), recipe, arm, frame, plan, spend_cap_usd=spend_cap_usd)
+    return observe_fit_score(TinkerBackend.from_settings(), recipe, frame, plan, spend_cap_usd=spend_cap_usd)
 
 
 def write_score_report(arm: str, arm_spec: BaseModelSpec, metric: float) -> None:
