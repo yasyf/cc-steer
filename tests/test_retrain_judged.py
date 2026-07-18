@@ -195,6 +195,45 @@ class TestJudgedGate:
         assert spy.prompts == []  # raised before Judge.bind and any vote
 
     @pytest.mark.parametrize(
+        "sidecar",
+        [
+            pytest.param(
+                [(row_id, f"SUBSTITUTED {row_id}") for row_id, _ in GOLDEN_ROWS],
+                id="substituted-contexts",
+            ),
+            pytest.param(
+                [
+                    ("g0", context_for("g1", False)),  # real windows, reassigned to the wrong row ids
+                    ("g1", context_for("g0", True)),
+                    ("g2", context_for("g2", True)),
+                    ("g3", context_for("g3", False)),
+                ],
+                id="reassigned-contexts",
+            ),
+        ],
+    )
+    def test_unbound_sidecar_raises_before_any_spend(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sidecar: list[tuple[str, str]]
+    ) -> None:
+        spy = FakeExtract()
+        monkeypatch.setattr(spawnllm, "extract", spy)
+        build_golden(tmp_path, rows=GOLDEN_ROWS, labeled=True)
+        (judged.golden_dir(root=tmp_path) / judged.FIRES_NAME).write_text(
+            "".join(json.dumps({"row_id": row_id, "context": ctx}) + "\n" for row_id, ctx in sidecar)
+        )
+        frame, candidate, incumbent, threshold, warranted, _labels = frame_and_scores(warrant=True)
+        with pytest.raises(GoldenGateViolation, match="not bound to the verified packet"):
+            run_judged(
+                candidate_fire_scores=candidate,
+                incumbent_fire_scores=incumbent,
+                incumbent_fire_threshold=threshold,
+                frame=frame,
+                warranted=warranted,
+                root=tmp_path,
+            )
+        assert spy.prompts == []  # bound check raises before Judge.bind and any vote
+
+    @pytest.mark.parametrize(
         ("warrant", "expected_harmful", "expected_promote"),
         [
             pytest.param(True, False, True, id="warranted-fires-promote"),

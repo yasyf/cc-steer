@@ -26,8 +26,9 @@ fabricates a label to unblock itself. The verdict aggregates to ``harmful_favors
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import anyio
 import numpy as np
@@ -193,10 +194,14 @@ def disagreement_fires(
 async def load_golden(directory: Path) -> Golden:
     """Load and verify the watcher-fires golden packet, refusing to spend on an unlabeled one.
 
+    The fires sidecar is not a trust anchor: its ``row_id -> context`` map is bound to the verified
+    packet by reconstructing each row's window from the packet the human labeled, so a substituted or
+    reassigned context — same row ids, different prompts — is rejected before any panel spend.
+
     Raises:
         GoldenGateViolation: ``labels.json`` is absent (the flag-day bootstrap — never fabricate a
             label to unblock the gate), the packet content drifted from its manifest, or the fires
-            sidecar covers a different row set than the labels.
+            sidecar's contexts are not the windows the verified packet pins.
     """
     root = anyio.Path(directory)
     labels = root / LABELS_NAME
@@ -205,15 +210,14 @@ async def load_golden(directory: Path) -> Golden:
             f"no human golden labels at {labels}; a human must label the watcher-fires packet before "
             "the judged gate may spend — refusing to fabricate labels"
         )
-    verified = verify_packet(
-        packet_md=await (root / PACKET_NAME).read_text(),
-        manifest=json.loads(await (root / MANIFEST_NAME).read_text()),
-    )
+    packet_md = await (root / PACKET_NAME).read_text()
+    verified = verify_packet(packet_md=packet_md, manifest=json.loads(await (root / MANIFEST_NAME).read_text()))
     human = await read_labels(labels, manifest=verified)
     contexts = _read_fires(await (root / FIRES_NAME).read_text())
-    if human.keys() != contexts.keys():
+    if contexts != (bound := _packet_contexts(packet_md, verified)):
         raise GoldenGateViolation(
-            f"golden fires sidecar covers {sorted(contexts)} but the labels cover {sorted(human)}"
+            f"golden fires sidecar is not bound to the verified packet: {sorted(contexts)} maps to contexts "
+            f"that differ from the packet windows the human labeled ({sorted(bound)})"
         )
     return Golden(manifest=verified, human=human, contexts=contexts)
 
@@ -310,3 +314,16 @@ def _favors_incumbent(votes: Sequence[Vote]) -> bool:
 def _read_fires(text: str) -> dict[str, str]:
     records = (json.loads(line) for line in text.splitlines() if line.strip())
     return {record["row_id"]: record["context"] for record in records}
+
+
+def _packet_contexts(packet_md: str, verified: VerifiedManifest) -> dict[str, str]:
+    return {
+        cast("str", row["row_id"]): _window_at(packet_md, number=cast("int", row["row"]))
+        for row in cast("Sequence[Mapping[str, object]]", verified.manifest["rows"])
+    }
+
+
+def _window_at(packet_md: str, *, number: int) -> str:
+    if match := re.search(rf"## Row {number}\n\n~~~text\n(.*?)\n~~~\n", packet_md, re.DOTALL):
+        return match.group(1)
+    raise GoldenGateViolation(f"verified packet has no window for row {number}")
