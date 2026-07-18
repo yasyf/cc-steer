@@ -1,0 +1,34 @@
+# Base-model sweep, arm qwen3-8b. Greedy keep/discard over the watcher training recipe, scored as
+# the Tinker-frame sentinel AUC of the selected checkpoint — the uniform hosted instrument every arm
+# is ranked under (cc_steer.retrain.sweep.score_watcher, a pure observer; fit + Tinker score, no
+# local serving). serves_locally is reporting metadata on the score report, never a gate.
+#
+# ARM: qwen3-8b. One spec per BASE_MODELS arm (cc_steer.retrain.sweep.sweep_arms yields all three);
+# the orchestrator clones the recipe per arm, swapping its base ids. --arm pins this arm and
+# --spend-cap-usd pins the harness cap; score-watcher refuses (never clamps) a recipe that drifts off
+# the pinned arm or whose spend_cap_usd exceeds the pinned cap. The pinned cap bounds fit + score
+# together and sizes for worst-case metric spend per unit (recipe fit cap $15 + Tinker-frame score
+# headroom); every score-watcher invocation (the preflight baseline, each candidate, an infra retry)
+# is individually bounded by it. [budget].max_usd is athome's driver/proposal-spend backstop and the
+# proposer's per-unit grant — athome does not meter the metric_command's Tinker spend, so it is not a
+# bound on metric spend; --spend-cap-usd is the only metric-spend guard.
+#
+# Expected experiment-repo layout (relative to the repo root athome runs against):
+#   watcher_recipe.json                — the mutable recipe the driver tunes (base ids pinned to qwen3-8b)
+#   watcher-base-sweep-qwen3-8b.toml   — this spec, the immutable scoring boundary the candidate must not touch
+#
+# metric_key is "metric" to match athome.train.write_metric's channel, which score-watcher writes.
+# The real run is the orchestrator's later gated call; nothing here spends on its own.
+
+name = "watcher-base-sweep-qwen3-8b"
+metric_command = ["cc-steer", "score-watcher", "--recipe", "watcher_recipe.json", "--arm", "qwen3-8b", "--spend-cap-usd", "18.0"]
+metric_key = "metric"
+direction = "max"
+mutable_paths = ["watcher_recipe.json"]
+immutable_paths = ["watcher-base-sweep-qwen3-8b.toml"]
+hypothesis = "A tuned LoRA recipe raises the Tinker-frame sentinel AUC of the qwen3-8b watcher over the packaged E8 winner."
+
+[budget]
+max_units = 6
+max_usd = 12.0
+hard_kill_s = 5400.0

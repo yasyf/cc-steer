@@ -1012,20 +1012,34 @@ def retrain_(
     default=None,
     help="JSON recipe to score; defaults to the packaged E8-winner recipe.",
 )
-def score_watcher_(recipe: Path | None) -> None:
-    """Score one watcher recipe through the served-MLX instrument and write ``.athome-metric.json``.
+@click.option(
+    "--arm",
+    required=True,
+    help="The BASE_MODELS arm this spec pins; the recipe's base ids must resolve to it.",
+)
+@click.option(
+    "--spend-cap-usd",
+    type=float,
+    required=True,
+    help="Harness-pinned cap on the fit+score spend of one unit; a recipe cap above it is refused.",
+)
+def score_watcher_(recipe: Path | None, arm: str, spend_cap_usd: float) -> None:
+    """Score one watcher recipe under the uniform Tinker-frame instrument and write ``.athome-metric.json``.
 
-    The pure-observer metric command the base-model sweep's ExperimentSpec invokes: it trains and
-    scores the recipe and reports the served sentinel AUC on the athome metric channel, with no
-    registry, retrain-journal, or promotion side effects. Run from the experiment working directory so
-    the metric lands beside it.
+    The pure-observer metric command the base-model sweep's ExperimentSpec invokes: it fits and scores
+    the recipe against the pinned ``arm`` and reports the sentinel AUC on the athome metric channel,
+    with no registry, retrain-journal, or promotion side effects. Refuses before any spend if the
+    recipe drifts off the pinned arm or its spend cap exceeds ``--spend-cap-usd``. Run from the
+    experiment working directory so the metric and score report land beside it.
     """
     from cc_steer.retrain import sweep, watcher
 
     metric = sweep.score_watcher(
-        recipe=watcher.WatcherRecipe.from_json(recipe) if recipe is not None else watcher.WatcherRecipe.default()
+        watcher.WatcherRecipe.from_json(recipe) if recipe is not None else watcher.WatcherRecipe.default(),
+        arm=arm,
+        spend_cap_usd=spend_cap_usd,
     )
-    click.echo(f"watcher score: served sentinel AUC {metric:.4f}")
+    click.echo(f"watcher score: sentinel AUC {metric:.4f}")
 
 
 @main.command(name="freeze-eval")
