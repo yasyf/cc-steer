@@ -166,6 +166,28 @@ def test_register_watcher_adapter_requires_budget_threshold(tmp_path: Path) -> N
         )
 
 
+def test_register_watcher_journal_carries_provenance(tmp_path: Path) -> None:
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / drafter_mlx.ADAPTER_NAME).write_bytes(b"weights")
+    (adapter / drafter_mlx.ADAPTER_CONFIG_NAME).write_bytes(b"{}")
+    w.register_watcher(
+        adapter,
+        metadata={
+            "base_model": "m",
+            "render_version": 2,
+            "thresholds": {"budget": 0.5},
+            "dataset_digest": "d1",
+            "hf_revision": "sha-bootstrap",
+        },
+        registry_root=tmp_path / "registry",
+        state_dir=tmp_path / "state",
+    )
+    entry = json.loads((tmp_path / "state" / "retrain" / "journal.jsonl").read_text())
+    assert entry["dataset_digest"] == "d1"
+    assert entry["hf_revision"] == "sha-bootstrap"
+
+
 def message_struct() -> pa.DataType:
     return pa.struct([("role", pa.string()), ("content", pa.string())])
 

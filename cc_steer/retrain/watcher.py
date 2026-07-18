@@ -235,6 +235,7 @@ def register_watcher(
         WATCHER_COMPONENT,
         f"registered and promoted {info.version}",
         dataset_digest=str(metadata.get("dataset_digest", "n/a")),
+        hf_revision=str(rev) if (rev := metadata.get("hf_revision")) is not None else None,
         version=info.version,
         state_dir=state_dir,
     )
