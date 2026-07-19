@@ -1,0 +1,1 @@
+{"v":1,"lamport":1,"session":"f9ecc421-30f1-4700-9ea7-45eada765dd9","ops":[{"kind":"create_log","nonce":"5c4951d6a0ea4235e37c6db89cd1e5bc","title":"E17 — golden set as judge calibration (TPR/FPR + Noisy-but-Valid CI sizing)","tags":["experiment","cc-steer","E17","calibration","golden"],"anchors":[]}]}
