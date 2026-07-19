@@ -1,0 +1,1 @@
+{"v":1,"lamport":1,"session":"f9ecc421-30f1-4700-9ea7-45eada765dd9","ops":[{"kind":"create_log","nonce":"bda645b56bfbc759a397e09185016687","title":"E29 — AskUserQuestion pick-prediction fine-tune (Tinker cap $9)","tags":["experiment","E29","cc-steer","fine-tune","askuserquestion"],"anchors":[{"kind":"dir","value":"/Users/yasyf/.cc-steer/experiments/E29"}]}]}
