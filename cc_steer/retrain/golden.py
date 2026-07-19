@@ -211,9 +211,9 @@ async def author_packet(*, root: Path | None = None) -> Path:
         build_packet(
             [{"row_id": row.row_id, "stratum": row.stratum, "window": frame.tails[row.index]} for row in sample],
             strata=PACKET_STRATA,
-            stratum_of=lambda row: row["stratum"],
-            window_of=lambda row: row["window"],
-            row_id=lambda row: row["row_id"],
+            stratum_of=lambda row: str(row["stratum"]),
+            window_of=lambda row: str(row["window"]),
+            row_id=lambda row: str(row["row_id"]),
             seed=SEED,
             dataset_digest=frame.digest,
             question=QUESTION,
