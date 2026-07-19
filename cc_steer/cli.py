@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 SOURCE_KINDS = [*STEERING_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
+DRAFTER_API_KEY_ENV = "CC_STEER_DRAFTER_API_KEY"
 DATASET_DIR = Path.home() / ".cc-steer" / "dataset"
 MIRRORS_DIR = Path.home() / ".cc-steer" / "mirrors"
 sync_option = click.option(
@@ -195,8 +196,7 @@ async def prune_gate_samples_(db: Path | None, dry_run: bool) -> None:
         async with await FeedbackStore.open(path) as store:
             report = await prune_empty_gate_samples(store, dry_run=dry_run)
     click.echo(
-        f"scanned {report.scanned}, pruned {report.pruned}"
-        + (" [dry run — nothing written]" if dry_run else "")
+        f"scanned {report.scanned}, pruned {report.pruned}" + (" [dry run — nothing written]" if dry_run else "")
     )
     click.echo("  pruned by kind: " + "  ".join(f"{kind} {count}" for kind, count in report.pruned_by_kind.items()))
     click.echo(
@@ -845,10 +845,7 @@ async def inbox(limit: int) -> None:
         return
     for row in rows:
         steer = " ".join(str(row["steer"] or "").split())
-        click.echo(
-            f"#{row['proposal_id']} [{row['state']}] {row['ts']} {row.get('project') or ''}\n"
-            f"    {steer[:200]}"
-        )
+        click.echo(f"#{row['proposal_id']} [{row['state']}] {row['ts']} {row.get('project') or ''}\n    {steer[:200]}")
 
 
 @main.group(name="models")
@@ -1324,11 +1321,39 @@ def pipeline_uninstall_launchd() -> None:
 @click.option(
     "--drafter",
     "drafter_kind",
-    type=click.Choice(["auto", "spawn", "mlx"]),
+    type=click.Choice(["auto", "spawn", "mlx", "http"]),
     default="auto",
     show_default=True,
-    help="Stage-2 drafter: the local trained watcher (mlx) or the claude CLI (spawn); "
-    "auto picks mlx when a watcher model is promoted and the mlx extra is installed.",
+    help="Stage-2 drafter: the local trained watcher (mlx), a hosted OpenAI-compatible endpoint (http), "
+    "or the claude CLI (spawn); auto picks mlx when a watcher model is promoted and the mlx extra is "
+    "installed, and never selects http (opt in explicitly).",
+)
+@click.option(
+    "--drafter-endpoint",
+    default=None,
+    help="OpenAI-compatible base URL for the http drafter (e.g. https://<app>.modal.run); "
+    "/v1/chat/completions is appended. Required for --drafter http.",
+)
+@click.option(
+    "--drafter-model",
+    default=None,
+    help="Model name the http endpoint serves (the OpenAI `model` field). Required for --drafter http.",
+)
+@click.option(
+    "--drafter-timeout",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Per-request timeout in seconds for the http drafter; a hanging endpoint fails open to "
+    f"NO_STEER. The API key is read from ${DRAFTER_API_KEY_ENV}. Ignored for other drafters.",
+)
+@click.option(
+    "--drafter-render-version",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Prompt-render contract for the http drafter; the retrain lane renders v2 unconditionally, "
+    "so a hosted watcher expects 2. Ignored for other drafters.",
 )
 @click.option(
     "--stage2-threshold",
@@ -1387,6 +1412,10 @@ async def watch_(
     gate_kind: str | None,
     gate_threshold: float | None,
     drafter_kind: str,
+    drafter_endpoint: str | None,
+    drafter_model: str | None,
+    drafter_timeout: float,
+    drafter_render_version: int,
     stage2_threshold: float | None,
     stage2_idle_ttl: float,
     refiner_kind: str,
@@ -1415,11 +1444,13 @@ async def watch_(
     runs, stage 3 unconditioned. Runs until interrupted.
     """
     import contextlib
+    import os
 
     from cc_steer.exemplars import load_index, query_encoder
     from cc_steer.watcher.cascade import Cascade, Drafter, Gate, HeuristicGate, Refiner, SpawnDrafter, SpawnRefiner
     from cc_steer.watcher.daemon import Watcher
     from cc_steer.watcher.delivery import ShadowDelivery, SteerDelivery
+    from cc_steer.watcher.drafter_http import DEFAULT_THRESHOLD, HttpDrafter
     from cc_steer.watcher.gate import LexicalGate
     from cc_steer.watcher.live import LiveConfig, MailboxDelivery, TeeDelivery, shadow_db_path
     from cc_steer.watcher.types import CascadeConfig
@@ -1435,12 +1466,13 @@ async def watch_(
         if drafter_kind == "spawn":
             click.echo("no promoted watcher model (or mlx extra missing); drafting via the claude CLI", err=True)
     if refiner_kind == "auto":
-        refiner_kind = "none" if drafter_kind == "mlx" else "spawn"
+        refiner_kind = "none" if drafter_kind in ("mlx", "http") else "spawn"
     if (drafter_kind == "spawn" or refiner_kind == "spawn") and not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
 
     drafter: Drafter
     drafter_reaper: Callable[[], Awaitable[None]] | None = None
+    http_drafter: HttpDrafter | None = None
     stage2_model = "medium"
     render_version = 1
     if drafter_kind == "mlx":
@@ -1458,6 +1490,27 @@ async def watch_(
         click.echo(
             f"drafter: mlx {mlx_drafter.version.version} "
             f"(P(NO_STEER) abstain threshold {mlx_drafter.threshold:.4f} [{mlx_drafter.operating_point}], "
+            f"render v{render_version})"
+        )
+    elif drafter_kind == "http":
+        if not drafter_endpoint:
+            raise click.ClickException("--drafter-endpoint is required for the http drafter")
+        if not drafter_model:
+            raise click.ClickException("--drafter-model is required for the http drafter")
+        stage2_threshold = stage2_threshold if stage2_threshold is not None else DEFAULT_THRESHOLD
+        http_drafter = HttpDrafter(
+            endpoint=drafter_endpoint,
+            model=drafter_model,
+            threshold=stage2_threshold,
+            timeout=drafter_timeout,
+            api_key=os.environ.get(DRAFTER_API_KEY_ENV),
+        )
+        drafter = http_drafter
+        stage2_model = drafter_model
+        render_version = drafter_render_version
+        click.echo(
+            f"drafter: http {drafter_endpoint} (model {drafter_model}, "
+            f"P(NO_STEER) abstain threshold {stage2_threshold:.4f}, timeout {drafter_timeout:.1f}s, "
             f"render v{render_version})"
         )
     else:
@@ -1507,6 +1560,8 @@ async def watch_(
                 )
         shadow_target = shadow_db or shadow_db_path()
         async with contextlib.AsyncExitStack() as stack:
+            if http_drafter is not None:
+                stack.push_async_callback(http_drafter.aclose)
             shadow = await stack.enter_async_context(await ShadowDelivery.open(shadow_target))
             cascade = Cascade(
                 gate=gate,
@@ -1521,9 +1576,7 @@ async def watch_(
             if mode != "shadow":
                 mailbox = await stack.enter_async_context(await MailboxDelivery.open(shadow_target, config=live_config))
                 delivery = TeeDelivery([shadow, mailbox])
-            watcher = Watcher(
-                cascade, delivery, roots=roots or (CLAUDE_PROJECTS_DIR,), debounce_s=debounce, poll=poll
-            )
+            watcher = Watcher(cascade, delivery, roots=roots or (CLAUDE_PROJECTS_DIR,), debounce_s=debounce, poll=poll)
             click.echo(f"watching {len(watcher.roots)} root(s) in {mode} mode; proposals land in {shadow_target}")
             if drafter_reaper is None:
                 await watcher.run()

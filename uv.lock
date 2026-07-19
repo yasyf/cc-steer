@@ -328,6 +328,7 @@ dependencies = [
     { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "experiment-at-home", extra = ["gate"], marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "fastapi", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -337,7 +338,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "joblib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "ruff", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -388,7 +388,7 @@ requires-dist = [
     { name = "experiment-at-home", extras = ["gate"], specifier = ">=0.9.1,<0.10" },
     { name = "experiment-at-home", extras = ["train"], marker = "extra == 'retrain'", specifier = ">=0.9.1,<0.10" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.27" },
     { name = "joblib", marker = "extra == 'gate'", specifier = ">=1.4" },
     { name = "mlx", marker = "extra == 'mlx'", specifier = ">=0.32" },
