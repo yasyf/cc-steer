@@ -486,10 +486,11 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     otherwise — and appends it to the shared ``corrections`` ledger. Anchors that
     yield no correction (expired transcripts, editless windows) cost no LLM call.
     Incremental and idempotent: a pair settles once its anchor carries a ledger row,
-    a failure aborts the pass loudly (corrections already appended to the ledger
-    persist, so a re-run resumes), and a refine re-run resurfaces its new pairs here
-    automatically. A pass that changes data syncs the dataset to HuggingFace;
-    ``--no-sync`` skips it.
+    a pair whose LLM call fails is isolated and retried next pass so one bad pair
+    never aborts the rest (only a run of consecutive failures aborts loudly, and
+    corrections already appended to the ledger persist so a re-run resumes), and a
+    refine re-run resurfaces its new pairs here automatically. A pass that changes
+    data syncs the dataset to HuggingFace; ``--no-sync`` skips it.
     """
     from cc_transcript.corrections import CorrectionLog
 
@@ -502,8 +503,8 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
         click.echo(f"pending: {pending} pairs")
         report = await run_enrich(store, tier=tier, limit=limit, concurrency=concurrency)
         click.echo(
-            f"enriched {report.enriched} pairs ({report.corrections} corrections, {report.skipped} skipped), "
-            f"{report.pending} pending"
+            f"enriched {report.enriched} pairs ({report.corrections} corrections, {report.skipped} skipped, "
+            f"{report.failed} failed), {report.pending} pending"
         )
         click.echo(f"recorded {report.corrections} corrections to the shared ledger (~/.cc-transcript/corrections.db)")
         if sync and report.corrections:

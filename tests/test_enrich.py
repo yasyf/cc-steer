@@ -7,7 +7,7 @@ from cc_transcript.corrections import CorrectionLog
 from cc_transcript.ids import EventUuid, SessionId, tool_digest
 
 from cc_steer.detectors import detect
-from cc_steer.enrich import enrich
+from cc_steer.enrich import EnrichError, enrich, run_enrichments
 from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
 from cc_steer.refine import RefinedPair, Refinement, refine
 from cc_steer.triage import Verdict, triage
@@ -190,12 +190,68 @@ async def test_editless_window_skips_without_an_llm_call(
     assert await (await CorrectionLog.open()).for_session(SessionId(SESSION)) == ()
 
 
+@pytest.mark.unit
+async def test_run_enrichments_isolates_one_failed_pair_among_many(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Serialized (concurrency=1) so the fixed outcome order is deterministic: a
+    # correction, an isolated failure, then two clean skips.
+    outcomes = iter([True, EnrichError("provider hiccup"), False, False])
+
+    async def resolve(*_: object, **__: object) -> bool:
+        match next(outcomes):
+            case EnrichError() as err:
+                raise err
+            case bool() as landed:
+                return landed
+
+    monkeypatch.setattr("cc_steer.enrich.resolve_pair", resolve)
+    rows: list[dict[str, object]] = [{} for _ in range(4)]
+    corrections, skipped, failed = await run_enrichments(
+        rows, tier="medium", concurrency=1, log=await CorrectionLog.open(), backend=None, max_consecutive_failures=3
+    )
+    # One bad pair is isolated; the rest of the pass still completes.
+    assert (corrections, skipped, failed) == (1, 2, 1)
+
+
+@pytest.mark.unit
+async def test_run_enrichments_aborts_after_consecutive_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+
+    async def resolve(*_: object, **__: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        raise EnrichError("backend down")
+
+    monkeypatch.setattr("cc_steer.enrich.resolve_pair", resolve)
+    rows: list[dict[str, object]] = [{} for _ in range(10)]
+    with pytest.raises(EnrichError, match="3 consecutive"):
+        await run_enrichments(
+            rows, tier="medium", concurrency=1, log=await CorrectionLog.open(), backend=None, max_consecutive_failures=3
+        )
+    assert attempts == 3  # aborts on the third; the remaining seven rows are never attempted
+
+
 @pytest.mark.integration
-async def test_enrich_propagates_worker_failures(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_enrich_isolates_a_failed_pair_and_completes(
+    store: FeedbackStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await seed_refined(store, monkeypatch, coding_entries())
+
+    async def failing(*_: object, **__: object) -> bool:
+        raise EnrichError("provider hiccup")
+
+    monkeypatch.setattr("cc_steer.enrich.resolve_pair", failing)
+    report = await enrich(store)
+    # The lone pair fails, is isolated (never raised), and stays pending for the next pass.
+    assert (report.enriched, report.corrections, report.skipped, report.failed, report.pending) == (0, 0, 0, 1, 1)
+    assert await (await CorrectionLog.open()).for_session(SessionId(SESSION)) == ()
+
+
+@pytest.mark.integration
+async def test_a_programming_error_still_aborts_the_pass(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -> None:
     await seed_refined(store, monkeypatch, coding_entries())
 
     async def broken(*_: object, **__: object) -> bool:
-        raise RuntimeError("corrupt transcript")
+        raise RuntimeError("corrupt transcript")  # not an EnrichError, so it is never isolated
 
     monkeypatch.setattr("cc_steer.enrich.resolve_pair", broken)
     with pytest.raises(ExceptionGroup):

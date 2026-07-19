@@ -70,8 +70,8 @@ STAGES = (
         "enrich",
         cc_steer.enrich,
         "enrich",
-        changed=EnrichReport(corrections=2, skipped=1, pending=0),
-        unchanged=EnrichReport(corrections=0, skipped=3, pending=4),
+        changed=EnrichReport(corrections=2, skipped=1, failed=0, pending=0),
+        unchanged=EnrichReport(corrections=0, skipped=3, failed=1, pending=4),
     ),
 )
 

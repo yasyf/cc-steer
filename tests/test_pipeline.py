@@ -34,7 +34,7 @@ def stages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         pipeline, "run_refine", stub("refine", SimpleNamespace(refined=4, pairs=6, failed=0, pending=0))
     )
     monkeypatch.setattr(
-        pipeline, "run_enrich", stub("enrich", SimpleNamespace(enriched=2, corrections=1, skipped=0, pending=3))
+        pipeline, "run_enrich", stub("enrich", SimpleNamespace(enriched=2, corrections=1, skipped=0, failed=0, pending=3))
     )
     monkeypatch.setattr(
         pipeline,

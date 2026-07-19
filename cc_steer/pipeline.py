@@ -136,7 +136,10 @@ async def run_pipeline(
 
     async def enrich_() -> str:
         report = await run_enrich(store, tier="medium", limit=enrich_limit, concurrency=concurrency)
-        return f"enriched {report.enriched} (+{report.corrections} corrections), {report.pending} pending"
+        return (
+            f"enriched {report.enriched} (+{report.corrections} corrections, {report.failed} failed), "
+            f"{report.pending} pending"
+        )
 
     async def negatives_() -> str:
         report = await run_negatives(store, scan_roots(), seed=seed, sessions=NEGATIVE_SESSIONS)

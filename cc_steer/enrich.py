@@ -36,6 +36,28 @@ if TYPE_CHECKING:
     from cc_steer.store import FeedbackStore
 
 SOURCE = "cc-steer"
+MAX_CONSECUTIVE_FAILURES = 5
+"""Consecutive per-pair failures that abort a pass.
+
+Refine isolates every failed row and never caps; enrich adds this circuit breaker
+because a streak this long means the backend is down, not that one transcript is
+bad — grinding the backlog against a dead dependency only burns the retry budget.
+Five tolerates a transient blip yet trips well inside one concurrency window.
+"""
+
+
+class EnrichError(RuntimeError):
+    """A provider or transport failure resolving one refined pair's correction.
+
+    The extraction boundary (:func:`resolve_pair`) converts the backend, timeout,
+    and response-validation failures the shared extractor's LLM call surfaces into
+    this one type, so the fan-out isolates them exactly as ``run_verdicts`` isolates
+    :class:`~cc_transcript.judge.verdicts.JudgeError` for triage and refine.
+    :func:`run_enrichments` catches exactly this: the pair is counted failed and left
+    unpersisted so the next pass retries it, and :data:`MAX_CONSECUTIVE_FAILURES` in
+    a row aborts the pass loudly. Anything else raised while resolving a pair is a
+    programming error and propagates.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +68,15 @@ class EnrichReport:
         corrections: How many corrections landed in the shared ``corrections`` ledger.
         skipped: How many pairs resolved without a correction (no anchor, expired
             transcript, compacted anchor, editless window, or no faulted edit).
+        failed: How many pairs failed on a provider or transport error and stay
+            pending, isolated so the pass finishes and the next run retries them.
         pending: How many refined pairs remain without a ledger correction.
         enriched: How many pairs resolved this pass, derived as ``corrections + skipped``.
     """
 
     corrections: int
     skipped: int
+    failed: int
     pending: int
 
     @property
@@ -92,7 +117,16 @@ async def resolve_pair(
     correction (no anchor, expired transcript, compacted anchor, editless window, or
     no faulted edit). The extractor is idempotent per anchor, so a pair sharing an
     anchor with one already in the ledger resolves to False without a write.
+
+    Raises:
+        EnrichError: When the shared extractor's LLM call fails on a provider or
+            transport error, so :func:`run_enrichments` can isolate and retry it.
     """
+    import json
+
+    from pydantic import ValidationError
+    from spawnllm import BackendCallError, BackendUnavailable
+
     match row["session_id"], row["event_uuid"]:
         case (None, _) | (_, None):
             return False
@@ -104,16 +138,19 @@ async def resolve_pair(
         return False
     if (turn := activity.turn_of(anchor)) is None:
         return False
-    correction = await extract_correction(
-        log,
-        activity,
-        anchor,
-        source=SOURCE,
-        feedback=str(row["direction_verbatim"]),
-        repo=repo_of(turn, anchor),
-        tier=tier,
-        backend=backend,
-    )
+    try:
+        correction = await extract_correction(
+            log,
+            activity,
+            anchor,
+            source=SOURCE,
+            feedback=str(row["direction_verbatim"]),
+            repo=repo_of(turn, anchor),
+            tier=tier,
+            backend=backend,
+        )
+    except (BackendCallError, BackendUnavailable, TimeoutError, ValidationError, json.JSONDecodeError) as error:
+        raise EnrichError(str(error)) from error
     return correction is not None
 
 
@@ -124,22 +161,40 @@ async def run_enrichments(
     concurrency: int,
     log: CorrectionLog,
     backend: LlmBackend | None,
-) -> tuple[int, int]:
-    counts = {"corrections": 0, "skipped": 0}
+    max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
+) -> tuple[int, int, int]:
+    counts = {"corrections": 0, "skipped": 0, "failed": 0}
+    consecutive = 0
     limiter = anyio.CapacityLimiter(concurrency)
 
     async def worker(row: Mapping[str, object]) -> None:
+        nonlocal consecutive
         async with limiter:
-            counts["corrections" if await resolve_pair(row, log, tier=tier, backend=backend) else "skipped"] += 1
+            try:
+                resolved = await resolve_pair(row, log, tier=tier, backend=backend)
+            except EnrichError:
+                counts["failed"] += 1
+                if (consecutive := consecutive + 1) >= max_consecutive_failures:
+                    tg.cancel_scope.cancel()
+                return
+            counts["corrections" if resolved else "skipped"] += 1
+            consecutive = 0
 
     async with anyio.create_task_group() as tg:
         for row in rows:
             tg.start_soon(worker, row)
-    return counts["corrections"], counts["skipped"]
+    if tg.cancel_scope.cancel_called:
+        raise EnrichError(f"enrich aborted after {max_consecutive_failures} consecutive pair failures")
+    return counts["corrections"], counts["skipped"], counts["failed"]
 
 
 async def enrich(
-    store: FeedbackStore, *, tier: TModel = "medium", limit: int | None = None, concurrency: int = 8
+    store: FeedbackStore,
+    *,
+    tier: TModel = "medium",
+    limit: int | None = None,
+    concurrency: int = 8,
+    max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
 ) -> EnrichReport:
     """Grounds every refined pair lacking a shared-ledger correction in the edit it faults.
 
@@ -151,21 +206,33 @@ async def enrich(
     carries a row, the extractor never duplicates a shared anchor, and a refine
     re-run resurfaces its new pairs here automatically. Pairs that resolve to no
     correction (no anchor, expired transcript, editless window, or no faulted edit)
-    cost no LLM call. A failing pair aborts the pass loudly; corrections already
-    appended to the ledger persist, so a re-run resumes idempotently.
+    cost no LLM call. A pair whose LLM call fails on a provider or transport error is
+    isolated — counted failed and left unpersisted so the next pass retries it — so
+    one bad pair never aborts the rest; only ``max_consecutive_failures`` failures in
+    a row abort the pass loudly. Corrections already appended to the ledger persist,
+    so a re-run resumes idempotently.
 
     Args:
         store: The open feedback store.
         tier: The linking model's abstract tier when a backend is ready.
         limit: When set, enrich at most this many pairs this pass.
         concurrency: The maximum number of concurrent extractions.
+        max_consecutive_failures: How many pairs may fail in a row before the pass
+            aborts, distinguishing one bad transcript from a downed backend.
 
     Returns:
-        The pass's corrections/skipped/pending counts.
+        The pass's corrections/skipped/failed/pending counts.
     """
     log = await CorrectionLog.open()
     rows = await store.unenriched(log, limit=limit)
-    corrections, skipped = await run_enrichments(
-        rows, tier=tier, concurrency=concurrency, log=log, backend=usable_backend()
+    corrections, skipped, failed = await run_enrichments(
+        rows,
+        tier=tier,
+        concurrency=concurrency,
+        log=log,
+        backend=usable_backend(),
+        max_consecutive_failures=max_consecutive_failures,
     )
-    return EnrichReport(corrections=corrections, skipped=skipped, pending=len(await store.unenriched(log)))
+    return EnrichReport(
+        corrections=corrections, skipped=skipped, failed=failed, pending=len(await store.unenriched(log))
+    )
