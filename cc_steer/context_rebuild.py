@@ -380,7 +380,7 @@ def gate_sample_repairs(
         positive = tuple(row for row in stored if row["kind"] == "positive_window")
         if positive:
             expected = {
-                sample.sample_key: sample for sample in positive_gate_samples(parent, int(positive[0]["seed"]))
+                sample.sample_key: sample for sample in positive_gate_samples(parent, int(str(positive[0]["seed"])))
             }
             current = {str(row["sample_key"]): row for row in positive}
             updates.extend(
@@ -428,11 +428,11 @@ def classify_gate_rows(rows: Sequence[Mapping[str, object]]) -> GatePruneClassif
             pruned=len(empty),
             pruned_by_kind=dict(Counter(str(row["kind"]) for row in rows if str(row["sample_key"]) in empty)),
             pruned_positive_by_offset=dict(
-                sorted(Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) in empty).items())
+                sorted(Counter(int(str(row["offset_turns"])) for row in positive if str(row["sample_key"]) in empty).items())
             ),
             surviving_positive_by_offset=dict(
                 sorted(
-                    Counter(int(row["offset_turns"]) for row in positive if str(row["sample_key"]) not in empty).items()
+                    Counter(int(str(row["offset_turns"])) for row in positive if str(row["sample_key"]) not in empty).items()
                 )
             ),
         ),
@@ -516,7 +516,7 @@ async def execute_context_rebuild(
         rebuilt=rebuilt,
         quarantined=quarantined,
         rows_at_start=len(rows),
-        rows_at_end=int(count_row["n"]),
+        rows_at_end=int(str(count_row["n"])),
         gate_repaired=gate_repaired,
         family_mismatches=len(mismatch_keys & parents.keys()),
         drifted=tuple(outcome for _, outcome in resolved if isinstance(outcome, DetectorDrift)),

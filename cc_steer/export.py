@@ -397,26 +397,27 @@ async def trace_row(row: Mapping[str, object], pairs: list[Pair], log: Correctio
     window = ContextWindow.from_json(str(row["context_json"]))
     session_id = str(row["session_id"])
     is_steering = bool(row["is_steering"])
+    auditor = row["auditor_category"]
     return {
-        "id": row["dedup_key"],
+        "id": str(row["dedup_key"]),
         "session_id": session_id,
-        "event_uuid": row["event_uuid"],
+        "event_uuid": str(row["event_uuid"]),
         "project": project_label(str(row["origin_path"])),
-        "occurred_at": row["occurred_at"],
-        "cc_version": row["cc_version"],
-        "source_kind": row["source_kind"],
+        "occurred_at": str(row["occurred_at"]),
+        "cc_version": str(row["cc_version"]),
+        "source_kind": str(row["source_kind"]),
         "context": messages(window.before),
         "agent_action": agent_action_of(window),
-        "what_claude_did": row["what_claude_did"],
-        "user_message": row["text"],
+        "what_claude_did": str(row["what_claude_did"]),
+        "user_message": str(row["text"]),
         "aftermath": messages([turn for turn in (window.trigger, *window.after) if turn is not None]),
         "is_steering": is_steering,
-        "category": row["category"],
-        "confidence": row["confidence"],
-        "judge_rationale": row["judge_rationale"],
-        "judge_model": row["judge_model"],
-        "fidelity": row["fidelity"],
-        "auditor_category": row["auditor_category"],
+        "category": str(row["category"]),
+        "confidence": float(str(row["confidence"])),
+        "judge_rationale": str(row["judge_rationale"]),
+        "judge_model": str(row["judge_model"]),
+        "fidelity": str(row["fidelity"]),
+        "auditor_category": None if auditor is None else str(auditor),
         "pairs": pairs if is_steering else [],
         "evidence": [
             evidence_entry(correction)
@@ -520,7 +521,7 @@ def gate_row(row: Mapping[str, object]) -> GateRow | None:
         "text": text,
         "label": str(row["kind"]) == "positive_window",
         "kind": str(row["kind"]),
-        "offset_turns": int(row["offset_turns"]),
+        "offset_turns": int(str(row["offset_turns"])),
         "source_kind": str(row["source_kind"]),
         "category": str(row["category"]),
         "session_id": str(row["session_id"]),
@@ -602,7 +603,7 @@ def watcher_rows(traces: Sequence[Trace], gate_samples: Sequence[Mapping[str, ob
     negatives = [
         rendered
         for row in gate_samples
-        if str(row["kind"]) != "positive_window" and int(row["offset_turns"]) == 0
+        if str(row["kind"]) != "positive_window" and int(str(row["offset_turns"])) == 0
         if (rendered := watcher_negative(row)) is not None
     ]
     return [*positives, *negatives]
@@ -837,10 +838,10 @@ async def load_traces(store: FeedbackStore) -> list[Trace]:
     for pair in await store.sql(LATEST_PAIRS_QUERY):
         pairs_by_key.setdefault(str(pair["dedup_key"]), []).append(
             Pair(
-                pair_index=pair["pair_index"],
-                action=pair["action"],
-                direction_verbatim=pair["direction_verbatim"],
-                direction=pair["direction"],
+                pair_index=int(str(pair["pair_index"])),
+                action=str(pair["action"]),
+                direction_verbatim=str(pair["direction_verbatim"]),
+                direction=str(pair["direction"]),
             )
         )
     return [

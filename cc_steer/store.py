@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from cc_transcript.corrections import CorrectionLog
-    from cc_transcript.mining import DedupKey, FeedbackCandidate
+    from cc_transcript.mining import DedupKey, FeedbackCandidate, Fidelity, SourceKind, VerdictLike
 
     from cc_steer.context_rebuild import GatePruneClassification, GateSampleRepairs
     from cc_steer.negatives import GateSample
@@ -403,11 +403,11 @@ class FeedbackStore:
         """Returns ingestion counts by source kind and the scanned-file count."""
         return await self.db.stats()
 
-    async def recent(self, *, source_kind: object | None = None, limit: int = 20) -> list[dict[str, object]]:
+    async def recent(self, *, source_kind: SourceKind | None = None, limit: int = 20) -> list[dict[str, object]]:
         """Returns the most recent feedback events, newest first."""
         return await self.db.recent(source_kind=source_kind, limit=limit)
 
-    async def events(self, *, source_kind: object | None = None) -> list[dict[str, object]]:
+    async def events(self, *, source_kind: SourceKind | None = None) -> list[dict[str, object]]:
         """Returns every feedback event, newest first, with the columns needed to render it."""
         return await self.db.events(source_kind=source_kind)
 
@@ -494,16 +494,16 @@ class FeedbackStore:
         return await self.db.judged(role=role, prompt_version=prompt_version)
 
     async def record_verdict(
-        self, key: DedupKey, verdict: object, *, role: str, prompt_version: int, model: str, fidelity: str
+        self, key: DedupKey, verdict: VerdictLike, *, role: str, prompt_version: int, model: str, fidelity: Fidelity
     ) -> None:
         """Records one verdict, idempotently, keyed by ``(dedup_key, role, prompt_version)``."""
         await self.db.record_verdict(
             key,
-            verdict,  # type: ignore[arg-type]
+            verdict,
             role=role,
             prompt_version=prompt_version,
             model=model,
-            fidelity=fidelity,  # type: ignore[arg-type]
+            fidelity=fidelity,
         )
 
     async def unrefined(self, *, prompt_version: int, model: str, limit: int | None = None) -> list[dict[str, object]]:
@@ -652,7 +652,7 @@ class FeedbackStore:
     async def gate_sample_stats(self) -> Mapping[str, int]:
         """Returns gate sample counts keyed by kind."""
         return {
-            str(row["kind"]): int(row["n"])  # type: ignore[arg-type]
+            str(row["kind"]): int(str(row["n"]))
             for row in await self.sql("SELECT kind, COUNT(*) AS n FROM gate_sample GROUP BY kind ORDER BY kind")
         }
 
@@ -772,10 +772,12 @@ class FeedbackStore:
             "GROUP BY t.category ORDER BY n DESC",
             (prompt_version,),
         )
-        by_category = {row["category"]: (row["n"], row["accepted"]) for row in by_category_rows}
+        by_category = {
+            str(row["category"]): (int(str(row["n"])), int(str(row["accepted"]))) for row in by_category_rows
+        }
         return TriageStats(
-            total=total_rows[0]["n"],  # type: ignore[arg-type]
-            judged=sum(n for n, _ in by_category.values()),  # type: ignore[misc]
-            accepted=sum(accepted for _, accepted in by_category.values()),  # type: ignore[misc]
-            by_category={category: n for category, (n, _) in by_category.items()},  # type: ignore[misc]
+            total=int(str(total_rows[0]["n"])),
+            judged=sum(n for n, _ in by_category.values()),
+            accepted=sum(accepted for _, accepted in by_category.values()),
+            by_category={category: n for category, (n, _) in by_category.items()},
         )

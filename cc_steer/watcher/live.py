@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from types import TracebackType
 
-    from cc_transcript.models import TranscriptEvent
+    from cc_transcript.models import EventList
 
     from cc_steer.watcher.delivery import SteerDelivery
     from cc_steer.watcher.types import SteerProposal
@@ -325,7 +325,7 @@ def scrub_line(line: Mapping[str, Any]) -> Mapping[str, Any]:
     return {**line, "message": {**message, "content": scrubbed}}
 
 
-def scrubbed_events(path: Path) -> list[TranscriptEvent]:
+def scrubbed_events(path: Path) -> EventList:
     """Parses ``path`` with every injected steer span removed from its user turns before mining.
 
     Scrubs each raw entry, then reparses the reserialized stream natively — so a
