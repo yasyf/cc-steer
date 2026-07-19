@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
+import types
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -16,6 +18,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.anyio
+
+RECENT_PROMPT = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "there"}]
 
 METADATA = {
     "base_model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
@@ -122,3 +126,108 @@ async def test_draft_runs_inference_on_the_caller_thread(
     monkeypatch.setattr(drafter, "decide", fake_decide)
     await drafter.draft([{"role": "user", "content": "hi"}, {"role": "assistant", "content": "there"}])
     assert ran_on == [threading.get_ident()]
+
+
+class FakeArray:
+    def __getitem__(self, _key: object) -> FakeArray:
+        return self
+
+    def astype(self, _dtype: object) -> FakeArray:
+        return self
+
+    def __sub__(self, _other: object) -> FakeArray:
+        return self
+
+
+class FakeModel:
+    def __call__(self, _prompt: object) -> FakeArray:
+        return FakeArray()
+
+
+class RecordingMlxLm:
+    def __init__(self) -> None:
+        self.loads = 0
+
+    def load(self, base_model: str, adapter_path: str) -> tuple[FakeModel, object]:
+        self.loads += 1
+        return FakeModel(), object()
+
+
+@pytest.fixture
+def recording_mlx(monkeypatch: pytest.MonkeyPatch) -> RecordingMlxLm:
+    fake = RecordingMlxLm()
+    monkeypatch.setattr("cc_steer.watcher.drafter_mlx._mlx_lm", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def fake_mx(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    calls = {"clear_cache": 0}
+    core = types.ModuleType("mlx.core")
+    core.clear_cache = lambda: calls.__setitem__("clear_cache", calls["clear_cache"] + 1)
+    core.array = lambda _prefix: FakeArray()
+    core.float32 = object()
+    core.logsumexp = lambda _a: FakeArray()
+    core.exp = lambda _a: 0.5
+    mlx_mod = types.ModuleType("mlx")
+    mlx_mod.core = core
+    monkeypatch.setitem(sys.modules, "mlx", mlx_mod)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    return calls
+
+
+def test_construction_loads_no_weights(tmp_path: Path, recording_mlx: RecordingMlxLm) -> None:
+    register_watcher(tmp_path)
+    MlxDrafter(root=tmp_path)
+    assert recording_mlx.loads == 0
+    assert MlxDrafter(root=tmp_path).resource.loaded is False
+
+
+async def test_draft_loads_once_then_reuses(
+    tmp_path: Path, recording_mlx: RecordingMlxLm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_watcher(tmp_path)
+    drafter = MlxDrafter(root=tmp_path)
+    monkeypatch.setattr(drafter, "decide", lambda _tail: Draft("steer", 0.1))
+    await drafter.draft(RECENT_PROMPT)
+    assert recording_mlx.loads == 1
+    await drafter.draft(RECENT_PROMPT)
+    assert recording_mlx.loads == 1
+
+
+async def test_idle_sweep_evicts_and_next_draft_reloads(
+    tmp_path: Path, recording_mlx: RecordingMlxLm, fake_mx: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_watcher(tmp_path)
+    drafter = MlxDrafter(root=tmp_path, idle_ttl_s=1.0)
+    monkeypatch.setattr(drafter, "decide", lambda _tail: Draft("steer", 0.1))
+    await drafter.draft(RECENT_PROMPT)
+    assert recording_mlx.loads == 1 and drafter.resource.loaded
+    await drafter.resource.sweep(now=1e12)
+    assert fake_mx["clear_cache"] == 1
+    assert drafter.resource.loaded is False
+    assert drafter._loaded is None
+    await drafter.draft(RECENT_PROMPT)
+    assert recording_mlx.loads == 2
+
+
+async def test_sweep_refuses_while_a_use_is_inflight(
+    tmp_path: Path, recording_mlx: RecordingMlxLm, fake_mx: dict[str, int]
+) -> None:
+    register_watcher(tmp_path)
+    drafter = MlxDrafter(root=tmp_path)
+    async with drafter.resource.use():
+        await drafter.resource.sweep(now=1e12)
+        assert drafter.resource.loaded
+        assert fake_mx["clear_cache"] == 0
+
+
+def test_sync_nosteer_prob_self_wakes_a_fresh_drafter(
+    tmp_path: Path, recording_mlx: RecordingMlxLm, fake_mx: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_watcher(tmp_path)
+    drafter = MlxDrafter(root=tmp_path)
+    monkeypatch.setattr(drafter, "_prefix_and_sentinel", lambda _tail: ([1, 2, 3], 7))
+    assert recording_mlx.loads == 0
+    assert drafter.nosteer_prob("some context tail") == 0.5
+    assert recording_mlx.loads == 1

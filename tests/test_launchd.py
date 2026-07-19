@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import importlib.metadata
 import plistlib
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+import pytest
 
 from cc_steer import launchd
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def test_render_produces_loadable_agent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -21,7 +20,8 @@ def test_render_produces_loadable_agent(monkeypatch: pytest.MonkeyPatch) -> None
     command = data["ProgramArguments"][2]
     assert "exec /opt/homebrew/bin/uvx cc-steer pipeline run --auto-weekly" in command
     assert "--journal-repo '/repo/cc steer'" in command
-    assert 'eval "$(ccp env)"' in command
+    assert launchd.ccp_env_guard() in command
+    assert 'eval "$(ccp env)"' not in command
     assert data["StandardOutPath"].endswith("pipeline.log")
 
 
@@ -45,7 +45,8 @@ def test_render_retrain_produces_weekly_agent(monkeypatch: pytest.MonkeyPatch) -
     assert data["ProgramArguments"][:2] == ["/bin/sh", "-lc"]
     command = data["ProgramArguments"][2]
     assert "/opt/homebrew/bin/uvx cc-steer retrain --component gate" in command
-    assert 'eval "$(ccp env)"' in command
+    assert launchd.ccp_env_guard() in command
+    assert 'eval "$(ccp env)"' not in command
     assert data["StandardOutPath"].endswith("retrain.log")
     assert data["StandardErrorPath"].endswith("retrain.log")
     assert "WorkingDirectory" not in data  # no journal repo -> no cwd override, mirror no-ops
@@ -62,7 +63,7 @@ def test_retrain_command_runs_both_lanes_and_aggregates_exit_status(monkeypatch:
     monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
     command = launchd.retrain_command("uvx cc-steer")
     assert command == (
-        'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; '
+        f"{launchd.ccp_env_guard()} "
         "s=0; /opt/homebrew/bin/uvx cc-steer retrain --component gate || s=1; "
         "/opt/homebrew/bin/uvx cc-steer retrain --component watcher || s=1; exit $s"
     )
@@ -71,7 +72,7 @@ def test_retrain_command_runs_both_lanes_and_aggregates_exit_status(monkeypatch:
 def test_retrain_command_exit_status_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     # A gate-lane failure must not skip the watcher lane, yet must surface in the exit status.
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    lanes = launchd.retrain_command("uvx cc-steer").split("; ", 1)[1]
+    lanes = launchd.retrain_command("uvx cc-steer").removeprefix(f"{launchd.ccp_env_guard()} ")
     script = lanes.replace("uvx cc-steer retrain --component gate", "false").replace(
         "uvx cc-steer retrain --component watcher", "echo watcher-ran"
     )
@@ -94,18 +95,27 @@ def test_retrain_command_survives_missing_uvx(monkeypatch: pytest.MonkeyPatch) -
     assert "uvx cc-steer retrain --component watcher || s=1; exit $s" in command
 
 
-def test_retrain_prefix_rewrites_only_the_default() -> None:
-    assert launchd.retrain_prefix("uvx cc-steer") == launchd.RETRAIN_EXTRA_PREFIX
+def test_pinned_spec_refuses_the_dev_sentinel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.0.0")
+    with pytest.raises(RuntimeError, match="released cc-steer install"):
+        launchd.pinned_spec("gate,mlx")
+
+
+def test_retrain_prefix_pins_only_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.11.0")
+    assert launchd.retrain_prefix("uvx cc-steer") == "uvx --from 'cc-steer[retrain]==0.11.0' cc-steer"
     assert launchd.retrain_prefix("uv run --project /repo cc-steer") == "uv run --project /repo cc-steer"
 
 
-def test_install_retrain_default_prefix_resolves_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_retrain_default_prefix_pins_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.11.0")
     captured: dict[str, bytes] = {}
     monkeypatch.setattr(launchd, "_install", lambda path, plist: captured.update(plist=plist) or path)
     launchd.install_retrain("uvx cc-steer", None)
     command = plistlib.loads(captured["plist"])["ProgramArguments"][2]
-    assert "--from 'cc-steer[retrain]'" in command
+    assert "--from 'cc-steer[retrain]==0.11.0'" in command
+    assert launchd.ccp_env_guard() in command
     assert "cc-steer retrain --component gate" in command
     assert "cc-steer retrain --component watcher" in command
 
@@ -156,7 +166,8 @@ def test_render_watch_is_a_keepalive_daemon(monkeypatch: pytest.MonkeyPatch) -> 
     command = data["ProgramArguments"][2]
     assert "exec uv run --project /repo cc-steer watch --gate lexical --drafter mlx" in command
     assert "--gate-threshold" not in command  # serving honors each promoted gate's fitted threshold
-    assert 'eval "$(ccp env)"' in command
+    assert launchd.ccp_env_guard() in command
+    assert 'eval "$(ccp env)"' not in command
     assert data["StandardOutPath"].endswith("watch.log")
     assert data["StandardErrorPath"].endswith("watch.log")
 
@@ -171,16 +182,60 @@ def test_watch_command_survives_missing_uvx(monkeypatch: pytest.MonkeyPatch) -> 
     assert "exec uvx cc-steer watch --gate lexical --drafter mlx" in launchd.watch_command("uvx cc-steer")
 
 
-def test_watch_prefix_rewrites_only_the_default() -> None:
-    assert launchd.watch_prefix("uvx cc-steer") == launchd.WATCH_EXTRA_PREFIX
+def test_watch_prefix_pins_only_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.11.0")
+    assert launchd.watch_prefix("uvx cc-steer") == "uvx --from 'cc-steer[gate,mlx]==0.11.0' cc-steer"
     assert launchd.watch_prefix("uv run --project /repo cc-steer") == "uv run --project /repo cc-steer"
 
 
-def test_install_watch_default_prefix_resolves_the_extras(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_watch_default_prefix_pins_the_extras(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.11.0")
     captured: dict[str, bytes] = {}
     monkeypatch.setattr(launchd, "_install", lambda path, plist: captured.update(plist=plist) or path)
     launchd.install_watch("uvx cc-steer")
     command = plistlib.loads(captured["plist"])["ProgramArguments"][2]
-    assert "--from 'cc-steer[gate,mlx]'" in command
+    assert "--from 'cc-steer[gate,mlx]==0.11.0'" in command
+    assert launchd.ccp_env_guard() in command
     assert "cc-steer watch --gate lexical --drafter mlx" in command
+
+
+def test_install_pipeline_default_prefix_pins_the_dist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "/opt/homebrew/bin/uvx")
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.11.0")
+    captured: dict[str, bytes] = {}
+    monkeypatch.setattr(launchd, "_install", lambda path, plist: captured.update(plist=plist) or path)
+    launchd.install("uvx cc-steer", None)
+    command = plistlib.loads(captured["plist"])["ProgramArguments"][2]
+    assert "--from 'cc-steer==0.11.0'" in command
+    assert launchd.ccp_env_guard() in command
+    assert "cc-steer pipeline run --auto-weekly" in command
+
+
+def test_pipeline_prefix_pins_only_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.11.0")
+    assert launchd.pipeline_prefix("uvx cc-steer") == "uvx --from 'cc-steer==0.11.0' cc-steer"
+    assert launchd.pipeline_prefix("uv run --project /repo cc-steer") == "uv run --project /repo cc-steer"
+
+
+def test_ccp_env_guard_evals_a_successful_ccp_env(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ccp = fake_bin / "ccp"
+    ccp.write_text("#!/bin/sh\necho 'export CCP_MARKER=applied'\nexit 0\n")
+    ccp.chmod(0o755)
+    script = f'PATH="{fake_bin}:$PATH"; {launchd.ccp_env_guard()} printf "%s" "${{CCP_MARKER:-unset}}"'
+    proc = subprocess.run(["/bin/sh", "-lc", script], capture_output=True, text=True, check=True)
+    assert proc.stdout == "applied"
+
+
+def test_ccp_env_guard_never_evaluates_a_failing_ccp_env(tmp_path: Path) -> None:
+    # The wrapper bug this hardening fixes: on a failing `ccp env`, its stdout was fed to eval.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ccp = fake_bin / "ccp"
+    ccp.write_text("#!/bin/sh\necho 'export EVIL=leaked'\nexit 1\n")
+    ccp.chmod(0o755)
+    script = f'PATH="{fake_bin}:$PATH"; {launchd.ccp_env_guard()} printf "%s" "${{EVIL:-unset}}"'
+    proc = subprocess.run(["/bin/sh", "-lc", script], capture_output=True, text=True, check=True)
+    assert proc.stdout == "unset"

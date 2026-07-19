@@ -90,7 +90,7 @@ class Watcher:
         *,
         roots: Sequence[Path],
         debounce_s: float = DEBOUNCE_S,
-        poll: float = 1.0,
+        poll: float = 5.0,
         buffer_limit: int = BUFFER_LIMIT,
     ) -> None:
         self.cascade = cascade

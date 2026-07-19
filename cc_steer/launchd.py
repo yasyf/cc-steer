@@ -14,6 +14,7 @@ command shape.
 
 from __future__ import annotations
 
+import importlib.metadata
 import plistlib
 import shlex
 import shutil
@@ -27,8 +28,35 @@ RETRAIN_LABEL = "com.cc-steer.retrain"
 WATCH_LABEL = "com.cc-steer.watch"
 LOG_DIR = Path.home() / ".cc-steer" / "logs"
 SUNDAY = 0  # launchd's StartCalendarInterval weekday numbering
-RETRAIN_EXTRA_PREFIX = "uvx --from 'cc-steer[retrain]' cc-steer"
-WATCH_EXTRA_PREFIX = "uvx --from 'cc-steer[gate,mlx]' cc-steer"
+RETRAIN_EXTRAS = "retrain"
+WATCH_EXTRAS = "gate,mlx"
+
+
+def ccp_env_guard() -> str:
+    """The sh preamble that spend-routes through ccp when present, never evaluating its errors.
+
+    Runs ``ccp env`` only when ccp is on PATH, captures its stdout, discards stderr, and evals the
+    captured environment only when ccp exited 0. A failing ``ccp env`` — error text on stdout, a
+    nonzero exit — is dropped rather than executed, and the real command still runs; the earlier
+    ``eval "$(ccp env)"`` evaluated that stdout regardless of the exit code.
+    """
+    return 'if command -v ccp >/dev/null 2>&1; then __ccp_env="$(ccp env 2>/dev/null)" && eval "$__ccp_env"; fi;'
+
+
+def pinned_spec(extras: str) -> str:
+    """The version-pinned uvx dist spec ``cc-steer[extras]==<installed>``; ``extras`` empty drops the bracket.
+
+    The pin is the installed version at plist-generation time, so a launched agent resolves the
+    exact wheel (and its extras) this build ships — not whatever uvx would pick per launch, the
+    unpinned resolution that served an mlx-less env and drove the watcher crash storm.
+    """
+    version = importlib.metadata.version("cc-steer")
+    if version == "0.0.0":
+        raise RuntimeError(
+            "install-launchd needs a released cc-steer install: the working-tree sentinel "
+            "0.0.0 would pin an unresolvable spec and the KeepAlive agent would crash-loop"
+        )
+    return f"cc-steer{f'[{extras}]' if extras else ''}=={version}"
 
 
 def agent_path() -> Path:
@@ -52,7 +80,7 @@ def pipeline_command(prefix: str, journal_repo: Path | None) -> str:
     if prefix.split(maxsplit=1)[0] == "uvx" and (uvx := shutil.which("uvx")):
         resolved = prefix.replace("uvx", uvx, 1)
     journal = f" --journal-repo {shlex.quote(str(journal_repo))}" if journal_repo else ""
-    return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; exec {resolved} pipeline run --auto-weekly{journal}'
+    return f"{ccp_env_guard()} exec {resolved} pipeline run --auto-weekly{journal}"
 
 
 def retrain_command(prefix: str) -> str:
@@ -65,7 +93,7 @@ def retrain_command(prefix: str) -> str:
     if prefix.split(maxsplit=1)[0] == "uvx" and (uvx := shutil.which("uvx")):
         resolved = prefix.replace("uvx", uvx, 1)
     lanes = f"s=0; {resolved} retrain --component gate || s=1; {resolved} retrain --component watcher || s=1; exit $s"
-    return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; {lanes}'
+    return f"{ccp_env_guard()} {lanes}"
 
 
 def watch_command(prefix: str) -> str:
@@ -78,7 +106,7 @@ def watch_command(prefix: str) -> str:
     if prefix.split(maxsplit=1)[0] == "uvx" and (uvx := shutil.which("uvx")):
         resolved = prefix.replace("uvx", uvx, 1)
     body = f"exec {resolved} watch --gate lexical --drafter mlx"
-    return f'command -v ccp >/dev/null 2>&1 && eval "$(ccp env)"; {body}'
+    return f"{ccp_env_guard()} {body}"
 
 
 def render(prefix: str, journal_repo: Path | None, *, hour: int = 3) -> bytes:
@@ -126,19 +154,28 @@ def render_watch(prefix: str) -> bytes:
     )
 
 
+def pipeline_prefix(prefix: str) -> str:
+    """The pipeline-lane prefix: the bare default version-pinned to this build's wheel, else untouched.
+
+    A custom prefix is the operator's responsibility; the default resolves ``cc-steer==<installed>``
+    so the agent runs the exact build that scheduled it (mirrors :func:`retrain_prefix`).
+    """
+    return f"uvx --from '{pinned_spec('')}' cc-steer" if prefix == DEFAULT_PREFIX else prefix
+
+
 def install(prefix: str, journal_repo: Path | None, *, hour: int = 3) -> Path:
     """Writes and (re)loads the pipeline agent; returns the plist path."""
-    return _install(agent_path(), render(prefix, journal_repo, hour=hour))
+    return _install(agent_path(), render(pipeline_prefix(prefix), journal_repo, hour=hour))
 
 
 def retrain_prefix(prefix: str) -> str:
-    """The retrain-lane prefix: the bare default rewritten to resolve the ``retrain`` extra, else untouched.
+    """The retrain-lane prefix: the bare default rewritten to the version-pinned ``retrain`` extra, else untouched.
 
     The base ``uvx cc-steer`` dist cannot import the watcher lane's Tinker/mlx-lm deps, so the default
-    resolves ``cc-steer[retrain]``; a custom prefix is the operator's responsibility (mirrors
-    :func:`cc_steer.hooks.live_runner`).
+    resolves ``cc-steer[retrain]==<installed>`` — the pin is the build that scheduled the agent; a custom
+    prefix is the operator's responsibility (mirrors :func:`cc_steer.hooks.live_runner`).
     """
-    return RETRAIN_EXTRA_PREFIX if prefix == DEFAULT_PREFIX else prefix
+    return f"uvx --from '{pinned_spec(RETRAIN_EXTRAS)}' cc-steer" if prefix == DEFAULT_PREFIX else prefix
 
 
 def install_retrain(prefix: str, journal_repo: Path | None, *, hour: int = 4) -> Path:
@@ -147,13 +184,14 @@ def install_retrain(prefix: str, journal_repo: Path | None, *, hour: int = 4) ->
 
 
 def watch_prefix(prefix: str) -> str:
-    """The watch-daemon prefix: the bare default rewritten to resolve the ``gate`` and ``mlx`` extras, else untouched.
+    """The watch-daemon prefix: the bare default rewritten to the version-pinned ``gate,mlx`` extras, else untouched.
 
     The base ``uvx cc-steer`` dist cannot import the lexical gate's scikit-learn or the mlx
-    drafter's mlx-lm deps, so the default resolves ``cc-steer[gate,mlx]``; a custom prefix is
-    the operator's responsibility (mirrors :func:`retrain_prefix`).
+    drafter's mlx-lm deps, so the default resolves ``cc-steer[gate,mlx]==<installed>`` — the pin is
+    the build that scheduled the agent, the fix for the unpinned resolution that served an mlx-less
+    env; a custom prefix is the operator's responsibility (mirrors :func:`retrain_prefix`).
     """
-    return WATCH_EXTRA_PREFIX if prefix == DEFAULT_PREFIX else prefix
+    return f"uvx --from '{pinned_spec(WATCH_EXTRAS)}' cc-steer" if prefix == DEFAULT_PREFIX else prefix
 
 
 def install_watch(prefix: str) -> Path:

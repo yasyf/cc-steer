@@ -18,6 +18,14 @@ the sentinel token banned, so a fired moment always yields steer text. The
 input contract is the lab's training rendering verbatim:
 ``flattened(tail_messages(prompt, DRAFT_CHAR_CAP))`` under ``DRAFT_SYSTEM``.
 
+The base+adapter weights load lazily on first use and unload once idle: the
+registry/metadata resolution and the ``mlx`` import guard stay eager (a broken
+env fails fast at daemon start), but the multi-GB weight load is deferred and
+an :class:`~athome.idle.IdleResource` reaps it after ``idle_ttl_s`` of quiet,
+so a watcher that scores a burst then sits silent for hours releases its
+memory. Every synchronous scoring entry point self-wakes through
+:meth:`load`, so the daemon and the retrain sweep share one lazy path.
+
 mlx-lm lives behind the ``mlx`` extra and is imported lazily, mirroring
 :mod:`cc_steer.watcher.gate`'s handling of the ``gate`` extra.
 """
@@ -25,6 +33,8 @@ mlx-lm lives behind the ``mlx`` extra and is imported lazily, mirroring
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+
+from athome.idle import IdleResource
 
 from cc_steer import registry
 from cc_steer.rendering import DRAFT_CHAR_CAP, NO_STEER, strip_think, tail_messages
@@ -41,19 +51,23 @@ ADAPTER_NAME = "adapters.safetensors"
 ADAPTER_CONFIG_NAME = "adapter_config.json"
 THRESHOLD_KEYS = ("budget", "f1")
 MAX_DRAFT_TOKENS = 256
+IDLE_TTL_S = 900.0
 
 
 class MlxDrafter:
     """The trained stage-2 drafter: base 4-bit + adapter, greedy decoding, score-based abstain.
 
     Implements the cascade's ``Drafter`` protocol. Loads the promoted registry
-    version by default; pass ``version`` to pin one.
+    version by default; pass ``version`` to pin one. The base+adapter weights
+    load lazily on the first scoring call and unload after ``idle_ttl_s`` idle
+    seconds via :attr:`resource`; drive the reaper with ``resource.run``.
 
     Args:
         version: The registry version to load; defaults to ``current("watcher")``.
         root: The registry root override, for tests.
         operating_point: Which metadata threshold to abstain at (``budget``/``f1``).
         threshold: An explicit abstain threshold overriding the metadata.
+        idle_ttl_s: Idle seconds the loaded weights sit unused before the reaper unloads them.
 
     Raises:
         RuntimeError: When no watcher version is promoted, the artifact files
@@ -68,6 +82,7 @@ class MlxDrafter:
         root: Path | None = None,
         operating_point: str = "budget",
         threshold: float | None = None,
+        idle_ttl_s: float = IDLE_TTL_S,
     ) -> None:
         resolved = version or registry.current(COMPONENT, root=root)
         if resolved is None:
@@ -77,13 +92,36 @@ class MlxDrafter:
         for name in (ADAPTER_NAME, ADAPTER_CONFIG_NAME):
             if not (resolved.path / name).exists():
                 raise RuntimeError(f"watcher version {resolved.version} has no {name} at {resolved.path / name}")
+        _mlx_lm()  # fail fast at daemon start on a broken mlx env; only the weight load below is deferred
         self.version = resolved
         self.base_model = str(self._metadata("base_model"))
         self.threshold = threshold if threshold is not None else self._metadata_threshold(operating_point)
         self.operating_point = "explicit" if threshold is not None else operating_point
         self.render_version = int(str(self._metadata("render_version")))
-        loaded = _mlx_lm().load(self.base_model, adapter_path=str(resolved.path))
-        self.model, self.tokenizer = loaded[0], loaded[1]
+        self._loaded: tuple[Any, Any] | None = None
+        self.resource: IdleResource[tuple[Any, Any]] = IdleResource(
+            self._load_async, self._unload_async, ttl_s=idle_ttl_s
+        )
+
+    def load(self) -> tuple[Any, Any]:
+        """The cached ``(model, tokenizer)``, loading the base+adapter weights on first call."""
+        if self._loaded is None:
+            loaded = _mlx_lm().load(self.base_model, adapter_path=str(self.version.path))
+            self._loaded = (loaded[0], loaded[1])
+        return self._loaded
+
+    def unload(self) -> None:
+        """Drop the loaded weights, then release MLX's buffer cache — the reference falls first."""
+        import mlx.core as mx
+
+        self._loaded = None
+        mx.clear_cache()
+
+    async def _load_async(self) -> tuple[Any, Any]:
+        return self.load()
+
+    async def _unload_async(self) -> None:
+        self.unload()
 
     async def draft(self, prompt: list[Message]) -> Draft:
         """One score-based decision over the rendered window.
@@ -97,7 +135,8 @@ class MlxDrafter:
         transcript files.
         """
         context_tail = flattened(tail_messages(prompt, DRAFT_CHAR_CAP))
-        return self.decide(context_tail)
+        async with self.resource.use():
+            return self.decide(context_tail)
 
     def decide(self, context_tail: str) -> Draft:
         """Abstain (``NO_STEER``) iff P(NO_STEER) >= threshold, else a sentinel-suppressed steer."""
@@ -116,8 +155,9 @@ class MlxDrafter:
         """
         import mlx.core as mx
 
+        model, _ = self.load()
         prefix, sentinel = self._prefix_and_sentinel(context_tail)
-        logits = self.model(mx.array(prefix)[None])[0, -1].astype(mx.float32)
+        logits = model(mx.array(prefix)[None])[0, -1].astype(mx.float32)
         logp = logits - mx.logsumexp(logits)
         return float(mx.exp(logp[sentinel]))
 
@@ -137,10 +177,11 @@ class MlxDrafter:
         from mlx_lm import generate
         from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
+        model, tokenizer = self.load()
         _, sentinel = self._prefix_and_sentinel(context_tail)
         raw = generate(
-            self.model,
-            self.tokenizer,
+            model,
+            tokenizer,
             prompt=self._chat_prompt(context_tail),
             max_tokens=max_tokens,
             sampler=make_sampler(temp=0.0),
@@ -149,8 +190,9 @@ class MlxDrafter:
         return strip_think(raw)
 
     def _chat_prompt(self, context_tail: str) -> list[int]:
+        _, tokenizer = self.load()
         messages = [{"role": "system", "content": DRAFT_SYSTEM}, {"role": "user", "content": context_tail}]
-        return self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
 
     def _prefix_and_sentinel(self, context_tail: str) -> tuple[list[int], int]:
         """Templated ids up to the answer-content position and the sentinel's first token id there.
@@ -159,8 +201,9 @@ class MlxDrafter:
         a dummy one, so it is exact regardless of how the template tokenizes
         the injected ``<think></think>`` scaffold.
         """
+        _, tokenizer = self.load()
         base = [{"role": "system", "content": DRAFT_SYSTEM}, {"role": "user", "content": context_tail}]
-        tmpl = self.tokenizer.apply_chat_template
+        tmpl = tokenizer.apply_chat_template
         ids_ns = tmpl(base + [{"role": "assistant", "content": NO_STEER}], add_generation_prompt=False)
         ids_dm = tmpl(base + [{"role": "assistant", "content": "zzz other"}], add_generation_prompt=False)
         i = 0

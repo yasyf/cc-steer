@@ -4,7 +4,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.0] - 2026-07-18
+
+### Added
+- `cc-steer watch --poll` sets the transcript tail interval (default 5s, up
+  from the daemon's old hardcoded 1s), and `--stage2-idle-ttl` sets how long the
+  local mlx drafter's weights sit idle before they unload (default 900s). A huge
+  TTL keeps the drafter resident; there is no separate off switch.
+
+### Changed
+- **The mlx drafter loads and unloads on demand.** `MlxDrafter` no longer holds
+  the multi-GB base+adapter weights for the daemon's whole lifetime: the registry
+  and metadata resolution and the mlx import guard still run eagerly (a broken env
+  still fails fast at daemon start), but the weight load is deferred to the first
+  scoring call and an `experiment-at-home` `IdleResource` reaps it after
+  `--stage2-idle-ttl` idle seconds. `watch` runs the reaper alongside the tail
+  loop only for the mlx drafter. Every synchronous scoring entry point self-wakes
+  the load, so the retrain sweep's direct `nosteer_prob`/`clear_cache` calls keep
+  working unchanged. Decisions are byte-identical across the lazy load and an
+  unload/reload cycle.
+
+### Fixed
+- **The launchd wrappers no longer evaluate a failing `ccp env`.** The old
+  preamble ran `eval "$(ccp env)"` whenever ccp was on PATH, so a `ccp env` that
+  printed an error to stdout and exited nonzero had that text evaluated by the
+  shell. The wrapper now captures ccp's stdout, discards its stderr, and evals
+  only when ccp exits 0, falling through to the real command otherwise.
+- **The launchd agents pin the cc-steer version.** All three agents (pipeline,
+  retrain, watch) embed the installed version at plist-generation time — e.g.
+  `uvx --from 'cc-steer[gate,mlx]==<installed>' cc-steer` — so a launch resolves
+  the exact build that scheduled it. The unpinned per-launch `uvx` resolution was
+  the watch daemon's crash-storm root cause: it served an env missing mlx-lm on
+  the vast majority of launches. The extras-resolving prefix from 0.12.1 stays
+  unchanged; this adds the pin.
 
 ## [0.15.0] - 2026-07-17
 

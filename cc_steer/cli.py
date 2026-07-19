@@ -1181,10 +1181,13 @@ def pipeline_install_launchd(
     (``--no-watch`` skips it). Logs land under ``~/.cc-steer/logs/``. Re-running
     replaces the agents in place.
 
-    ``--prefix`` is shared by every agent. The retrain agent needs the
-    ``retrain`` extra (Tinker + mlx-lm) for the watcher lane: the bare default
-    is rewritten to ``uvx --from 'cc-steer[retrain]' cc-steer`` for that agent,
-    while a custom prefix must resolve the extra itself.
+    ``--prefix`` is shared by every agent. The bare default is version-pinned to
+    this build's wheel per agent — ``cc-steer==<installed>`` for the pipeline,
+    ``cc-steer[retrain]==<installed>`` for the retrain watcher lane (Tinker +
+    mlx-lm), ``cc-steer[gate,mlx]==<installed>`` for the watch daemon — so a
+    launched agent resolves the exact build that scheduled it, the fix for the
+    unpinned per-launch resolution that served an mlx-less env. A custom prefix
+    must resolve its own extras and version.
     """
     path = launchd.install(prefix, journal_repo, hour=hour)
     click.echo(f"installed {launchd.LABEL} ({path}): nightly {hour:02d}:00, weekly audit on Sundays")
@@ -1256,6 +1259,14 @@ def pipeline_uninstall_launchd() -> None:
     help="Local drafter abstain threshold on P(NO_STEER); ignored for the spawn drafter.",
 )
 @click.option(
+    "--stage2-idle-ttl",
+    type=float,
+    default=900.0,
+    show_default=True,
+    help="Idle seconds before the local mlx drafter unloads its weights; a large value keeps it resident. "
+    "Ignored for the spawn drafter.",
+)
+@click.option(
     "--refiner",
     "refiner_kind",
     type=click.Choice(["auto", "spawn", "none"]),
@@ -1270,6 +1281,13 @@ def pipeline_uninstall_launchd() -> None:
     default=2.0,
     show_default=True,
     help="Seconds a session must stay quiet before its last completed turn is evaluated.",
+)
+@click.option(
+    "--poll",
+    type=float,
+    default=5.0,
+    show_default=True,
+    help="Seconds between transcript tail polls.",
 )
 @click.option(
     "--db",
@@ -1291,8 +1309,10 @@ async def watch_(
     gate_threshold: float | None,
     drafter_kind: str,
     stage2_threshold: float | None,
+    stage2_idle_ttl: float,
     refiner_kind: str,
     debounce: float,
+    poll: float,
     db: Path | None,
     shadow_db: Path | None,
 ) -> None:
@@ -1341,16 +1361,18 @@ async def watch_(
         raise click.ClickException("the claude CLI is not on PATH")
 
     drafter: Drafter
+    drafter_reaper: Callable[[], Awaitable[None]] | None = None
     stage2_model = "medium"
     render_version = 1
     if drafter_kind == "mlx":
         from cc_steer.watcher.drafter_mlx import MlxDrafter
 
         try:
-            mlx_drafter = MlxDrafter(threshold=stage2_threshold)
+            mlx_drafter = MlxDrafter(threshold=stage2_threshold, idle_ttl_s=stage2_idle_ttl)
         except RuntimeError as error:
             raise click.ClickException(str(error)) from error
         drafter = mlx_drafter
+        drafter_reaper = mlx_drafter.resource.run
         stage2_model = mlx_drafter.base_model
         stage2_threshold = mlx_drafter.threshold
         render_version = mlx_drafter.render_version
@@ -1419,9 +1441,17 @@ async def watch_(
             if mode != "shadow":
                 mailbox = await stack.enter_async_context(await MailboxDelivery.open(shadow_target, config=live_config))
                 delivery = TeeDelivery([shadow, mailbox])
-            watcher = Watcher(cascade, delivery, roots=roots or (CLAUDE_PROJECTS_DIR,), debounce_s=debounce)
+            watcher = Watcher(
+                cascade, delivery, roots=roots or (CLAUDE_PROJECTS_DIR,), debounce_s=debounce, poll=poll
+            )
             click.echo(f"watching {len(watcher.roots)} root(s) in {mode} mode; proposals land in {shadow_target}")
-            await watcher.run()
+            if drafter_reaper is None:
+                await watcher.run()
+            else:
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(drafter_reaper)
+                    await watcher.run()
+                    tg.cancel_scope.cancel()
 
 
 @main.group(name="shadow")
