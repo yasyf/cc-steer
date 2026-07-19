@@ -948,6 +948,79 @@ async def thresholds_refit(component: str, since: str, fires_per_100: float, dry
         raise click.ClickException(str(error)) from error
 
 
+@main.group(name="hosted")
+def hosted_group() -> None:
+    """Calibrate and promote a watcher adapter for a hosted serving substrate, distinct from the local lane."""
+
+
+@hosted_group.command(name="calibrate")
+@click.option(
+    "--endpoint",
+    required=True,
+    help="OpenAI-compatible base URL the hosted watcher is served at; /v1/chat/completions is appended.",
+)
+@click.option("--model", required=True, help="Model/adapter name the endpoint serves (the OpenAI `model` field).")
+@click.option(
+    "--timeout",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Per-request timeout in seconds for each scoring call.",
+)
+@click.option(
+    "--api-key-env",
+    "api_key_env",
+    default=DRAFTER_API_KEY_ENV,
+    show_default=True,
+    help="Environment variable holding the endpoint bearer token; unset means an unauthenticated endpoint.",
+)
+@click.option(
+    "--fires-per-100",
+    "fires_per_100",
+    type=click.FloatRange(min=0.0),
+    default=2.0,
+    show_default=True,
+    help="Fire budget the hosted threshold is fit to, per 100 eval rows.",
+)
+@click.option(
+    "--component",
+    default="watcher-hosted",
+    show_default=True,
+    help="Target hosted registry lane; kept distinct so the local watcher lane and daemon stay untouched.",
+)
+@click.option("--dry-run", is_flag=True, help="Print the fitted threshold and coverage without minting a version.")
+@coro
+async def hosted_calibrate(
+    endpoint: str, model: str, timeout: float, api_key_env: str, fires_per_100: float, component: str, dry_run: bool
+) -> None:
+    """Calibrate a hosted watcher threshold against a live endpoint and promote it into the hosted registry lane.
+
+    Scores the frozen watcher eval frame through the OpenAI-compatible ENDPOINT with the exact
+    HttpDrafter sentinel semantics, fits a substrate-specific P(NO_STEER) threshold at the fire
+    budget, and (unless ``--dry-run``) mints and promotes a new ``--component`` version copying the
+    promoted local watcher adapter's bytes verbatim with the hosted threshold. The local ``watcher``
+    lane and the running daemon are never touched.
+    """
+    import os
+
+    from cc_steer.retrain import watcher_hosted
+
+    try:
+        click.echo(
+            await watcher_hosted.calibrate(
+                endpoint=endpoint,
+                model=model,
+                timeout=timeout,
+                api_key=os.environ.get(api_key_env),
+                fires_per_100=fires_per_100,
+                component=component,
+                dry_run=dry_run,
+            )
+        )
+    except watcher_hosted.HostedCalibrationError as error:
+        raise click.ClickException(str(error)) from error
+
+
 @main.command(name="retrain")
 @click.option(
     "--component",
