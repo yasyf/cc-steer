@@ -1,0 +1,38 @@
+# P6 autoresearch campaign policy: the athome outer loop proposes watcher-recipe edits
+# (ClaudeCodeDriver), each scored by the same uniform Tinker-frame instrument as the base-model
+# sweep (cc-steer score-watcher on the qwen3-8b arm). Gated mode: an operator approves every
+# proposal before it spends; the demo bar is >=2 experiments proposed -> validated -> preflighted ->
+# run -> retro'd under these caps (cc-notes task 816d610).
+#
+# Spend model: [campaign].max_total_usd and [ceilings].max_usd meter athome's driver/proposal
+# spend — athome does not meter the metric_command's Tinker spend, so the only metric-spend guard
+# is the --spend-cap-usd baked into the template's metric_command ($18 per invocation, the same
+# harness cap the C4 sweep ran under; a real unit measures ~$8-10). Gated approval plus the
+# per-invocation cap bound the true total.
+#
+# Expected experiment-repo layout at run time (the campaign workdir):
+#   watcher_recipe.json                 — the mutable recipe the driver tunes (qwen3-8b base ids)
+#   watcher-base-sweep-qwen3-8b.toml    — the arm's immutable scoring boundary
+#   watcher-campaign-policy.toml        — this policy
+
+mode = "gated"
+
+[campaign]
+max_experiments = 2
+max_total_usd = 25.0
+max_wall_s = 43200.0
+max_consecutive_failures = 2
+
+[ceilings]
+max_units = 6
+max_wall_s = 14400.0
+hard_kill_s = 5400.0
+max_usd = 12.0
+
+[[templates]]
+name = "watcher-recipe-tune-qwen3-8b"
+metric_command = ["cc-steer", "score-watcher", "--recipe", "watcher_recipe.json", "--arm", "qwen3-8b", "--spend-cap-usd", "18.0"]
+metric_key = "metric"
+direction = "max"
+immutable_paths = ["watcher-campaign-policy.toml", "watcher-base-sweep-qwen3-8b.toml"]
+mutable_allowlist = ["watcher_recipe.json"]
