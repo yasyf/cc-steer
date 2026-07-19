@@ -1055,6 +1055,39 @@ def freeze_eval_() -> None:
         click.echo(f"froze {view} eval ({evalset.freeze_eval(view)[:12]})")
 
 
+@main.group(name="golden")
+def golden_group() -> None:
+    """Author, verify, and audit the blind watcher-fires golden labeling packet."""
+
+
+@golden_group.command(name="author")
+@coro
+async def golden_author() -> None:
+    """Author the blind golden packet under ~/.cc-steer/eval/golden/watcher-fires/ (zero LLM calls)."""
+    from cc_steer.retrain import golden
+
+    click.echo(f"authored golden packet -> {await golden.author_packet()}")
+
+
+@golden_group.command(name="verify")
+@coro
+async def golden_verify() -> None:
+    """Verify the labeled packet loads through the judged gate: labels bound to the packet, no spend."""
+    from cc_steer.retrain import golden
+
+    loaded = await golden.verify_golden()
+    click.echo(f"golden packet verified: {len(loaded.human)} labeled rows bound to the packet")
+
+
+@golden_group.command(name="audit")
+@coro
+async def golden_audit() -> None:
+    """Run the E10.B warrant audit over the labeled packet and journal the per-stratum verdict."""
+    from cc_steer.retrain import audit
+
+    click.echo(await audit.run_warrant_audit())
+
+
 @main.group(name="pipeline")
 def pipeline_group() -> None:
     """Run the collection stages as one budgeted, schedulable pass."""
