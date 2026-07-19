@@ -8,16 +8,17 @@ repo: https://github.com/yasyf/cc-steer
 site_url: "https://yasyf.github.io/cc-steer/"
 pypi: true
 
-navbar_style: lilac
-content_style: lilac
+navbar_color: "#3a2a10"
 accent_color:
-  light: "#e53935"
-  dark: "#ef5350"
+  light: "#c62828"
+  dark: "#ef6b62"
+
+social_cards:
+  image: docs/assets/social-preview.jpg
 
 hero:
   name: cc-steer
   tagline: "Your best training data is rotting in ~/.claude."
-  starfield: true
 
 cli:
   enabled: true
