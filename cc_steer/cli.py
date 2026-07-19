@@ -905,6 +905,52 @@ def models_rollback(component: str) -> None:
     click.echo(f"rolled back {component} to {info.version}")
 
 
+@main.group(name="thresholds")
+def thresholds_group() -> None:
+    """Re-fit served cascade thresholds from the live scored-moment distribution."""
+
+
+@thresholds_group.command(name="refit")
+@click.option(
+    "--component",
+    type=click.Choice(["gate", "watcher"]),
+    required=True,
+    help="Which stage's served threshold to re-fit.",
+)
+@click.option("--since", required=True, help="Window of live scored moments to fit over, in days, e.g. 7d.")
+@click.option(
+    "--fires-per-100",
+    "fires_per_100",
+    type=click.FloatRange(min=0.0),
+    default=2.0,
+    show_default=True,
+    help="Fire budget the threshold is fit to, per 100 total turns.",
+)
+@click.option("--dry-run", is_flag=True, help="Print the fitted threshold and replay without minting a version.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Shadow ledger path. Defaults to ~/.cc-steer/shadow.db.",
+)
+@coro
+async def thresholds_refit(component: str, since: str, fires_per_100: float, dry_run: bool, db: Path | None) -> None:
+    """Re-fit the gate or watcher served threshold from the live scored-moment distribution.
+
+    Reads the recent shadow-ledger score distribution, fits a threshold at the fire budget, and
+    (unless ``--dry-run``) mints and promotes a new registry version carrying only the updated
+    threshold — the promoted artifact bytes are copied verbatim, then the watch agent is kicked.
+    """
+    from cc_steer.retrain import refit as refit_mod
+
+    try:
+        click.echo(
+            await refit_mod.refit(component, since=since, fires_per_100=fires_per_100, dry_run=dry_run, db_path=db)
+        )
+    except refit_mod.RefitError as error:
+        raise click.ClickException(str(error)) from error
+
+
 @main.command(name="retrain")
 @click.option(
     "--component",
