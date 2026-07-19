@@ -57,6 +57,7 @@ from athome.train import (
 )
 from athome.train import retrain as athome_retrain
 from athome.train.gate import GateVerdict
+from athome.train.tinker import eval_datum, fits
 
 from cc_steer import launchd, registry
 from cc_steer.retrain import data, evalset, judged, promotion, sentinel
@@ -64,7 +65,7 @@ from cc_steer.watcher import drafter_mlx
 from cc_steer.watcher.cascade import DRAFT_SYSTEM
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from athome.train import EvalRow
 
@@ -185,6 +186,7 @@ class TrainPlan(NamedTuple):
     val_labels: np.ndarray
     select: Callable[[SavedCheckpoint], float]
     artifact_scorer: Callable[[Adapter], dict[str, float]]
+    eval_rows_dropped: int
 
 
 def load_key(*, path: Path | None = None) -> None:
@@ -326,11 +328,15 @@ def retrain_watcher(
             float(incumbent.metadata["thresholds"]["budget"]),
         )
 
-    spec, policy, eval_rows, val_labels, select, artifact_scorer = build_train_plan(
+    spec, policy, eval_rows, val_labels, select, artifact_scorer, eval_dropped = build_train_plan(
         recipe, frame, base, dataset_dir=dataset_dir
     )
     steps = spec.hyperparams.steps
     warranted = frame.corrective & frame.prose
+    eval_drop_suffix = (
+        f"; dropped {eval_dropped} overlong eval row(s) > max_seq_len={recipe.max_tokens}" if eval_dropped else ""
+    )
+    eval_drop_metrics: dict[str, float] = {"eval_rows_dropped": float(eval_dropped)} if eval_dropped else {}
 
     def gate(_served: dict[str, float]) -> GateVerdict:
         # The incumbent-relative decision needs the async judged gate, so it is made in run() below via
@@ -397,9 +403,10 @@ def retrain_watcher(
     except (SpendExceeded, InsufficientData) as error:
         return promotion.journal(
             WATCHER_COMPONENT,
-            f"rejected ({error})",
+            f"rejected ({error}){eval_drop_suffix}",
             dataset_digest=digest,
             hf_revision=hf_revision,
+            metrics=eval_drop_metrics,
             state_dir=state_dir,
         )
 
@@ -419,10 +426,10 @@ def retrain_watcher(
     elif not verdict.promote:
         return promotion.journal(
             WATCHER_COMPONENT,
-            f"rejected ({verdict.reason}){diag_suffix}",
+            f"rejected ({verdict.reason}){diag_suffix}{eval_drop_suffix}",
             dataset_digest=digest,
             hf_revision=hf_revision,
-            metrics=verdict.stats | diagnostic,
+            metrics=verdict.stats | diagnostic | eval_drop_metrics,
             state_dir=state_dir,
         )
     else:
@@ -460,10 +467,12 @@ def retrain_watcher(
     prefix = "fresh-epoch " if fresh_epoch else ""
     return promotion.journal(
         WATCHER_COMPONENT,
-        f"{prefix}promoted {info.version} ({reason}); watch kickstart {'ok' if kicked else 'skipped'}{diag_suffix}",
+        f"{prefix}promoted {info.version} ({reason}); watch kickstart {'ok' if kicked else 'skipped'}"
+        f"{diag_suffix}{eval_drop_suffix}",
         dataset_digest=digest,
         hf_revision=hf_revision,
-        metrics=gate_stats | diagnostic | {"tinker_val_auc": best_val_auc, "threshold_budget": threshold},
+        metrics=gate_stats | diagnostic | {"tinker_val_auc": best_val_auc, "threshold_budget": threshold}
+        | eval_drop_metrics,
         version=info.version,
         state_dir=state_dir,
     )
@@ -487,8 +496,12 @@ def build_train_plan(
         data.balance_no_steer(rest, seed=recipe.seed)[0], factor=recipe.oversample_corrective, seed=recipe.seed
     )[0]
     examples = tuple(_sft_example(row) for row in pool)
-    val_labels = np.array([row.label for row in val], dtype=bool)
-    eval_rows = tuple(sentinel.sentinel_eval_row(DRAFT_SYSTEM, row.draft_text(), recipe.mlx_id) for row in val)
+    kept, eval_rows_dropped = _fit_eval_rows(
+        tuple((row, sentinel.sentinel_eval_row(DRAFT_SYSTEM, row.draft_text(), recipe.mlx_id)) for row in val),
+        max_seq_len=recipe.max_tokens,
+    )
+    val_labels = np.array([row.label for row, _ in kept], dtype=bool)
+    eval_rows = tuple(eval_row for _, eval_row in kept)
     spec = TrainSpec(
         name=WATCHER_COMPONENT,
         base=base,
@@ -518,7 +531,29 @@ def build_train_plan(
         val_labels=val_labels,
         select=select,
         artifact_scorer=artifact_scorer,
+        eval_rows_dropped=eval_rows_dropped,
     )
+
+
+def _fit_eval_rows(
+    pairs: Sequence[tuple[data.WatcherRow, EvalRow]], *, max_seq_len: int
+) -> tuple[tuple[tuple[data.WatcherRow, EvalRow], ...], int]:
+    """Drop the ``(val row, eval row)`` pairs athome's fit would refuse as overlong, keeping the pairing aligned.
+
+    athome drops overlong *train* rows with a count but refuses overlong *eval* rows outright
+    (:class:`~athome.train.spec.OverlongEvalRows`), since silently shrinking an eval set changes the
+    metric. Under eval-what-you-serve the sentinel eval only ranks checkpoints, so dropping a
+    nightly-accrued overlong val row is safe; the drop reuses athome's own ``fits(eval_datum(...))`` so
+    it and athome's up-front validator can never disagree. Returns ``(kept pairs, dropped count)``; an
+    all-overlong split is a real error and raises.
+    """
+    kept = tuple(pair for pair in pairs if fits(eval_datum(pair[1]), max_seq_len))
+    if pairs and not kept:
+        raise WatcherRetrainError(
+            f"all {len(pairs)} watcher eval rows exceed max_seq_len={max_seq_len}; the checkpoint-selection "
+            "eval set is empty — investigate the val split or raise the recipe max_tokens"
+        )
+    return kept, len(pairs) - len(kept)
 
 
 def _sft_example(row: data.WatcherRow) -> SftExample:

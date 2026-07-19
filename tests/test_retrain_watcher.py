@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -401,6 +402,9 @@ def lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Lane:
     monkeypatch.setattr(w, "TinkerBackend", FakeBackend)
     monkeypatch.setattr(w, "athome_retrain", fake_retrain)
     monkeypatch.setattr(sentinel, "sentinel_eval_row", fake_eval_row)
+    # Stub only the tinker.Datum build (tinker rides athome's `train` extra, absent here), mirroring its
+    # real model_input=from_ints(tokens[:-1]) so the filter's real fits() still decides keep/drop.
+    monkeypatch.setattr(w, "eval_datum", lambda row: SimpleNamespace(model_input=SimpleNamespace(length=len(row.tokens) - 1)))
     monkeypatch.setattr(drafter_mlx, "MlxDrafter", FakeDrafter)
     monkeypatch.setattr(launchd, "kickstart_watch", fake_kickstart)
     return obj
@@ -567,6 +571,20 @@ class TestRetrainWatcher:
         assert entry["verdict"].startswith("promoted") and "serving diagnostic failed" in entry["verdict"]
         assert entry["metrics"]["diagnostic_failed"] == 1.0
 
+    def test_eval_row_drops_surface_on_the_promote_journal(self, lane: Lane, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Overlong val rows are dropped for checkpoint selection (eval-what-you-serve makes that safe), but the
+        # count must ride the verdict and journal metrics the way athome surfaces its train-row drops.
+        real_build = w.build_train_plan
+        monkeypatch.setattr(
+            w, "build_train_plan", lambda *args, **kwargs: real_build(*args, **kwargs)._replace(eval_rows_dropped=2)
+        )
+        verdict = lane.run()
+        assert verdict.startswith("watcher: promoted")
+        assert "dropped 2 overlong eval row(s) > max_seq_len=4096" in verdict
+        entry = json.loads((lane.state_dir / "retrain" / "journal.jsonl").read_text().splitlines()[-1])
+        assert "dropped 2 overlong eval row(s) > max_seq_len=4096" in entry["verdict"]
+        assert entry["metrics"]["eval_rows_dropped"] == 2.0
+
     def test_score_frame_local_maps_each_row_to_its_served_prob(self, lane: Lane) -> None:
         # Heterogeneous per-row values: a within-stratum permutation would change this mapping, so
         # it guards the stored per-row probs that future paired incumbent comparisons read by row id.
@@ -699,3 +717,46 @@ class TestSeedIncumbentProbs:
         cache.write_text(json.dumps(drifted))
         with pytest.raises(ProbsStoreError, match="foreign"):
             w.seed_incumbent_probs(cache, version="v001", expected_render=2, eval_root=eval_dir)
+
+
+class TestFitEvalRows:
+    @staticmethod
+    def stub_datum(row: EvalRow) -> SimpleNamespace:
+        return SimpleNamespace(model_input=SimpleNamespace(length=len(row.tokens) - 1))
+
+    @staticmethod
+    def pairs(*lengths: int) -> tuple[tuple[Any, EvalRow], ...]:
+        return tuple(
+            (SimpleNamespace(label=n % 2 == 0), EvalRow(tokens=tuple(range(n)), weights=(1.0,) * n)) for n in lengths
+        )
+
+    @pytest.fixture(autouse=True)
+    def stub_eval_datum(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # eval_datum needs the tinker package (absent in this env); the stand-in mirrors its real
+        # model_input=from_ints(tokens[:-1]), so the real fits() the filter calls decides keep/drop.
+        monkeypatch.setattr(w, "eval_datum", self.stub_datum)
+
+    def test_drops_overlong_rows_and_counts_them(self) -> None:
+        pairs = self.pairs(10, 5000, 20, 6000)
+        kept, dropped = w._fit_eval_rows(pairs, max_seq_len=4096)
+        assert dropped == 2
+        assert kept == (pairs[0], pairs[2])
+
+    def test_in_bounds_rows_pass_through_untouched(self) -> None:
+        pairs = self.pairs(10, 20, 30)
+        kept, dropped = w._fit_eval_rows(pairs, max_seq_len=4096)
+        assert dropped == 0
+        assert kept == pairs
+
+    def test_keep_drop_boundary_agrees_with_athome_fits(self) -> None:
+        # athome keeps a row iff its full token length <= max_seq_len (model_input=tokens[:-1], fits adds 1).
+        kept, dropped = w._fit_eval_rows(self.pairs(4096, 4097), max_seq_len=4096)
+        assert dropped == 1
+        assert [len(eval_row.tokens) for _, eval_row in kept] == [4096]
+
+    def test_all_overlong_split_fails_loud(self) -> None:
+        with pytest.raises(WatcherRetrainError, match="all 2 watcher eval rows exceed max_seq_len=4096"):
+            w._fit_eval_rows(self.pairs(5000, 6000), max_seq_len=4096)
+
+    def test_empty_split_is_not_an_overlong_error(self) -> None:
+        assert w._fit_eval_rows((), max_seq_len=4096) == ((), 0)
