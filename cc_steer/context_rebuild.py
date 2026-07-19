@@ -17,6 +17,7 @@ from cc_transcript.ids import SessionId
 from cc_transcript.mining import DedupKey
 
 from cc_steer.detectors import detect
+from cc_steer.imports import IMPORT_SOURCE_KIND
 from cc_steer.negatives import W_MAX, GateSample, truncated
 from cc_steer.rendering import has_substantive_content, has_substantive_gate_content, messages
 from cc_steer.store import REBUILD_QUARANTINE_REASONS
@@ -29,9 +30,10 @@ if TYPE_CHECKING:
 
     from cc_steer.store import FeedbackStore
 
-CONTEXTS_QUERY = """
+CONTEXTS_QUERY = f"""
 SELECT dedup_key, session_id, event_uuid, occurred_at, context_json, quarantined_reason
 FROM feedback_events
+WHERE source_kind != '{IMPORT_SOURCE_KIND}'
 ORDER BY id
 """
 GATE_SAMPLES_QUERY = """

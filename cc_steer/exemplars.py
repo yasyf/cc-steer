@@ -176,7 +176,21 @@ class VoyageQueryEncoder:
 
 
 def query_encoder(model: str = EMBED_MODEL) -> Encoder:
-    """The runtime query encoder for ``model``: Voyage API or local, by name."""
+    """The runtime query encoder for ``model``, dispatched by name.
+
+    Voyage model names route to the synchronous Voyage API client; every other
+    name loads a local sentence-transformers encoder. Both embed a batch of
+    query strings into a float32 matrix, one unit-normalizable row per text.
+
+    Args:
+        model: The embedding model id — the same one the index was built with.
+
+    Returns:
+        An :class:`Encoder` whose ``encode`` embeds query strings.
+
+    Example:
+        >>> vector = query_encoder("voyage-4-large").encode(["make a surgical fix"])[0]
+    """
     if model.startswith("voyage"):
         return VoyageQueryEncoder(model)
     return sentence_transformer_encoder(model)
@@ -276,7 +290,24 @@ async def build_index(
 
 
 async def load_index(store: FeedbackStore, *, model: str = EMBED_MODEL) -> tuple[list[str], np.ndarray]:
-    """Loads the whole index as ``(keys, unit-normalized matrix)``; empty when unbuilt."""
+    """Loads the whole exemplar index as parallel keys and a normalized matrix.
+
+    Reads every vector recorded for ``model`` and unit-normalizes each row, so a
+    query dotted against the matrix yields cosine similarities directly. Returns
+    empty outputs when the index has not been built for ``model``.
+
+    Args:
+        store: The open feedback store.
+        model: The embedding model whose vectors to load.
+
+    Returns:
+        ``(keys, matrix)`` where ``keys[i]`` is the dedup key of row ``i`` in the
+        unit-normalized ``matrix``; ``([], empty)`` when the index is unbuilt.
+
+    Example:
+        >>> keys, matrix = await load_index(store)
+        >>> hits = mmr_select(query_encoder().encode(["surgical fix"])[0], matrix, k=5)
+    """
     rows = await store.embeddings(model=model)
     if not rows:
         return [], np.zeros((0, 0), dtype=np.float32)
@@ -301,8 +332,20 @@ def mmr_select(
     ``(1 - diversity) * sim(query, row) - diversity * max sim(row, picked)`` —
     pure top-k is redundant; the refiner wants similar-yet-varied precedents.
 
+    Args:
+        query: The query vector; need not be normalized.
+        matrix: The unit-normalized index rows, as from :func:`load_index`.
+        top_n: How many nearest rows to consider before diversifying.
+        k: How many rows to return.
+        diversity: The MMR tradeoff in ``[0, 1]`` — ``0`` is pure top-k, higher
+            favors variety among the picks.
+
     Returns:
         ``(row index, query similarity)`` pairs, best first.
+
+    Example:
+        >>> mmr_select(query, matrix, k=5, diversity=0.5)
+        [(3, 0.82), (7, 0.79)]
     """
     if matrix.size == 0 or k <= 0:
         return []
@@ -325,7 +368,26 @@ def mmr_select(
 async def exemplars_for(
     store: FeedbackStore, hits: Sequence[tuple[str, float]], *, max_chars: int = 2000
 ) -> list[Exemplar]:
-    """Hydrates retrieval hits into :class:`Exemplar` rows, preserving order."""
+    """Hydrates retrieval hits into :class:`Exemplar` rows, preserving hit order.
+
+    Joins each ``(dedup_key, score)`` hit to its accepted steering event — the
+    verbatim text, category, refined direction, and rendered context capped at
+    ``max_chars`` — dropping any hit whose event is no longer accepted.
+
+    Args:
+        store: The open feedback store.
+        hits: ``(dedup_key, score)`` pairs, as from :func:`mmr_select` mapped
+            back through :func:`load_index`'s keys.
+        max_chars: Cap on each exemplar's rendered context text.
+
+    Returns:
+        One :class:`Exemplar` per resolvable hit, in the order of ``hits``.
+
+    Example:
+        >>> keys, matrix = await load_index(store)
+        >>> hits = mmr_select(query, matrix, k=5)
+        >>> exemplars = await exemplars_for(store, [(keys[i], s) for i, s in hits])
+    """
     if not hits:
         return []
     scores: Mapping[str, float] = dict(hits)

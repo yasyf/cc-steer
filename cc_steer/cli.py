@@ -19,12 +19,15 @@ from cc_steer.claude import claude_available
 from cc_steer.context_rebuild import prune_empty_gate_samples, rebuild_contexts, rebuild_lock
 from cc_steer.dashboard import build_app
 from cc_steer.evaluate import evaluate, flip_report
+from cc_steer.imports import import_batch
 from cc_steer.journal import Journal
 from cc_steer.models import STEERING_SOURCE_KINDS, SourceKind
 from cc_steer.pipeline import ENRICH_LIMIT, REFINE_LIMIT, TRIAGE_LIMIT, run_pipeline
+from cc_steer.predict import DecisionQuery, predict
 from cc_steer.report import Sample, build_summary, golden_label, project_label
 from cc_steer.scan import scan as run_scan
 from cc_steer.serve import serve
+from cc_steer.stats import GroupBy, collect_stats
 from cc_steer.store import FeedbackStore
 from cc_steer.triage import PROMPT_VERSION
 from cc_steer.triage import audit as run_audit
@@ -210,6 +213,13 @@ async def prune_gate_samples_(db: Path | None, dry_run: bool) -> None:
 
 
 @main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit the stats as JSON instead of text.")
+@click.option(
+    "--by",
+    type=click.Choice(["project", "category"]),
+    default=None,
+    help="Group the accepted steering corpus by project or category.",
+)
 @click.option(
     "--db",
     type=click.Path(dir_okay=False, path_type=Path),
@@ -217,18 +227,10 @@ async def prune_gate_samples_(db: Path | None, dry_run: bool) -> None:
     help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @coro
-async def stats(db: Path | None) -> None:
+async def stats(as_json: bool, by: GroupBy | None, db: Path | None) -> None:
     """Print ingestion counts by source kind and triage coverage."""
-    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        report = await store.stats()
-        triaged = await store.triage_stats(prompt_version=PROMPT_VERSION)
-    click.echo(f"total: {report.total}  files: {report.files}")
-    for kind, count in report.by_source.items():
-        click.echo(f"  {kind}: {count}")
-    share = f" ({triaged.accepted / triaged.judged:.0%})" if triaged.judged else ""
-    click.echo(f"triaged: {triaged.judged}/{triaged.total} (v{PROMPT_VERSION})  accepted: {triaged.accepted}{share}")
-    for category, count in triaged.by_category.items():
-        click.echo(f"  {category}: {count}")
+    report = await collect_stats(db, by=by)
+    click.echo(json.dumps(report.to_dict(), indent=2) if as_json else report.render())
 
 
 @main.command(name="list")
@@ -644,6 +646,39 @@ async def index_(model: str, batch: int, db: Path | None) -> None:
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         report = await build_index(store, model=model, batch=batch)
         click.echo(f"embedded {report.embedded}, current {report.current}, eligible {report.total}")
+
+
+@main.command(name="exemplars")
+@click.argument("context")
+@click.option("--k", type=int, default=5, show_default=True, help="How many exemplars to retrieve.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the retrieved exemplars as JSON.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def exemplars_(context: str, k: int, as_json: bool, db: Path | None) -> None:
+    """Retrieve the exemplars the frontier refiner would see for a steering context.
+
+    Embeds ``context`` and MMR-retrieves the most similar past steers from the
+    built index (``cc-steer index``); an empty index errors. Requires the
+    ``embed`` extra. This is stage 3's retrieval, surfaced for inspection.
+    """
+    from cc_steer.exemplars import EMBED_MODEL, exemplars_for, load_index, mmr_select, query_encoder
+
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        keys, matrix = await load_index(store, model=EMBED_MODEL)
+        if not keys:
+            raise click.ClickException("the exemplar index is empty — run `cc-steer index` to build it")
+        hits = mmr_select(query_encoder(EMBED_MODEL).encode([context])[0], matrix, k=k, top_n=max(k, 32))
+        exemplars = await exemplars_for(store, [(keys[index], score) for index, score in hits])
+    if as_json:
+        click.echo(json.dumps([dataclasses.asdict(exemplar) for exemplar in exemplars], indent=2))
+        return
+    for exemplar in exemplars:
+        click.echo(f"[{exemplar.score:.3f}] {exemplar.category}: {exemplar.verbatim}")
 
 
 @main.group(name="hooks")
@@ -1747,10 +1782,16 @@ async def shadow_report(
     help="Database path. Defaults to ~/.cc-steer/feedback.db.",
 )
 @click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model for the claude CLI summary.")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Interface to bind; 0.0.0.0 exposes it over the LAN/Tailscale behind a per-run token.",
+)
 @click.option("--port", type=int, default=0, show_default=True, help="Port to serve on; 0 picks a free one.")
 @click.option("--open", "open_", is_flag=True, help="Open the dashboard in a browser once serving.")
 @coro
-async def view_samples(db: Path | None, model: str, port: int, open_: bool) -> None:
+async def view_samples(db: Path | None, model: str, host: str, port: int, open_: bool) -> None:
     """Serve the training-pairs dashboard: refined pairs and their full lineage.
 
     Opens an interactive dashboard listing the refined pairs (the pipeline's
@@ -1767,4 +1808,150 @@ async def view_samples(db: Path | None, model: str, port: int, open_: bool) -> N
         if not samples:
             raise click.ClickException("no judged samples to serve")
         summary = await build_summary(samples, model=model)
-        await serve(await build_app(store, summary=summary), port=port, open_browser=open_)
+        await serve(await build_app(store, summary=summary), host=host, port=port, open_browser=open_)
+
+
+@main.command(name="evidence")
+@click.argument("query")
+@click.option("--repo", default=None, help="Restrict hits to one repository label.")
+@click.option("--limit", type=int, default=10, show_default=True, help="Maximum hits to return.")
+@click.option(
+    "--rerank",
+    is_flag=True,
+    help="Re-rank the BM25 shortlist with the exemplar MMR embedder (needs VOYAGE_API_KEY).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the hits as one JSON array.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def evidence_(query: str, repo: str | None, limit: int, rerank: bool, as_json: bool, db: Path | None) -> None:
+    """Search the refined-pair evidence index by BM25, optionally MMR-reranked.
+
+    Full-text matches the query against each refined pair's verbatim steer, distilled
+    direction, and the code correction the enrich stage grounded it with. ``--rerank``
+    reorders the shortlist by embedding relevance (requires the ``embed`` extra and
+    VOYAGE_API_KEY).
+    """
+    from cc_steer.evidence import search
+
+    hits = await search(query, repo=repo, limit=limit, rerank=rerank, db=db)
+    if as_json:
+        click.echo(json.dumps([dataclasses.asdict(hit) for hit in hits]))
+        return
+    for hit in hits:
+        click.echo(
+            f"[{hit.category}] {hit.repo or '-'}  {hit.verbatim[:80]} -> {hit.direction[:100]}  ({hit.score:.3f})"
+        )
+
+
+@main.command("import")
+@click.argument("batch", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--dry-run", is_flag=True, help="Preview what would land, including dedup skips, without writing.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def import_(batch: Path, dry_run: bool, db: Path | None) -> None:
+    """Import cc-factory decision outcomes as judged-pair candidates.
+
+    Each decision lands as an ordinary feedback candidate keyed by a content
+    digest of its source and external id, so re-importing the same batch is a
+    no-op, and flows through the normal triage -> audit -> refine pipeline: the
+    LLM gate re-judges every row rather than trusting the imported label. With
+    --dry-run the batch is classified and reported without writing anything.
+    """
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        result = await import_batch(batch, db=store, dry_run=dry_run)
+    click.echo(result.summary_line())
+    if dry_run:
+        for outcome in result.outcomes:
+            click.echo(f"  {outcome.status:9} {outcome.external_id}")
+
+
+@main.command()
+@click.option(
+    "--repo", default=None, help="Scope the profile to one repository, by its project label (e.g. 'cc-steer')."
+)
+@click.option("--global", "global_", is_flag=True, help="Aggregate every repository into one profile.")
+@click.option(
+    "--format", "format_", type=click.Choice(["md", "json"]), default="md", show_default=True, help="Output format."
+)
+@click.option(
+    "--distill",
+    "distill_",
+    is_flag=True,
+    help="Rewrite the mechanical profile into tighter prose with one cached LLM call.",
+)
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def profile(repo: str | None, global_: bool, format_: str, distill_: bool, db: Path | None) -> None:
+    """Print the per-category steering profile built from the refined pairs.
+
+    ``--repo`` scopes to one repository and ``--global`` aggregates all of
+    them; pass exactly one. The mechanical profile needs no LLM; ``--distill``
+    rewrites it into tighter prose with one cached call, stored under
+    ``~/.cc-steer/profiles/``.
+    """
+    from cc_steer.profile import build_profile, distill, render_json, render_markdown
+
+    if (repo is None) == (not global_):
+        raise click.UsageError("pass exactly one of --repo <name> or --global")
+    if distill_ and format_ != "md":
+        raise click.UsageError("--distill renders markdown; drop --format json")
+    if distill_ and not claude_available():
+        raise click.ClickException("the claude CLI is not on PATH")
+    async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
+        rows = await store.pairs()
+    try:
+        built = build_profile(rows, repo=repo)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        await distill(built) if distill_ else render_json(built) if format_ == "json" else render_markdown(built)
+    )
+
+
+@main.command(name="predict")
+@click.option("--question", required=True, help="The decision question to resolve.")
+@click.option("--option", "options", multiple=True, help="A candidate option. May be repeated.")
+@click.option("--header", default=None, help="Optional header framing the decision.")
+@click.option("--repo", default=None, help="Restrict evidence to a single repository.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the prediction as JSON.")
+@click.option(
+    "--db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database path. Defaults to ~/.cc-steer/feedback.db.",
+)
+@coro
+async def predict_(
+    question: str, options: tuple[str, ...], header: str | None, repo: str | None, as_json: bool, db: Path | None
+) -> None:
+    """Predict a steering decision from recorded evidence.
+
+    v0 is evidence-only: it returns the matching corrections without choosing an
+    option, so callers integrate against the final shape while the ranking model
+    lands in a later experiment.
+    """
+    prediction = await predict(
+        DecisionQuery(question=question, options=options, header=header, repo=repo, context=""),
+        db=db,
+    )
+    if as_json:
+        click.echo(json.dumps(dataclasses.asdict(prediction), indent=2))
+        return
+    click.echo(f"status: {prediction.status}  choice: {prediction.choice}  confidence: {prediction.confidence:.2f}")
+    for hit in prediction.evidence:
+        click.echo(f"  [{hit.score:.2f}] {hit.direction}: {hit.verbatim}")
