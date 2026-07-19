@@ -18,6 +18,7 @@ classifiers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "aiosqlite>=0.20",
     "anyio>=4.4",
     "cc-transcript>=13.1,<14",
     "click>=8",
@@ -38,9 +39,12 @@ embed = [
     "voyageai>=0.3.7",
 ]
 gate = [
+    "joblib>=1.4",
     "scikit-learn>=1.5",
+    "scipy>=1.15",
 ]
 mlx = [
+    "mlx>=0.32",
     "mlx-lm>=0.31.3",
     "transformers>=5.12,<5.13",
 ]
