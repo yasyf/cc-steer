@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,6 +20,7 @@ SESSION = "sess-live"
 PROJECT = "/work/proj"
 FRESH = datetime(2026, 7, 7, 10, 30, tzinfo=UTC)
 STALE = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+YESTERDAY = FRESH - timedelta(days=1)
 
 
 async def queue(db: Path, config: LiveConfig, proposal=None) -> None:
@@ -40,6 +41,14 @@ def state_of(conn: sqlite3.Connection) -> str:
     return conn.execute(
         "SELECT state FROM deliveries WHERE session_id = ? ORDER BY id DESC LIMIT 1", (SESSION,)
     ).fetchone()["state"]
+
+
+def seed_delivered(conn: sqlite3.Connection, at: datetime, count: int, *, base: int) -> None:
+    conn.executemany(
+        "INSERT INTO deliveries (proposal_id, session_id, project, ts, mode, ttl, holdout, state, decided_at) "
+        "VALUES (?, 's', '/p', ?, 'live_all', ?, 0, 'delivered', ?)",
+        [(-(base + n), at.isoformat(), STALE.isoformat(), at.isoformat()) for n in range(1, count + 1)],
+    )
 
 
 @pytest.mark.parametrize(
@@ -108,19 +117,38 @@ async def test_expired_steer_is_marked_expired_never_emitted(tmp_path: Path) -> 
     assert state_of(conn) == "expired"
 
 
-async def test_budget_suppresses_the_twentyfirst(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("today", "yesterday", "expected_state", "emits"),
+    [
+        (20, 0, "suppressed_budget", False),
+        (19, 0, "delivered", True),
+        (0, 20, "delivered", True),
+        (19, 25, "delivered", True),
+        (20, 5, "suppressed_budget", False),
+    ],
+    ids=[
+        "at_budget_today_suppresses_the_twentyfirst",
+        "one_below_budget_today_emits",
+        "yesterday_deliveries_never_count",
+        "yesterday_ignored_today_below_budget_emits",
+        "yesterday_ignored_today_at_budget_suppresses",
+    ],
+)
+async def test_budget_exhaustion(
+    tmp_path: Path, today: int, yesterday: int, expected_state: str, emits: bool
+) -> None:
     db = tmp_path / "shadow.db"
     config = LiveConfig(mode="live_all", max_live_per_day=20, holdout_frac=0.0)
     await queue(db, config)
     conn = open_sync(db)
-    conn.executemany(
-        "INSERT INTO deliveries (proposal_id, session_id, project, ts, mode, ttl, holdout, state, decided_at) "
-        "VALUES (?, 's', '/p', ?, 'live_all', ?, 0, 'delivered', ?)",
-        [(-n, FRESH.isoformat(), STALE.isoformat(), FRESH.isoformat()) for n in range(1, 21)],
-    )
-    assert delivered_today(conn, FRESH) == 20
-    assert resolve(conn, config, session_id=SESSION, cwd=PROJECT, at=FRESH) is None
-    assert state_of(conn) == "suppressed_budget"
+    seed_delivered(conn, FRESH, today, base=0)
+    seed_delivered(conn, YESTERDAY, yesterday, base=1000)
+    assert delivered_today(conn, FRESH) == today
+    context = resolve(conn, config, session_id=SESSION, cwd=PROJECT, at=FRESH)
+    assert (context is not None) == emits
+    if emits:
+        assert "final steer" in context
+    assert state_of(conn) == expected_state
 
 
 async def test_freshest_queued_steer_wins(tmp_path: Path) -> None:
