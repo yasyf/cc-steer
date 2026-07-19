@@ -10,7 +10,7 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_steer.exemplars import build_index
 from cc_steer.rendering import NO_STEER, gate_text, watcher_prompt
 from cc_steer.watcher.cascade import Cascade, HeuristicGate, concrete_model, flattened
-from cc_steer.watcher.types import CascadeConfig, Draft
+from cc_steer.watcher.types import CascadeConfig, Draft, ScoredMoment
 from tests.test_exemplars import TRAIN_SESSION, CountingEncoder, seed_steering
 
 if TYPE_CHECKING:
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from cc_steer.exemplars import Encoder, Exemplar
     from cc_steer.rendering import Message
     from cc_steer.store import FeedbackStore
+    from cc_steer.watcher.cascade import Drafter
 
 pytestmark = pytest.mark.anyio
 
@@ -56,6 +57,14 @@ class FakeRefiner:
         return self.output
 
 
+class FakeScored:
+    def __init__(self) -> None:
+        self.recorded: list[ScoredMoment] = []
+
+    async def record_scored(self, moment: ScoredMoment) -> None:
+        self.recorded.append(moment)
+
+
 def live_window(turn_count: int = 4) -> ContextWindow:
     return ContextWindow(
         anchor=EventRef(SessionId(SESSION), EventUuid("anchor-0")),
@@ -79,11 +88,12 @@ def cascade_for(
     store: FeedbackStore,
     *,
     gate: FakeGate | HeuristicGate | None = None,
-    drafter: FakeDrafter | None = None,
+    drafter: Drafter | None = None,
     refiner: FakeRefiner | None = None,
     no_refiner: bool = False,
     encoder: Encoder | None = None,
-    **overrides: float | int | str,
+    scored: FakeScored | None = None,
+    **overrides: float | int | str | None,
 ) -> Cascade:
     return Cascade(
         gate=gate or FakeGate(1.0),
@@ -91,17 +101,71 @@ def cascade_for(
         refiner=None if no_refiner else (refiner or FakeRefiner("final steer")),
         store=store,
         config=CascadeConfig(gate_threshold=0.5, **overrides),
+        scored=scored or FakeScored(),
         encoder=encoder,
     )
 
 
-async def test_gate_suppression_returns_none_without_llm_calls(store: FeedbackStore) -> None:
-    gate, drafter = FakeGate(0.4), FakeDrafter("draft steer")
-    cascade = cascade_for(store, gate=gate, drafter=drafter)
-    result = await cascade.evaluate(SESSION, turn_index=3, anchor_uuid="a1", window=live_window())
+async def test_gate_suppression_records_a_scored_row_without_llm_calls(store: FeedbackStore) -> None:
+    gate, drafter, scored = FakeGate(0.4), FakeDrafter("draft steer"), FakeScored()
+    cascade = cascade_for(store, gate=gate, drafter=drafter, scored=scored)
+    result = await cascade.evaluate(SESSION, turn_index=3, anchor_uuid="a1", window=live_window(), project="/repo")
     assert result is None
     assert gate.calls == [gate_text(live_window())]
     assert drafter.prompts == []
+    [moment] = scored.recorded
+    assert (moment.session_id, moment.turn_index, moment.project) == (SESSION, 3, "/repo")
+    assert (moment.gate_score, moment.gate_threshold, moment.gate_passed) == (0.4, 0.5, False)
+    assert (moment.stage2_prob, moment.stage2_threshold) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("sentinel_prob", "stage2_threshold", "draft_text"),
+    [
+        pytest.param(0.12, 0.7, "draft steer", id="scored-drafter-fires"),
+        pytest.param(0.93, 0.7, NO_STEER, id="scored-drafter-abstains"),
+        pytest.param(None, None, "draft steer", id="spawn-drafter-no-score"),
+    ],
+)
+async def test_a_gate_pass_records_the_stage2_score(
+    store: FeedbackStore, sentinel_prob: float | None, stage2_threshold: float | None, draft_text: str
+) -> None:
+    scored = FakeScored()
+    cascade = cascade_for(
+        store,
+        drafter=FakeDrafter(draft_text, sentinel_prob=sentinel_prob),
+        no_refiner=True,
+        scored=scored,
+        stage2_threshold=stage2_threshold,
+    )
+    await cascade.evaluate(SESSION, turn_index=3, anchor_uuid="a1", window=live_window(), project="/repo")
+    pre, post = scored.recorded
+    assert (pre.gate_passed, pre.project) == (True, "/repo")
+    assert (pre.stage2_prob, pre.stage2_threshold) == (None, None)
+    assert (post.gate_passed, post.project) == (True, "/repo")
+    assert (post.stage2_prob, post.stage2_threshold) == (sentinel_prob, stage2_threshold)
+
+
+async def test_stage2_failure_leaves_the_gate_passed_row(store: FeedbackStore) -> None:
+    class BoomDrafter:
+        async def draft(self, prompt: list[Message]) -> Draft:
+            raise RuntimeError("stage 2 down")
+
+    scored = FakeScored()
+    cascade = cascade_for(store, drafter=BoomDrafter(), scored=scored)
+    with pytest.raises(RuntimeError, match="stage 2 down"):
+        await cascade.evaluate(SESSION, turn_index=3, anchor_uuid="a1", window=live_window(), project="/repo")
+    [moment] = scored.recorded
+    assert (moment.session_id, moment.turn_index, moment.project) == (SESSION, 3, "/repo")
+    assert (moment.gate_passed, moment.stage2_prob, moment.stage2_threshold) == (True, None, None)
+
+
+async def test_a_nan_gate_score_proceeds_to_stage2(store: FeedbackStore) -> None:
+    drafter = FakeDrafter("draft steer")
+    cascade = cascade_for(store, gate=FakeGate(float("nan")), drafter=drafter, no_refiner=True)
+    proposal = await cascade.evaluate(SESSION, turn_index=3, anchor_uuid="a1", window=live_window())
+    assert proposal is not None
+    assert len(drafter.prompts) == 1
 
 
 async def test_stage2_abstention_records_a_proposal_with_no_steer(store: FeedbackStore) -> None:

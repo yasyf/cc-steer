@@ -20,7 +20,6 @@ byte-compatible with training.
 
 from __future__ import annotations
 
-import dataclasses
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -145,11 +144,13 @@ class Watcher:
         if (window := live_window(activity.turns[: target.index + 1])) is None:
             return None
         anchor_uuid = str(window.before[-1].refs[-1].event_uuid)
-        if (proposal := await self.cascade.evaluate(
-            session_id, turn_index=target.index, anchor_uuid=anchor_uuid, window=window
-        )) is None:
-            return None
-        return dataclasses.replace(proposal, project=session_cwd(buffer.events))
+        return await self.cascade.evaluate(
+            session_id,
+            turn_index=target.index,
+            anchor_uuid=anchor_uuid,
+            window=window,
+            project=session_cwd(buffer.events),
+        )
 
     async def step(self, events: Sequence[WatchEvent], *, now: float) -> list[SteerProposal]:
         """One deterministic step: ingest a batch, evaluate quiet sessions, deliver.

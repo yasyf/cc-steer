@@ -65,6 +65,42 @@ class SteerProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class ScoredMoment:
+    """One gate-scored live moment, recorded regardless of outcome.
+
+    Every turn the cascade scores leaves one row — a gate-suppressed moment
+    included, so shadow analysis distinguishes a below-threshold gate from a
+    daemon that never ran. Cap- and cooldown-suppressed turns are never scored
+    and leave no row.
+
+    Attributes:
+        session_id: The session the moment came from.
+        turn_index: The completed turn the window ends at.
+        ts: When the cascade scored the moment, ISO-8601.
+        gate_score: The stage-1 score the gate assigned.
+        gate_threshold: The threshold the score was compared against.
+        gate_passed: Whether the score cleared the threshold and ran stage 2.
+        stage2_prob: The drafter's P(NO_STEER) when stage 2 ran and produced one;
+            None when the gate suppressed the moment, stage 2 has not yet
+            completed, or the drafter has no score.
+        stage2_threshold: The drafter's abstain threshold when stage 2 ran; None
+            when the gate suppressed the moment, stage 2 has not yet completed,
+            or the drafter has no threshold.
+        project: The working directory the session ran in, when derivable.
+    """
+
+    session_id: str
+    turn_index: int
+    ts: str
+    gate_score: float
+    gate_threshold: float
+    gate_passed: bool
+    stage2_prob: float | None = None
+    stage2_threshold: float | None = None
+    project: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CascadeConfig:
     """The live cascade's tuning knobs.
 

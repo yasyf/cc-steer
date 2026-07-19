@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Literal, Self
 import aiosqlite
 from cc_transcript.models import UserEvent
 
-from cc_steer.watcher.delivery import SHADOW_DDL
+from cc_steer.watcher.delivery import SCORED_MOMENTS_DDL, SHADOW_DDL
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -345,7 +345,7 @@ class MailboxDelivery:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA busy_timeout=2000")
-        await conn.executescript(SHADOW_DDL + DELIVERIES_DDL + REACTIONS_DDL)
+        await conn.executescript(SHADOW_DDL + SCORED_MOMENTS_DDL + DELIVERIES_DDL + REACTIONS_DDL)
         return cls(conn, config)
 
     async def close(self) -> None:

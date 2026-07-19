@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from cc_steer.store import FeedbackStore
 
 WINDOW_MINUTES = 30
+SCORE_WINDOW_DAYS = 30
 REPORT_LOG_TITLE = "cc-steer shadow reports"
 REPORT_LOG_LABEL = "shadow"
 
@@ -42,6 +43,8 @@ class ShadowSummary:
         hits: Steers followed by a real intervention within the window.
         nuisance: Steers with no nearby intervention — the would-be noise.
         window_minutes: The join window the numbers were computed at.
+        scores: The gate's score distribution and freshness over a recent window
+            of scored moments, or None when nothing has been scored.
     """
 
     sessions: int
@@ -54,6 +57,7 @@ class ShadowSummary:
     window_minutes: int
     hit_categories: Mapping[str, int] = dataclasses.field(default_factory=dict)
     sentinel_probs: SentinelStats | None = None
+    scores: ScoreStats | None = None
 
     @property
     def proposals_per_session(self) -> float:
@@ -84,6 +88,68 @@ class SentinelStats:
         return cls(n=len(ordered), mean=sum(ordered) / len(ordered), deciles=deciles)
 
 
+@dataclass(frozen=True, slots=True)
+class ScoreStats:
+    """The gate's score distribution and freshness over a recent window of scored moments.
+
+    Scored moments are the observability floor a gate-suppressed turn now leaves
+    behind: a below-threshold moment records a row where it used to vanish, so a
+    flat proposal counter stops being indistinguishable from a daemon that never
+    ran. ``total`` counts every moment ever recorded; the distribution, pass
+    rate, and heartbeat below are computed over the last ``window_days`` days so
+    the ledger can grow without the report loading it all.
+
+    Attributes:
+        total: Scored moments recorded all time — one per gate-scored turn, suppressed included.
+        window_days: The recent window, in days, the rest of the stats cover.
+        windowed: Scored moments within the window — the denominator of the pass rate.
+        gate_passed: How many within the window cleared the threshold and ran stage 2.
+        deciles: The gate score at the 0.1..0.9 quantiles within the window.
+        maximum: The highest gate score seen within the window.
+        recent_ts: The most recent windowed moment's timestamp, or None when the window is empty.
+        last_24h: Scored moments within 24 hours of the report — the freshness heartbeat.
+    """
+
+    total: int
+    window_days: int
+    windowed: int
+    gate_passed: int
+    deciles: tuple[float, ...]
+    maximum: float
+    recent_ts: str | None
+    last_24h: int
+
+    @property
+    def gate_pass_rate(self) -> float:
+        """The fraction of windowed moments that cleared the gate; 0.0 with nothing in the window."""
+        return self.gate_passed / self.windowed if self.windowed else 0.0
+
+    @classmethod
+    def from_rows(
+        cls,
+        rows: Sequence[Mapping[str, object]],
+        *,
+        total: int | None = None,
+        window_days: int = SCORE_WINDOW_DAYS,
+        at: datetime | None = None,
+    ) -> ScoreStats | None:
+        if not rows and not total:
+            return None
+        window = (at or datetime.now(UTC)) - timedelta(hours=24)
+        scores = sorted(float(value) for row in rows if isinstance(value := row["gate_score"], int | float))
+        stamps = [stamp for row in rows if (stamp := parse_ts(row["ts"])) is not None]
+        return cls(
+            total=total if total is not None else len(rows),
+            window_days=window_days,
+            windowed=len(rows),
+            gate_passed=sum(bool(row["gate_passed"]) for row in rows),
+            deciles=tuple(scores[min(len(scores) - 1, int(len(scores) * q / 10))] for q in range(1, 10)) if scores else (),
+            maximum=scores[-1] if scores else 0.0,
+            recent_ts=recent.isoformat() if (recent := max(stamps, default=None)) is not None else None,
+            last_24h=sum(stamp >= window for stamp in stamps),
+        )
+
+
 def parse_ts(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -100,6 +166,9 @@ def summarize(
     *,
     window_minutes: int = WINDOW_MINUTES,
     reactions: Mapping[int, str] | None = None,
+    scored: Sequence[Mapping[str, object]] = (),
+    scored_total: int | None = None,
+    scored_window_days: int = SCORE_WINDOW_DAYS,
 ) -> ShadowSummary:
     """Joins shadow proposals against real interventions, purely over row dicts.
 
@@ -115,6 +184,11 @@ def summarize(
             in the same session counts as a hit.
         reactions: Attributed reaction kinds keyed by proposal id — the delivered
             steers' ground truth, overriding the window join for those rows.
+        scored: Scored-moment rows within the recent window, driving the gate
+            distribution, pass rate, and heartbeat.
+        scored_total: The all-time count of scored moments; defaults to the
+            number of ``scored`` rows when the caller hasn't counted separately.
+        scored_window_days: The recent window ``scored`` was read over, in days.
 
     Returns:
         The :class:`ShadowSummary` at ``window_minutes``.
@@ -162,11 +236,16 @@ def summarize(
         window_minutes=window_minutes,
         hit_categories=hit_categories,
         sentinel_probs=SentinelStats.from_probs(probs),
+        scores=ScoreStats.from_rows(scored, total=scored_total, window_days=scored_window_days),
     )
 
 
 async def report_summary(
-    db: Path | None, shadow_db: Path | None, *, window_minutes: int = WINDOW_MINUTES
+    db: Path | None,
+    shadow_db: Path | None,
+    *,
+    window_minutes: int = WINDOW_MINUTES,
+    score_window_days: int = SCORE_WINDOW_DAYS,
 ) -> ShadowSummary:
     """The shadow report over the on-disk ledgers — the one codepath behind the CLI and the nightly pipeline step.
 
@@ -174,6 +253,9 @@ async def report_summary(
         db: Feedback store path; ``None`` uses the default.
         shadow_db: Shadow ledger path; ``None`` uses the default.
         window_minutes: The hit-join window.
+        score_window_days: The recent window the gate distribution, pass rate,
+            and heartbeat are computed over; the all-time total still counts
+            every scored moment.
 
     Returns:
         The :class:`ShadowSummary` at ``window_minutes``.
@@ -182,8 +264,11 @@ async def report_summary(
     from cc_steer.watcher.delivery import ShadowDelivery
     from cc_steer.watcher.live import LiveConfig, MailboxDelivery
 
+    cutoff = (datetime.now(UTC) - timedelta(days=score_window_days)).isoformat()
     async with await ShadowDelivery.open(shadow_db) as ledger:
         proposals = await ledger.proposals()
+        scored = await ledger.scored_moments(since=cutoff)
+        scored_total = await ledger.scored_count()
     async with await MailboxDelivery.open(shadow_db, config=LiveConfig.shadow()) as mailbox:
         delivered = {int(str(row["proposal_id"])) for row in await mailbox.deliveries() if row["state"] == "delivered"}
         reactions = {
@@ -193,12 +278,23 @@ async def report_summary(
         }
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
         interventions = await intervention_rows(store)
-    return summarize(proposals, interventions, window_minutes=window_minutes, reactions=reactions)
+    return summarize(
+        proposals,
+        interventions,
+        window_minutes=window_minutes,
+        reactions=reactions,
+        scored=scored,
+        scored_total=scored_total,
+        scored_window_days=score_window_days,
+    )
 
 
 def payload_of(summary: ShadowSummary) -> dict[str, object]:
-    """The summary as one JSON-able payload, including the derived per-session rate."""
-    return dataclasses.asdict(summary) | {"proposals_per_session": summary.proposals_per_session}
+    """The summary as one JSON-able payload, with the derived per-session rate and gate pass rate."""
+    payload: dict[str, object] = dataclasses.asdict(summary) | {"proposals_per_session": summary.proposals_per_session}
+    if summary.scores is not None:
+        payload["scores"] = dataclasses.asdict(summary.scores) | {"gate_pass_rate": summary.scores.gate_pass_rate}
+    return payload
 
 
 def journal_shadow_report(journal_repo: Path, summary: ShadowSummary) -> bool:

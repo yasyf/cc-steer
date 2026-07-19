@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import anyio
@@ -10,12 +11,24 @@ from click.testing import CliRunner
 from cc_steer.cli import main
 from cc_steer.store import FeedbackStore
 from cc_steer.watcher.delivery import ShadowDelivery
-from cc_steer.watcher.shadow import journal_shadow_report, payload_of, summarize
-from tests.test_delivery import make_proposal
+from cc_steer.watcher.shadow import ScoreStats, journal_shadow_report, payload_of, summarize
+from tests.test_delivery import make_proposal, make_scored
 from tests.test_exemplars import TRAIN_SESSION, seed_steering
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def scored_row(
+    session: str = "s1", turn: int = 0, ts: str = "2026-07-07T10:00:00+00:00", gate_score: float = 0.5, gate_passed: int = 1
+) -> dict[str, object]:
+    return {
+        "session_id": session,
+        "turn_index": turn,
+        "ts": ts,
+        "gate_score": gate_score,
+        "gate_passed": gate_passed,
+    }
 
 
 def proposal_row(
@@ -108,6 +121,58 @@ def test_payload_of_carries_the_derived_per_session_rate() -> None:
     assert payload["proposals"] == 2
     assert payload["proposals_per_session"] == 1.0
     assert payload["window_minutes"] == summary.window_minutes
+    assert payload["scores"] is None
+
+
+def test_score_stats_deciles_pass_rate_and_max() -> None:
+    rows = [scored_row(turn=i, gate_score=i / 10, gate_passed=int(i >= 5)) for i in range(1, 11)]
+    stats = ScoreStats.from_rows(rows, at=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
+    assert stats is not None
+    assert (stats.total, stats.gate_passed, stats.gate_pass_rate) == (10, 6, 0.6)
+    assert stats.maximum == 1.0
+    assert len(stats.deciles) == 9
+    assert all(earlier <= later for earlier, later in zip(stats.deciles, stats.deciles[1:], strict=False))
+
+
+def test_score_stats_windows_the_distribution_while_total_counts_all() -> None:
+    rows = [scored_row(turn=i, gate_score=i / 10, gate_passed=int(i >= 4)) for i in range(1, 6)]
+    stats = ScoreStats.from_rows(rows, total=100, window_days=30, at=datetime(2026, 7, 7, 12, 0, tzinfo=UTC))
+    assert stats is not None
+    assert (stats.total, stats.windowed, stats.window_days) == (100, 5, 30)
+    assert (stats.gate_passed, stats.gate_pass_rate) == (2, 0.4)
+
+
+def test_score_stats_reports_total_over_an_empty_window() -> None:
+    stats = ScoreStats.from_rows([], total=7)
+    assert stats is not None
+    assert (stats.total, stats.windowed, stats.gate_passed) == (7, 0, 0)
+    assert (stats.deciles, stats.gate_pass_rate, stats.recent_ts, stats.last_24h) == ((), 0.0, None, 0)
+
+
+def test_score_stats_freshness_heartbeat_counts_the_last_24h() -> None:
+    at = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+    rows = [
+        scored_row(turn=0, ts="2026-07-07T11:30:00+00:00"),
+        scored_row(turn=1, ts="2026-07-06T13:00:00+00:00"),
+        scored_row(turn=2, ts="2026-07-05T00:00:00+00:00"),
+    ]
+    stats = ScoreStats.from_rows(rows, at=at)
+    assert stats is not None
+    assert stats.last_24h == 2
+    assert stats.recent_ts == "2026-07-07T11:30:00+00:00"
+
+
+def test_score_stats_empty_table_is_none() -> None:
+    assert ScoreStats.from_rows([]) is None
+
+
+def test_summarize_folds_the_scored_moments_into_the_report() -> None:
+    summary = summarize([], [], scored=[scored_row(gate_passed=1), scored_row(turn=1, gate_score=0.2, gate_passed=0)])
+    assert summary.scores is not None
+    assert (summary.scores.total, summary.scores.gate_passed) == (2, 1)
+    payload = payload_of(summary)
+    assert payload["scores"]["total"] == 2
+    assert payload["scores"]["gate_pass_rate"] == 0.5
 
 
 def test_journal_shadow_report_appends_one_sorted_json_line(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -163,6 +228,10 @@ def test_shadow_report_joins_the_two_databases(tmp_path: Path) -> None:
                 make_proposal(session_id=TRAIN_SESSION, ts="2026-01-01T00:00:00+00:00", steer="final steer")
             )
             await delivery.deliver(make_proposal(session_id="sess-quiet", anchor_uuid="a9", draft=None, steer=None))
+            await delivery.record_scored(
+                make_scored(session_id=TRAIN_SESSION, turn_index=0, gate_score=0.9, gate_passed=True)
+            )
+            await delivery.record_scored(make_scored(session_id="sess-quiet", turn_index=1, gate_score=0.3))
 
     anyio.run(seed)
     result = CliRunner().invoke(
@@ -184,3 +253,6 @@ def test_shadow_report_joins_the_two_databases(tmp_path: Path) -> None:
     assert payload["stage2_abstained"] == 1
     assert (payload["steers"], payload["hits"], payload["nuisance"]) == (1, 1, 0)
     assert payload["proposals_per_session"] == 1.0
+    assert (payload["scores"]["total"], payload["scores"]["gate_passed"]) == (2, 1)
+    assert payload["scores"]["gate_pass_rate"] == 0.5
+    assert payload["scores"]["maximum"] == 0.9

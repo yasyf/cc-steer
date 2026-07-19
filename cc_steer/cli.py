@@ -1459,17 +1459,18 @@ async def watch_(
                 click.echo(
                     "retrieval disabled: the exemplar index is empty — run `cc-steer index` to enable it", err=True
                 )
-        cascade = Cascade(
-            gate=gate,
-            drafter=drafter,
-            refiner=refiner,
-            store=store,
-            config=config,
-            encoder=encoder,
-        )
         shadow_target = shadow_db or shadow_db_path()
         async with contextlib.AsyncExitStack() as stack:
             shadow = await stack.enter_async_context(await ShadowDelivery.open(shadow_target))
+            cascade = Cascade(
+                gate=gate,
+                drafter=drafter,
+                refiner=refiner,
+                store=store,
+                config=config,
+                scored=shadow,
+                encoder=encoder,
+            )
             delivery: SteerDelivery = shadow
             if mode != "shadow":
                 mailbox = await stack.enter_async_context(await MailboxDelivery.open(shadow_target, config=live_config))
@@ -1554,6 +1555,14 @@ async def shadow_report(
     if (stats := summary.sentinel_probs) is not None:
         deciles = " ".join(f"{p:.3f}" for p in stats.deciles)
         click.echo(f"sentinel P(NO_STEER): n={stats.n} mean={stats.mean:.3f} deciles=[{deciles}]")
+    if (scores := summary.scores) is not None:
+        score_deciles = " ".join(f"{s:.3f}" for s in scores.deciles)
+        click.echo(
+            f"scored moments: {scores.total} total — last {scores.window_days}d: {scores.windowed} scored, "
+            f"gate passed {scores.gate_passed} ({scores.gate_pass_rate:.0%}), "
+            f"max {scores.maximum:.3f}, deciles=[{score_deciles}]"
+        )
+        click.echo(f"freshness: last={scores.recent_ts or '(none)'}, {scores.last_24h} in last 24h")
     if journal_repo is not None and not journal_shadow_report(journal_repo, summary):
         click.echo("journal: not recorded (cc-notes missing or repo uninitialized)", err=True)
 

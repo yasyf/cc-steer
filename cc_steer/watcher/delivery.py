@@ -19,7 +19,7 @@ from cc_transcript.mining.store import now
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from cc_steer.watcher.types import SteerProposal
+    from cc_steer.watcher.types import ScoredMoment, SteerProposal
 
 SHADOW_DDL = """
 CREATE TABLE IF NOT EXISTS proposals (
@@ -41,11 +41,43 @@ CREATE TABLE IF NOT EXISTS proposals (
 );
 """
 
+SCORED_MOMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS scored_moments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  turn_index INTEGER NOT NULL,
+  ts TEXT NOT NULL,
+  project TEXT,
+  gate_score REAL NOT NULL,
+  gate_threshold REAL NOT NULL,
+  gate_passed INTEGER NOT NULL,
+  stage2_prob REAL,
+  stage2_threshold REAL,
+  created_at TEXT NOT NULL,
+  UNIQUE(session_id, turn_index)
+);
+"""
+
 INSERT_PROPOSAL = """
 INSERT OR IGNORE INTO proposals (
   session_id, anchor_uuid, turn_index, ts, gate_score, sentinel_prob, draft, steer,
   window_render, project, exemplar_keys, stage_versions, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+INSERT_SCORED = """
+INSERT INTO scored_moments (
+  session_id, turn_index, ts, project, gate_score, gate_threshold, gate_passed,
+  stage2_prob, stage2_threshold, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(session_id, turn_index) DO UPDATE SET
+  ts = excluded.ts,
+  project = excluded.project,
+  gate_score = excluded.gate_score,
+  gate_threshold = excluded.gate_threshold,
+  gate_passed = excluded.gate_passed,
+  stage2_prob = excluded.stage2_prob,
+  stage2_threshold = excluded.stage2_threshold
 """
 
 
@@ -61,6 +93,12 @@ class SteerDelivery(Protocol):
     """Anything that takes a finished proposal off the watcher's hands."""
 
     async def deliver(self, proposal: SteerProposal) -> None: ...
+
+
+class ScoredSink(Protocol):
+    """Anything that durably records a scored moment for shadow analysis."""
+
+    async def record_scored(self, moment: ScoredMoment) -> None: ...
 
 
 class ShadowDelivery:
@@ -89,7 +127,9 @@ class ShadowDelivery:
         target.parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(str(target), isolation_level=None)
         conn.row_factory = aiosqlite.Row
-        await conn.executescript(SHADOW_DDL)
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA busy_timeout=2000")
+        await conn.executescript(SHADOW_DDL + SCORED_MOMENTS_DDL)
         await ensure_columns(conn)
         return cls(conn)
 
@@ -133,3 +173,34 @@ class ShadowDelivery:
         """Returns every recorded proposal, oldest first."""
         cur = await self.conn.execute("SELECT * FROM proposals ORDER BY id")
         return [dict(row) async for row in cur]
+
+    async def record_scored(self, moment: ScoredMoment) -> None:
+        """Records one scored-moment row; a duplicate ``(session, turn)`` refreshes it, last observation wins."""
+        await self.conn.execute(
+            INSERT_SCORED,
+            (
+                moment.session_id,
+                moment.turn_index,
+                moment.ts,
+                moment.project,
+                moment.gate_score,
+                moment.gate_threshold,
+                int(moment.gate_passed),
+                moment.stage2_prob,
+                moment.stage2_threshold,
+                now(),
+            ),
+        )
+
+    async def scored_moments(self, *, since: str | None = None) -> list[dict[str, object]]:
+        """Returns scored moments at or after ISO-8601 ``since`` (every one when None), oldest first."""
+        where = "" if since is None else " WHERE ts >= ?"
+        params = () if since is None else (since,)
+        cur = await self.conn.execute(f"SELECT * FROM scored_moments{where} ORDER BY id", params)
+        return [dict(row) async for row in cur]
+
+    async def scored_count(self) -> int:
+        """Returns the grand total of scored moments, all time — cheap, no row materialization."""
+        cur = await self.conn.execute("SELECT COUNT(*) FROM scored_moments")
+        row = await cur.fetchone()
+        return int(row[0]) if row is not None else 0

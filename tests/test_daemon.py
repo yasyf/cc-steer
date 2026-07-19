@@ -10,8 +10,8 @@ from cc_transcript.ids import SessionId
 from cc_transcript.mining.sampling import fold_trigger, turn_anchor
 from cc_transcript.watch import WatchEvent
 
-from cc_steer.watcher.daemon import Watcher
-from tests.builders import assistant_text, parse, user_text
+from cc_steer.watcher.daemon import Watcher, session_cwd
+from tests.builders import assistant_text, mode_entry, parse, user_text
 from tests.test_delivery import make_proposal
 
 if TYPE_CHECKING:
@@ -27,12 +27,12 @@ SESSION = "sess-live"
 class RecordingCascade:
     def __init__(self, result: SteerProposal | None = None) -> None:
         self.result = result
-        self.calls: list[tuple[str, int, str, ContextWindow]] = []
+        self.calls: list[tuple[str, int, str, ContextWindow, str | None]] = []
 
     async def evaluate(
-        self, session_id: str, *, turn_index: int, anchor_uuid: str, window: ContextWindow
+        self, session_id: str, *, turn_index: int, anchor_uuid: str, window: ContextWindow, project: str | None = None
     ) -> SteerProposal | None:
-        self.calls.append((session_id, turn_index, anchor_uuid, window))
+        self.calls.append((session_id, turn_index, anchor_uuid, window, project))
         return self.result
 
 
@@ -71,8 +71,8 @@ async def test_evaluate_session_targets_the_last_completed_turn() -> None:
     watcher = watcher_with(cascade)
     watcher.ingest(watch_events(entries(8)), now=0.0)
     assert await watcher.evaluate_session(SESSION) is None
-    [(session_id, turn_index, anchor_uuid, window)] = cascade.calls
-    assert (session_id, turn_index, anchor_uuid) == (SESSION, 6, "a6")
+    [(session_id, turn_index, anchor_uuid, window, project)] = cascade.calls
+    assert (session_id, turn_index, anchor_uuid, project) == (SESSION, 6, "a6", "/repo")
     assert len(window.before) == 6
     assert window.trigger is None
     assert window.after == ()
@@ -107,7 +107,7 @@ async def test_unchanged_turn_count_skips_the_cascade() -> None:
     await watcher.evaluate_session(SESSION)
     watcher.ingest(watch_events([assistant_text("still going", sessionId=SESSION, uuid="a3-extra")]), now=1.0)
     assert await watcher.evaluate_session(SESSION) is None
-    assert [turn_index for _, turn_index, _, _ in cascade.calls] == [2]
+    assert [turn_index for _, turn_index, _, _, _ in cascade.calls] == [2]
 
 
 async def test_a_newly_completed_turn_advances_the_target() -> None:
@@ -117,7 +117,7 @@ async def test_a_newly_completed_turn_advances_the_target() -> None:
     await watcher.evaluate_session(SESSION)
     watcher.ingest(watch_events(entries(1, start=8)), now=1.0)
     await watcher.evaluate_session(SESSION)
-    assert [turn_index for _, turn_index, _, _ in cascade.calls] == [6, 7]
+    assert [turn_index for _, turn_index, _, _, _ in cascade.calls] == [6, 7]
 
 
 def test_sidechain_events_are_never_buffered() -> None:
@@ -134,9 +134,23 @@ def test_buffers_are_capped_to_the_most_recent_events() -> None:
 
 async def test_step_debounces_and_delivers_every_proposal() -> None:
     delivery = CollectingDelivery()
-    watcher = watcher_with(RecordingCascade(result=make_proposal()), delivery, debounce_s=2.0)
+    cascade = RecordingCascade(result=make_proposal(project="/repo"))
+    watcher = watcher_with(cascade, delivery, debounce_s=2.0)
     assert await watcher.step(watch_events(entries(4)), now=10.0) == []
     assert delivery.delivered == []
     assert await watcher.step([], now=13.0) == [make_proposal(project="/repo")]
     assert delivery.delivered == [make_proposal(project="/repo")]
+    assert cascade.calls[-1][4] == "/repo"
     assert await watcher.step([], now=20.0) == []
+
+
+@pytest.mark.parametrize(
+    ("items", "expected"),
+    [
+        pytest.param([user_text("hi"), assistant_text("ok")], "/repo", id="realistic-transcript-cwd"),
+        pytest.param([user_text("hi", cwd=None), assistant_text("ok", cwd=None)], None, id="cwd-absent-underivable"),
+        pytest.param([mode_entry("default")], None, id="no-meta-bearing-events"),
+    ],
+)
+def test_session_cwd_derives_the_project_from_event_meta(items: list[dict[str, Any]], expected: str | None) -> None:
+    assert session_cwd(parse(items)) == expected

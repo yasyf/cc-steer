@@ -5,10 +5,11 @@ import json
 from typing import TYPE_CHECKING
 
 import aiosqlite
+import anyio
 import pytest
 
 from cc_steer.watcher.delivery import ShadowDelivery
-from cc_steer.watcher.types import SteerProposal
+from cc_steer.watcher.types import ScoredMoment, SteerProposal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,6 +48,20 @@ def make_proposal(**overrides: object) -> SteerProposal:
             exemplar_keys=("k-train",),
             stage_versions=json.dumps({"stage2_model": "medium"}),
             window_render="<user>\nplease do step\n\n<assistant>\ndid step",
+        ),
+        **overrides,
+    )
+
+
+def make_scored(**overrides: object) -> ScoredMoment:
+    return dataclasses.replace(
+        ScoredMoment(
+            session_id="sess-live",
+            turn_index=3,
+            ts="2026-07-07T10:00:00+00:00",
+            gate_score=0.42,
+            gate_threshold=0.5,
+            gate_passed=False,
         ),
         **overrides,
     )
@@ -93,6 +108,80 @@ async def test_shadow_delivery_round_trips_the_sentinel_prob(tmp_path: Path) -> 
         await delivery.deliver(make_proposal(anchor_uuid="a2", turn_index=9))
         rows = await delivery.proposals()
     assert [row["sentinel_prob"] for row in rows] == [0.2373, None]
+
+
+async def test_scored_moments_round_trip_gate_and_stage2_fields(tmp_path: Path) -> None:
+    path = tmp_path / "shadow.db"
+    async with await ShadowDelivery.open(path) as delivery:
+        await delivery.record_scored(make_scored(project="/repo"))
+        await delivery.record_scored(
+            make_scored(turn_index=7, gate_score=0.91, gate_passed=True, stage2_prob=0.2, stage2_threshold=0.6)
+        )
+    async with await ShadowDelivery.open(path) as reopened:
+        rows = await reopened.scored_moments()
+    assert len(rows) == 2
+    suppressed, fired = rows
+    assert (suppressed["turn_index"], suppressed["gate_passed"], suppressed["project"]) == (3, 0, "/repo")
+    assert (suppressed["gate_score"], suppressed["gate_threshold"]) == (0.42, 0.5)
+    assert (suppressed["stage2_prob"], suppressed["stage2_threshold"]) == (None, None)
+    assert (fired["turn_index"], fired["gate_passed"]) == (7, 1)
+    assert (fired["stage2_prob"], fired["stage2_threshold"]) == (0.2, 0.6)
+    assert suppressed["created_at"] and fired["created_at"]
+
+
+async def test_scored_moments_refresh_on_session_and_turn_conflict(tmp_path: Path) -> None:
+    async with await ShadowDelivery.open(tmp_path / "shadow.db") as delivery:
+        await delivery.record_scored(make_scored(gate_score=0.42))
+        await delivery.record_scored(make_scored(gate_score=0.99, gate_passed=True, stage2_prob=0.1, stage2_threshold=0.6))
+        await delivery.record_scored(make_scored(turn_index=9, gate_score=0.77))
+        rows = await delivery.scored_moments()
+    assert [
+        (row["turn_index"], row["gate_score"], row["gate_passed"], row["stage2_prob"], row["stage2_threshold"])
+        for row in rows
+    ] == [(3, 0.99, 1, 0.1, 0.6), (9, 0.77, 0, None, None)]
+
+
+async def test_open_sets_wal_and_busy_timeout(tmp_path: Path) -> None:
+    async with await ShadowDelivery.open(tmp_path / "shadow.db") as delivery:
+        mode = await (await delivery.conn.execute("PRAGMA journal_mode")).fetchone()
+        timeout = await (await delivery.conn.execute("PRAGMA busy_timeout")).fetchone()
+    assert mode is not None and mode[0] == "wal"
+    assert timeout is not None and timeout[0] == 2000
+
+
+async def test_record_scored_waits_out_a_concurrent_immediate_writer(tmp_path: Path) -> None:
+    path = tmp_path / "shadow.db"
+    async with await ShadowDelivery.open(path) as delivery:
+        holder = await aiosqlite.connect(str(path), isolation_level=None)
+        try:
+            await holder.execute("BEGIN IMMEDIATE")
+            await holder.execute(
+                "INSERT INTO scored_moments "
+                "(session_id, turn_index, ts, gate_score, gate_threshold, gate_passed, created_at) "
+                "VALUES ('holder', 0, ?, 0.1, 0.5, 0, ?)",
+                ("2026-07-07T10:00:00+00:00", "2026-07-07T10:00:00+00:00"),
+            )
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(delivery.record_scored, make_scored())
+                await anyio.sleep(0.2)
+                await holder.execute("COMMIT")
+        finally:
+            await holder.close()
+        rows = await delivery.scored_moments()
+    assert {row["session_id"] for row in rows} == {"holder", "sess-live"}
+
+
+async def test_scored_moments_bounds_by_since_and_counts_all(tmp_path: Path) -> None:
+    async with await ShadowDelivery.open(tmp_path / "shadow.db") as delivery:
+        await delivery.record_scored(make_scored(turn_index=0, ts="2026-01-01T00:00:00+00:00"))
+        await delivery.record_scored(make_scored(turn_index=1, ts="2026-07-01T00:00:00+00:00"))
+        await delivery.record_scored(make_scored(turn_index=2, ts="2026-07-17T00:00:00+00:00"))
+        recent = await delivery.scored_moments(since="2026-06-01T00:00:00+00:00")
+        total = await delivery.scored_count()
+        everything = await delivery.scored_moments()
+    assert [row["turn_index"] for row in recent] == [1, 2]
+    assert total == 3
+    assert [row["turn_index"] for row in everything] == [0, 1, 2]
 
 
 async def test_open_migrates_a_legacy_ledger_missing_window_render(tmp_path: Path) -> None:

@@ -10,10 +10,16 @@ drafter drops in without touching the orchestrator.
 
 The :class:`Cascade` also owns the per-session ledger: a turn is evaluated at
 most once, a session cools down for ``cooldown_turns`` after each proposal and
-stops being evaluated after ``max_per_session`` proposals. Suppressed turns
-(cooldown, cap, or a below-threshold gate score) produce no proposal row;
-every stage-2 invocation does, so shadow analysis sees the drafter's
-abstentions.
+stops being evaluated after ``max_per_session`` proposals. Cooldown- and
+cap-suppressed turns are never scored and leave no row at all; every gate-scored
+turn records a :class:`~cc_steer.watcher.types.ScoredMoment` regardless of
+outcome — a below-threshold gate now leaves a suppressed row where it used to
+vanish, so shadow analysis tells a quiet gate apart from a daemon that never
+ran. A passing gate records its moment before stage 2 runs and refreshes the
+same row once stage 2 completes, so a stage-2 exception leaves a visible
+gate-passed row with its stage-2 fields null — the 'gate ran, stage-2 failed'
+case this telemetry exists to see. A proposal row is written only for the
+stage-2 invocations a passing gate triggers, abstentions included.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from cc_transcript.judge import resolved_model
 from cc_steer.claude import run_claude
 from cc_steer.exemplars import exemplars_for, load_index, mmr_select
 from cc_steer.rendering import NO_STEER, gate_text, watcher_prompt
-from cc_steer.watcher.types import Draft, SteerProposal
+from cc_steer.watcher.types import Draft, ScoredMoment, SteerProposal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -40,6 +46,7 @@ if TYPE_CHECKING:
     from cc_steer.exemplars import Encoder, Exemplar
     from cc_steer.rendering import Message
     from cc_steer.store import FeedbackStore
+    from cc_steer.watcher.delivery import ScoredSink
     from cc_steer.watcher.types import CascadeConfig
 
 TURN_HEADER = re.compile(r"^<(?:user|assistant)>$", re.MULTILINE)
@@ -171,6 +178,7 @@ class Cascade:
         refiner: The stage-3 voice model, or None to ship fired drafts as-is.
         store: The feedback store carrying the exemplar index.
         config: The cascade's tuning knobs.
+        scored: The sink every gate-scored moment is recorded to, suppressed included.
         encoder: The query encoder for exemplar retrieval, or None to disable it.
     """
 
@@ -179,19 +187,29 @@ class Cascade:
     refiner: Refiner | None
     store: FeedbackStore
     config: CascadeConfig
+    scored: ScoredSink
     encoder: Encoder | None = None
     ledgers: dict[str, SessionLedger] = field(default_factory=dict)
 
     async def evaluate(
-        self, session_id: str, *, turn_index: int, anchor_uuid: str, window: ContextWindow
+        self, session_id: str, *, turn_index: int, anchor_uuid: str, window: ContextWindow, project: str | None = None
     ) -> SteerProposal | None:
         """Runs one live moment through the cascade, at most once per (session, turn).
+
+        Every turn that reaches the gate is recorded as a
+        :class:`~cc_steer.watcher.types.ScoredMoment` — a below-threshold gate
+        leaves a suppressed row — while cooldown- and cap-suppressed turns are
+        never scored and leave no row. A passing gate's moment is recorded
+        before stage 2 runs and refreshed after it completes, so a stage-2
+        failure leaves the gate-passed row visible with its stage-2 fields null.
 
         Args:
             session_id: The session the window came from.
             turn_index: The completed turn the window ends at.
             anchor_uuid: The uuid of the last event in the window.
             window: The live, triggerless context window.
+            project: The working directory the session ran in, stamped on the
+                scored moment and any proposal; None when underivable.
 
         Returns:
             The proposal — recorded for every stage-2 invocation, abstentions
@@ -207,7 +225,19 @@ class Cascade:
         if (last := ledger.last_proposal_turn) is not None and turn_index - last < self.config.cooldown_turns:
             return None
         text = gate_text(window)
-        if (score := self.gate.score(text)) < self.config.gate_threshold:
+        score = self.gate.score(text)
+        ts = datetime.now(UTC).isoformat()
+        scored = ScoredMoment(
+            session_id=session_id,
+            turn_index=turn_index,
+            ts=ts,
+            gate_score=score,
+            gate_threshold=self.config.gate_threshold,
+            gate_passed=not (score < self.config.gate_threshold),
+            project=project,
+        )
+        await self.scored.record_scored(scored)
+        if not scored.gate_passed:
             return None
         prompt = watcher_prompt(window, render_version=self.config.render_version)
         drafted = await self.drafter.draft(prompt)
@@ -220,6 +250,9 @@ class Cascade:
             else:
                 exemplars = await self.retrieve(text)
                 steer = steer_or_none(await self.refiner.refine(prompt, draft, exemplars))
+        await self.scored.record_scored(
+            dataclasses.replace(scored, stage2_prob=drafted.sentinel_prob, stage2_threshold=self.config.stage2_threshold)
+        )
         ledger.proposals += 1
         ledger.last_proposal_turn = turn_index
         return SteerProposal(
@@ -234,6 +267,7 @@ class Cascade:
             exemplar_keys=tuple(exemplar.dedup_key for exemplar in exemplars),
             stage_versions=self.stage_versions(),
             window_render=text,
+            project=project,
         )
 
     async def retrieve(self, query_text: str) -> list[Exemplar]:
