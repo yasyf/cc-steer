@@ -22,7 +22,7 @@ byte-compatible with training.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import anyio
@@ -196,7 +196,7 @@ def live_window(turns: Sequence[Turn]) -> ContextWindow | None:
         The window, or None when the last turn carries no resolvable event.
     """
     refs = tuple(
-        dataclasses.replace(ref := turn_ref(turn, WINDOW_BUDGET), preview=scrub_text(ref.preview))
+        replace(ref := turn_ref(turn, WINDOW_BUDGET), preview=scrub_text(ref.preview))
         for turn in turns[-WINDOW_TURNS:]
     )
     if not refs or not refs[-1].refs:
