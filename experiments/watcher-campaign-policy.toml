@@ -10,6 +10,11 @@
 # harness cap the C4 sweep ran under; a real unit measures ~$8-10). Gated approval plus the
 # per-invocation cap bound the true total.
 #
+# Per-experiment invocation count = 1 preflight baseline (the untouched incumbent is scored into
+# a frozen per-experiment baseline OUTSIDE budget.max_units) + max_units candidates. ceilings
+# max_units=1 therefore pins each experiment at 2 metric invocations (~$16-24 true), the only
+# shape that fits two gated experiments near the operator envelope.
+#
 # Expected experiment-repo layout at run time (the campaign workdir):
 #   watcher_recipe.json                 — the mutable recipe the driver tunes (qwen3-8b base ids)
 #   watcher-base-sweep-qwen3-8b.toml    — the arm's immutable scoring boundary
@@ -24,7 +29,7 @@ max_wall_s = 43200.0
 max_consecutive_failures = 2
 
 [ceilings]
-max_units = 6
+max_units = 1
 max_wall_s = 14400.0
 hard_kill_s = 5400.0
 max_usd = 12.0
