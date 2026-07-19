@@ -20,7 +20,7 @@ requires-python = ">=3.13"
 dependencies = [
     "aiosqlite>=0.20",
     "anyio>=4.4",
-    "cc-transcript>=13.1,<14",
+    "cc-transcript>=14.6.1,<15",
     "click>=8",
     "datasets>=3.2",
     "experiment-at-home[gate]>=0.9.1,<0.10",

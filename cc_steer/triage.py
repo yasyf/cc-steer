@@ -313,7 +313,7 @@ async def render_context(window: ContextWindow) -> tuple[str, Fidelity]:
     Returns:
         The rendered context and the fidelity it was rendered at.
     """
-    if (hydrated := await window.hydrate()) is None:
+    if (hydrated := window.hydrate()) is None:
         return replace(window, fidelity="summary").render_preview(budget=CONTEXT_BUDGET), "summary"
     split = len(window.before)
     end = split + (window.trigger is not None)

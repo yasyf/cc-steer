@@ -496,7 +496,7 @@ async def enrich(tier: TModel, limit: int | None, concurrency: int, db: Path | N
     if not claude_available():
         raise click.ClickException("the claude CLI is not on PATH")
     async with await FeedbackStore.open(db or FeedbackStore.default_path()) as store:
-        pending = len(await store.unenriched(CorrectionLog.open()))
+        pending = len(await store.unenriched(await CorrectionLog.open()))
         click.echo(f"pending: {pending} pairs")
         report = await run_enrich(store, tier=tier, limit=limit, concurrency=concurrency)
         click.echo(
@@ -1641,4 +1641,4 @@ async def view_samples(db: Path | None, model: str, port: int, open_: bool) -> N
         if not samples:
             raise click.ClickException("no judged samples to serve")
         summary = await build_summary(samples, model=model)
-        await serve(build_app(store, summary=summary), port=port, open_browser=open_)
+        await serve(await build_app(store, summary=summary), port=port, open_browser=open_)

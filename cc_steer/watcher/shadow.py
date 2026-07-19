@@ -309,8 +309,7 @@ async def intervention_rows(store: FeedbackStore) -> list[dict[str, object]]:
     Category comes from the latest triage verdict when one exists; unjudged
     events carry an empty string.
     """
-    cur = await store.store.conn.execute(
+    return await store.sql(
         "SELECT f.session_id, f.occurred_at, COALESCE(j.category, '') AS category "
         "FROM feedback_events f LEFT JOIN latest_judge j ON j.dedup_key = f.dedup_key"
     )
-    return [dict(row) async for row in cur]

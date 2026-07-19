@@ -24,7 +24,7 @@ from cc_transcript.mining.confidence import from_payload
 from cc_steer.claude import run_claude
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from typing import Any, Literal
 
     from cc_transcript.corrections import Correction
@@ -218,8 +218,8 @@ class Lineage:
     pairs: tuple[RefinedPairRow, ...]
 
     @classmethod
-    def from_lineage(
-        cls, data: Mapping[str, Any], *, evidence_of: Callable[[Mapping[str, object]], EvidenceRow | None]
+    async def from_lineage(
+        cls, data: Mapping[str, Any], *, evidence_of: Callable[[Mapping[str, object]], Awaitable[EvidenceRow | None]]
     ) -> Lineage:
         """Builds a :class:`Lineage` from a :meth:`FeedbackStore.lineage` result.
 
@@ -230,7 +230,7 @@ class Lineage:
             sample=Sample.from_row(data),
             dedup_key=str(data["dedup_key"]),
             verdicts=tuple(VerdictRow.from_row(row) for row in data["verdicts"]),
-            pairs=tuple(RefinedPairRow.from_row(row, evidence=evidence_of(row)) for row in data["pairs"]),
+            pairs=tuple([RefinedPairRow.from_row(row, evidence=await evidence_of(row)) for row in data["pairs"]]),
         )
 
     @property

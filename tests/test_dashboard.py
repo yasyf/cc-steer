@@ -242,7 +242,6 @@ def test_serialize_lineage_keeps_the_full_untruncated_diff() -> None:
 
 
 async def seed(store: FeedbackStore) -> None:
-    conn = store.store.conn
     trigger = preview_window("I vendored it").to_json()
     empty = preview_window(None).to_json()
     payload_json = json.dumps({"signal": to_payload(firm("transcript_message"))})
@@ -252,7 +251,7 @@ async def seed(store: FeedbackStore) -> None:
         ("k3", "thanks, looks good", empty),
     ]
     for i, (key, text, ctx) in enumerate(rows):
-        await conn.execute(
+        await store.execute(
             "INSERT INTO feedback_events (dedup_key, source_kind, session_id, event_uuid, "
             "occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -297,15 +296,15 @@ def k1_correction(
     )
 
 
-def enrich_k1(correction: Correction) -> None:
+async def enrich_k1(correction: Correction) -> None:
     """Grounds k1's steering anchor (session ``s``, uuid ``u0``) in the shared ledger."""
-    CorrectionLog.open().append(correction)
+    await (await CorrectionLog.open()).append(correction)
 
 
 async def client(store: FeedbackStore) -> httpx.AsyncClient:
     stats = corpus_stats([Sample.from_row(row) for row in await store.candidates()])
     summary = Summary(stats=stats, highlights=(), narrative="Terse and direct.")
-    transport = httpx.ASGITransport(app=build_app(store, summary=summary))
+    transport = httpx.ASGITransport(app=await build_app(store, summary=summary))
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
@@ -324,7 +323,7 @@ async def test_api_pairs_returns_atomic_rows(store: FeedbackStore) -> None:
 
 async def test_api_pairs_carries_code_evidence(store: FeedbackStore) -> None:
     await seed(store)
-    enrich_k1(k1_correction(incorrect=("x = eval(s)", "y = eval(t)"), correct=("y = eval(t)", "y = json.loads(t)")))
+    await enrich_k1(k1_correction(incorrect=("x = eval(s)", "y = eval(t)"), correct=("y = eval(t)", "y = json.loads(t)")))
     async with await client(store) as http:
         pair = (await http.get("/api/pairs")).json()["pairs"][0]
     assert pair["evidence"] == {
@@ -338,7 +337,7 @@ async def test_api_pairs_carries_code_evidence(store: FeedbackStore) -> None:
 
 async def test_api_pairs_clips_evidence_sides_for_the_list(store: FeedbackStore) -> None:
     await seed(store)
-    enrich_k1(k1_correction(incorrect=("a" * 400, "b"), correct=None, source=None))
+    await enrich_k1(k1_correction(incorrect=("a" * 400, "b"), correct=None, source=None))
     async with await client(store) as http:
         evidence = (await http.get("/api/pairs")).json()["pairs"][0]["evidence"]
     assert evidence["incorrect"]["old"] == "a" * 280 + "…"
@@ -356,7 +355,7 @@ async def test_api_pairs_no_ledger_correction_keeps_evidence_none(store: Feedbac
 async def test_api_lineage_shows_the_full_diff(store: FeedbackStore) -> None:
     await seed(store)
     long_new = "json.loads(" + "x" * 900 + ")"
-    enrich_k1(k1_correction(incorrect=("bad < worse\nstill bad", long_new), correct=None, source=None))
+    await enrich_k1(k1_correction(incorrect=("bad < worse\nstill bad", long_new), correct=None, source=None))
     async with await client(store) as http:
         data = (await http.get("/api/lineage/k1")).json()
     evidence = data["refiner"]["pairs"][0]["evidence"]

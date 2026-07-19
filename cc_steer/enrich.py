@@ -25,7 +25,7 @@ from cc_transcript.discovery import TranscriptExpiredError
 from cc_transcript.extract import extract_correction, usable_backend
 from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef, EventUuid, SessionId
-from cc_transcript.parser import parse_events_async
+from cc_transcript.parser import parse
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -79,8 +79,8 @@ async def load_activity(session_id: SessionId, origin_path: object) -> SessionAc
     fallback for events whose original file is gone.
     """
     if origin_path is not None and (path := Path(str(origin_path))).exists():
-        return SessionActivity.from_events(session_id, await parse_events_async(path))
-    return await SessionActivity.from_session(session_id)
+        return SessionActivity.from_events(session_id, parse(path).events)
+    return SessionActivity.from_session(session_id)
 
 
 async def resolve_pair(
@@ -163,7 +163,7 @@ async def enrich(
     Returns:
         The pass's corrections/skipped/pending counts.
     """
-    log = CorrectionLog.open()
+    log = await CorrectionLog.open()
     rows = await store.unenriched(log, limit=limit)
     corrections, skipped = await run_enrichments(
         rows, tier=tier, concurrency=concurrency, log=log, backend=usable_backend()

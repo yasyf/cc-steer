@@ -78,8 +78,8 @@ def candidate_row(events: list[TranscriptEvent], *, source_kind: str) -> dict[st
 
 
 async def judge_fidelities(store: FeedbackStore) -> set[str]:
-    cur = await store.store.conn.execute("SELECT DISTINCT fidelity FROM triage WHERE role = 'judge'")
-    return {str(row["fidelity"]) async for row in cur}
+    rows = await store.sql("SELECT DISTINCT fidelity FROM triage WHERE role = 'judge'")
+    return {str(row["fidelity"]) for row in rows}
 
 
 @pytest.mark.unit

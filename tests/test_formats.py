@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import pytest
-from cc_transcript.mining.spec import regex_review_comments
+from cc_transcript.mining import MiningSpec, ReviewSpec, mine
 
 from cc_steer.formats import CONDUCTOR_FINDING_FMT, extract_superset_inline
+from tests.builders import parse, user_text
+
+
+def conductor_signals(text: str) -> list:
+    spec = MiningSpec(review=ReviewSpec(regex_formats=(CONDUCTOR_FINDING_FMT,)))
+    return [sig for sig in mine(parse([user_text(text)]), spec) if sig.detector == "review_comment"]
 
 
 @pytest.mark.unit
@@ -24,13 +30,13 @@ def test_superset_inline_single_line_has_no_end() -> None:
 @pytest.mark.unit
 def test_conductor_finding_joins_claim_and_suggestion() -> None:
     text = "- file: pkg/mod.py:42\n- theme: correctness\n- claim: leaks a handle\n- suggestion: close it"
-    [comment] = regex_review_comments(CONDUCTOR_FINDING_FMT, text)
-    assert comment.file == "pkg/mod.py"
-    assert comment.line_start == 42
-    assert comment.comment == "leaks a handle close it"
+    [sig] = conductor_signals(text)
+    assert sig.evidence["file"] == "pkg/mod.py"
+    assert sig.evidence["line_start"] == 42
+    assert sig.text == "leaks a handle close it"
 
 
 @pytest.mark.unit
 def test_conductor_finding_drops_missing_claim_or_suggestion() -> None:
-    [comment] = regex_review_comments(CONDUCTOR_FINDING_FMT, "- file: a.py:7\n- suggestion: extract a helper")
-    assert comment.comment == "extract a helper"
+    [sig] = conductor_signals("- file: a.py:7\n- suggestion: extract a helper")
+    assert sig.text == "extract a helper"

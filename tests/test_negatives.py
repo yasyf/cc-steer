@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -152,16 +151,13 @@ async def test_sample_negatives_marks_a_dropped_only_session(
 
 
 async def test_sample_negatives_marks_zero_turn_sessions_so_budget_advances(
-    store: FeedbackStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    store: FeedbackStore, tmp_path: Path
 ) -> None:
     sessions = {"a0000000-0000-0000-0000-000000000000", "b0000000-0000-0000-0000-000000000000"}
     for session in sessions:
         write_transcript(tmp_path / "proj" / f"{session}.jsonl", [user_text("x", sessionId=session, uuid=session)])
-    monkeypatch.setattr(
-        negatives.SessionActivity,
-        "from_events",
-        staticmethod(lambda session_id, events: SimpleNamespace(turns=())),
-    )
+    # A single-prompt transcript has no completed turn to anchor a negative on, so
+    # it yields nothing yet is still marked, advancing a fixed sessions=1 budget.
     first = await sample_negatives(store, [tmp_path], seed=1, sessions=1, min_bytes=0)
     # A zero-turn transcript produces no samples but is still marked, so a fixed
     # sessions=1 budget advances to the other candidate instead of re-parsing it.
@@ -172,11 +168,23 @@ async def test_sample_negatives_marks_zero_turn_sessions_so_budget_advances(
     assert await store.negative_sessions() == sessions
 
 
+async def test_sample_negatives_isolates_a_corrupt_transcript(store: FeedbackStore, tmp_path: Path) -> None:
+    good = "a0000000-0000-0000-0000-000000000000"
+    corrupt = "e0000000-0000-0000-0000-000000000000"
+    write_transcript(tmp_path / "proj" / f"{good}.jsonl", session_entries(good))
+    (tmp_path / "proj" / f"{corrupt}.jsonl").write_text("{ not valid json\n")
+    report = await sample_negatives(store, [tmp_path], seed=1, sessions=10, per_session=2, min_bytes=0)
+    marked = await store.negative_sessions()
+    assert good in marked  # the good session is processed and marked
+    assert corrupt not in marked  # the corrupt file is skipped, not marked
+    assert report.sessions_sampled == 1  # and the pass completes rather than aborting on the corrupt file
+
+
 async def test_sample_negatives_excludes_turns_near_detected_events(store: FeedbackStore, tmp_path: Path) -> None:
     session = "c0000000-0000-0000-0000-000000000000"
     entries = session_entries(session)
     write_transcript(tmp_path / "proj" / f"{session}.jsonl", entries)
-    await store.store.conn.execute(
+    await store.execute(
         "INSERT INTO feedback_events (dedup_key, source_kind, session_id, event_uuid, "
         "occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",

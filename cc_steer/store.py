@@ -1,13 +1,14 @@
 """The SQLite feedback store: the platform's mining store plus cc-steer's triage layer.
 
-The store mechanism lives in :mod:`cc_transcript.mining`; this module adds
-cc-steer's default database location, the ``origin_path`` display hint and
-``quarantined_reason`` columns,
-the ``triage`` verdict table, the ``refinement`` table, and two views:
-``accepted_steering`` (judge-accepted candidates, the refine stage's input) and
-``refined_pairs`` — the pipeline's final deliverable. The enrich stage's code
-evidence no longer lives here: it lands in cc-transcript's shared ``corrections``
-ledger, keyed by the steering anchor, and the dashboard reads it straight from there.
+The store mechanism lives in :mod:`cc_transcript.mining`; this module composes it —
+holding a :class:`~cc_transcript.mining.FeedbackStore` configured by cc-steer's
+:data:`STEER_SCHEMA` — and adds cc-steer's default database location, the
+``origin_path`` display hint and ``quarantined_reason`` columns, the ``triage``
+verdict table, the ``refinement`` table, and two views: ``accepted_steering``
+(judge-accepted candidates, the refine stage's input) and ``refined_pairs`` — the
+pipeline's final deliverable. The enrich stage's code evidence no longer lives here:
+it lands in cc-transcript's shared ``corrections`` ledger, keyed by the steering
+anchor, and the dashboard reads it straight from there.
 """
 
 from __future__ import annotations
@@ -17,23 +18,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
-import aiosqlite
 from cc_transcript.context import ContextWindow
 from cc_transcript.ids import EventUuid, SessionId
-from cc_transcript.judge import VerdictStoreMixin
-from cc_transcript.judge.verdicts import EVENT_COLUMNS, hydratable
-from cc_transcript.mining import FEEDBACK_DDL as BASE_FEEDBACK_DDL
 from cc_transcript.mining import FeedbackStore as BaseFeedbackStore
-from cc_transcript.mining import Stats, event_row
+from cc_transcript.mining import Stats, StoreSchema, event_row
 from cc_transcript.mining.store import now
-from cc_transcript.store import FileStateStore
 
 from cc_steer.rendering import has_substantive_content, has_substantive_gate_content, messages
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from types import TracebackType
 
-    from aiosqlite import Row
     from cc_transcript.corrections import CorrectionLog
     from cc_transcript.mining import DedupKey, FeedbackCandidate
 
@@ -43,10 +39,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ACCRUED_EMPTY_REASON",
-    "FEEDBACK_DDL",
     "GATE_DDL",
     "REFINE_DDL",
-    "TRIAGE_DDL",
     "ContextRebuildChanges",
     "FeedbackStore",
     "Stats",
@@ -54,13 +48,7 @@ __all__ = [
     "event_row",
 ]
 
-FEEDBACK_DDL = BASE_FEEDBACK_DDL.replace(
-    "  ingested_at TEXT NOT NULL\n",
-    "  ingested_at TEXT NOT NULL,\n  origin_path TEXT,\n  quarantined_reason TEXT\n",
-)
-
 BUSY_TIMEOUT_MS = 2_000
-ADD_QUARANTINE_COLUMN = "ALTER TABLE feedback_events ADD COLUMN quarantined_reason TEXT"
 ACCRUED_EMPTY_REASON = "accrued_context_empty"
 REBUILD_QUARANTINE_REASONS = (
     ACCRUED_EMPTY_REASON,
@@ -70,12 +58,11 @@ REBUILD_QUARANTINE_REASONS = (
     "rebuilt_context_empty",
 )
 
-INSERT_EVENT = """
-INSERT OR IGNORE INTO feedback_events (
-  dedup_key, source_kind, session_id, event_uuid,
-  occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
+# The feedback_events columns cc-steer's candidate and lineage reads project.
+EVENT_COLUMNS = (
+    "e.id, e.dedup_key, e.source_kind, e.occurred_at, e.text, "
+    "e.payload_json, e.context_json, e.session_id, e.event_uuid"
+)
 
 QUARANTINE_ELIGIBLE = (
     "(quarantined_reason IS NULL OR quarantined_reason IN ("
@@ -293,6 +280,15 @@ SELECT dedup_key, prompt_version AS refine_version, model AS refine_model, pair_
 FROM refined_pairs
 ORDER BY event_id, pair_index"""
 
+STEER_SCHEMA = StoreSchema(
+    extra_ddl=(TRIAGE_VIEWS_DDL, REFINE_DDL, GATE_DDL),
+    event_columns=("origin_path TEXT", "quarantined_reason TEXT"),
+    verdict_table="triage",
+    accepted_column="is_steering",
+    summary_column="what_claude_did",
+    event_filter="e.quarantined_reason IS NULL",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class TriageStats:
@@ -334,26 +330,25 @@ def gate_sample_row(sample: GateSample, created_at: str) -> tuple[object, ...]:
     )
 
 
-class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
-    """Persistent store for collected feedback over a :class:`FileStateStore`.
+class FeedbackStore:
+    """Persistent store for collected feedback over the native mining engine.
 
-    Layers the ``feedback_events`` table (extended with provenance and quarantine
-    columns) onto cc-transcript's file-mtime ledger and adds the
-    ``triage`` verdict table (the judge package's verdict mechanism pinned to
-    cc-steer's column names), the ``refinement`` table, and the
-    ``accepted_steering`` and ``refined_pairs`` views. Verdicts and refinements key
-    on the content-derived dedup key, so they survive a database rebuild; the enrich
-    stage's code evidence lives in cc-transcript's shared ``corrections`` ledger,
-    keyed by the steering anchor.
+    Composes cc-transcript's :class:`~cc_transcript.mining.FeedbackStore`, configured
+    by :data:`STEER_SCHEMA`: the ``feedback_events`` table (extended with the
+    ``origin_path`` provenance and ``quarantined_reason`` columns), the ``triage``
+    verdict table (the engine's verdict tier pinned to cc-steer's column names), the
+    ``refinement`` table, and the ``accepted_steering`` and ``refined_pairs`` views.
+    Verdicts and refinements key on the content-derived dedup key, so they survive a
+    database rebuild; the enrich stage's code evidence lives in cc-transcript's shared
+    ``corrections`` ledger, keyed by the steering anchor.
 
     Example:
         >>> async with await FeedbackStore.open(FeedbackStore.default_path()) as store:
         ...     await store.record_file_scan(str(path), mtime, candidates)
     """
 
-    VERDICT_TABLE = "triage"
-    ACCEPTED_COLUMN = "is_steering"
-    SUMMARY_COLUMN = "what_claude_did"
+    def __init__(self, db: BaseFeedbackStore) -> None:
+        self.db = db
 
     @staticmethod
     def default_path() -> Path:
@@ -363,28 +358,60 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
     @classmethod
     async def open(cls, path: Path) -> Self:
         """Opens (creating if needed) the feedback database at ``path``."""
-        store = await FileStateStore.open(path, extra_schema=FEEDBACK_DDL)
-        await store.conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-        columns = {str(row["name"]) async for row in await store.conn.execute("PRAGMA table_info(feedback_events)")}
-        if "quarantined_reason" not in columns:
-            await store.conn.execute(ADD_QUARANTINE_COLUMN)
-        await store.conn.executescript(TRIAGE_DDL + REFINE_DDL + GATE_DDL)
-        return cls(store)
+        return cls(await BaseFeedbackStore.open(path, STEER_SCHEMA, busy_timeout_ms=BUSY_TIMEOUT_MS))
 
     @classmethod
     async def open_readonly(cls, path: Path) -> Self:
         """Opens an existing feedback database without schema or data writes."""
-        conn = await aiosqlite.connect(
-            f"{path.resolve().as_uri()}?mode=ro",
-            isolation_level=None,
-            uri=True,
-        )
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.execute("PRAGMA query_only = ON")
-        await conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-        return cls(FileStateStore(conn))
+        return cls(await BaseFeedbackStore.open(path, STEER_SCHEMA, readonly=True, busy_timeout_ms=BUSY_TIMEOUT_MS))
 
+    async def close(self) -> None:
+        """Closes the underlying connection; a second close is a no-op."""
+        await self.db.close()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
+        await self.close()
+
+    # --- primitive delegators ------------------------------------------------
+    async def sql(self, statement: str, params: Sequence[object] = ()) -> list[dict[str, object]]:
+        """Runs one parameterized statement, returning rows as dicts."""
+        return await self.db.sql(statement, params)
+
+    async def execute(self, statement: str, params: Sequence[object] = ()) -> int:
+        """Runs one parameterized write statement, returning the modified-row count."""
+        return await self.db.execute(statement, params)
+
+    async def executemany(self, statement: str, seq: Sequence[Sequence[object]]) -> int:
+        """Runs ``statement`` once per parameter set, returning the total modified-row count."""
+        return await self.db.executemany(statement, seq)
+
+    # --- corpus reads (base) -------------------------------------------------
+    async def file_mtimes(self) -> dict[str, float]:
+        """Returns the recorded ``path`` to ``mtime`` map for incremental scans."""
+        return await self.db.file_mtimes()
+
+    async def dedup_keys(self) -> set[str]:
+        """Returns every stored event's dedup key."""
+        return await self.db.dedup_keys()
+
+    async def stats(self) -> Stats:
+        """Returns ingestion counts by source kind and the scanned-file count."""
+        return await self.db.stats()
+
+    async def recent(self, *, source_kind: object | None = None, limit: int = 20) -> list[dict[str, object]]:
+        """Returns the most recent feedback events, newest first."""
+        return await self.db.recent(source_kind=source_kind, limit=limit)
+
+    async def events(self, *, source_kind: object | None = None) -> list[dict[str, object]]:
+        """Returns every feedback event, newest first, with the columns needed to render it."""
+        return await self.db.events(source_kind=source_kind)
+
+    # --- ingestion -----------------------------------------------------------
     async def record_file_scan(self, path: str, mtime: float, candidates: Sequence[FeedbackCandidate]) -> int:
         """Records a scanned file and its candidates in one transaction.
 
@@ -404,22 +431,21 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             The number of newly inserted feedback events.
         """
         ingested_at = now()
-        async with self.store.transaction() as conn:
-            inserted: list[FeedbackCandidate] = []
-            for candidate in candidates:
-                before = conn.total_changes
-                await conn.execute(INSERT_EVENT, (*event_row(candidate, ingested_at), path))
-                if conn.total_changes > before:
-                    inserted.append(candidate)
-            await conn.executemany(
+        by_key = {str(candidate.dedup_key): candidate for candidate in candidates}
+        async with self.db.transaction() as db:
+            inserted = await db.insert_candidates(
+                [list(event_row(candidate, ingested_at)) for candidate in candidates],
+                extras=[[path, None] for _ in candidates],
+            )
+            await db.executemany(
                 QUARANTINE_CONTEXT,
                 [
-                    (ACCRUED_EMPTY_REASON, candidate.dedup_key)
-                    for candidate in inserted
-                    if not has_substantive_content(messages(candidate.window.before))
+                    (ACCRUED_EMPTY_REASON, key)
+                    for key in inserted
+                    if not has_substantive_content(messages(by_key[key].window.before))
                 ],
             )
-            await self.store.record_file(path, mtime)
+            await db.record_file(path, mtime)
             return len(inserted)
 
     async def rebuild_context(
@@ -432,24 +458,19 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         """Persists rebuilt contexts and quarantine reasons in one transaction."""
         if dry_run:
             return ContextRebuildChanges(rebuilt=len(rebuilt), quarantined=len(quarantined))
-        async with self.store.transaction() as conn:
-            before = conn.total_changes
-            await conn.executemany(UPDATE_CONTEXT, [(context_json, key) for key, context_json in rebuilt])
-            rebuilt_count = conn.total_changes - before
-            before = conn.total_changes
-            await conn.executemany(QUARANTINE_CONTEXT, [(reason, key) for key, reason in quarantined])
-            return ContextRebuildChanges(
-                rebuilt=rebuilt_count,
-                quarantined=conn.total_changes - before,
-            )
+        async with self.db.transaction() as db:
+            rebuilt_count = await db.executemany(UPDATE_CONTEXT, [(context_json, key) for key, context_json in rebuilt])
+            quarantined_count = await db.executemany(QUARANTINE_CONTEXT, [(reason, key) for key, reason in quarantined])
+            return ContextRebuildChanges(rebuilt=rebuilt_count, quarantined=quarantined_count)
 
     async def quarantined_keys(self) -> set[str]:
         """Returns the dedup keys excluded from pipeline and dataset reads."""
-        cur = await self.store.conn.execute(
-            "SELECT dedup_key FROM feedback_events WHERE quarantined_reason IS NOT NULL"
-        )
-        return {str(row["dedup_key"]) async for row in cur}
+        return {
+            str(row["dedup_key"])
+            for row in await self.sql("SELECT dedup_key FROM feedback_events WHERE quarantined_reason IS NOT NULL")
+        }
 
+    # --- verdict tier (thin delegators) --------------------------------------
     async def unjudged(
         self,
         *,
@@ -460,65 +481,30 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         probe_hydration: bool = True,
     ) -> list[dict[str, object]]:
         """Returns non-quarantined events lacking a verdict for one role and prompt version."""
-        await self.ensure_verdict_schema()
-        if not refresh_summary:
-            sql = (
-                f"SELECT {EVENT_COLUMNS} FROM feedback_events e "
-                f"LEFT JOIN {self.VERDICT_TABLE} t ON t.dedup_key = e.dedup_key "
-                "AND t.role = ? AND t.prompt_version = ? "
-                "WHERE t.id IS NULL AND e.quarantined_reason IS NULL ORDER BY e.id"
-            )
-            params: tuple[object, ...] = (role, prompt_version)
-            if limit is not None:
-                sql += " LIMIT ?"
-                params = (*params, limit)
-            async with self.store.conn.execute(sql, params) as cur:
-                return [dict(row) async for row in cur]
-        if limit == 0:
-            return []
-        sql = (
-            f"SELECT {EVENT_COLUMNS}, t.id AS verdict_id FROM feedback_events e "
-            f"LEFT JOIN {self.VERDICT_TABLE} t ON t.dedup_key = e.dedup_key "
-            "AND t.role = ? AND t.prompt_version = ? "
-            "WHERE e.quarantined_reason IS NULL AND (t.id IS NULL OR t.fidelity = 'summary') "
-            "ORDER BY (t.id IS NOT NULL), e.id"
+        return await self.db.unjudged(
+            role=role,
+            prompt_version=prompt_version,
+            limit=limit,
+            refresh_summary=refresh_summary,
+            probe_hydration=probe_hydration,
         )
-        params = (role, prompt_version)
-        kept: list[dict[str, object]] = []
-        if limit is None:
-            async with self.store.conn.execute(sql, params) as cur:
-                async for raw in cur:
-                    row = dict(raw)
-                    fresh = row.pop("verdict_id") is None
-                    if not probe_hydration or fresh or await hydratable(str(row["context_json"])):
-                        kept.append(row)
-            return kept
-        offset = 0
-        while len(kept) < limit:
-            async with self.store.conn.execute(sql + " LIMIT ? OFFSET ?", (*params, limit, offset)) as cur:
-                page = [dict(row) async for row in cur]
-            if not page:
-                break
-            offset += len(page)
-            for row in page:
-                fresh = row.pop("verdict_id") is None
-                if not probe_hydration or fresh or await hydratable(str(row["context_json"])):
-                    kept.append(row)
-                    if len(kept) >= limit:
-                        break
-        return kept
 
     async def judged(self, *, role: str, prompt_version: int) -> list[dict[str, object]]:
         """Returns non-quarantined events carrying a verdict for one role and prompt version."""
-        await self.ensure_verdict_schema()
-        cur = await self.store.conn.execute(
-            f"SELECT {EVENT_COLUMNS}, t.category, t.{self.ACCEPTED_COLUMN} AS accepted, t.confidence, "
-            f"t.{self.SUMMARY_COLUMN} AS summary, t.rationale, t.model "
-            f"FROM feedback_events e JOIN {self.VERDICT_TABLE} t ON t.dedup_key = e.dedup_key "
-            "WHERE t.role = ? AND t.prompt_version = ? AND e.quarantined_reason IS NULL ORDER BY e.id",
-            (role, prompt_version),
+        return await self.db.judged(role=role, prompt_version=prompt_version)
+
+    async def record_verdict(
+        self, key: DedupKey, verdict: object, *, role: str, prompt_version: int, model: str, fidelity: str
+    ) -> None:
+        """Records one verdict, idempotently, keyed by ``(dedup_key, role, prompt_version)``."""
+        await self.db.record_verdict(
+            key,
+            verdict,  # type: ignore[arg-type]
+            role=role,
+            prompt_version=prompt_version,
+            model=model,
+            fidelity=fidelity,  # type: ignore[arg-type]
         )
-        return [dict(row) async for row in cur]
 
     async def unrefined(self, *, prompt_version: int, model: str, limit: int | None = None) -> list[dict[str, object]]:
         """Returns accepted steering events lacking a refinement at ``(prompt_version, model)``.
@@ -546,8 +532,7 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         if limit is not None:
             query += " LIMIT ?"
             params = (*params, limit)
-        cur = await self.store.conn.execute(query, params)
-        return [dict(row) async for row in cur]
+        return await self.sql(query, params)
 
     async def record_refinement(
         self, key: DedupKey, refinement: Refinement, *, prompt_version: int, model: str
@@ -564,8 +549,8 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             model: The resolved model name that produced them.
         """
         refined_at = datetime.now(UTC).isoformat()
-        async with self.store.transaction() as conn:
-            await conn.executemany(
+        async with self.db.transaction() as db:
+            await db.executemany(
                 INSERT_REFINEMENT,
                 [
                     (
@@ -597,9 +582,8 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             The number of newly inserted samples.
         """
         created_at = now()
-        async with self.store.transaction() as conn:
-            before = conn.total_changes
-            await conn.executemany(
+        async with self.db.transaction() as db:
+            return await db.executemany(
                 INSERT_GATE_SAMPLE,
                 [
                     gate_sample_row(sample, created_at)
@@ -607,37 +591,31 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
                     if has_substantive_gate_content(ContextWindow.from_json(sample.window_json))
                 ],
             )
-            return conn.total_changes - before
 
     async def repair_gate_samples(
         self,
         query: str,
-        planner: Callable[[Sequence[Row]], GateSampleRepairs],
+        planner: Callable[[Sequence[Mapping[str, object]]], GateSampleRepairs],
     ) -> int:
         """Reads, plans, and applies one gate-family reconciliation transactionally."""
         created_at = now()
-        async with self.store.transaction() as conn:
-            rows = [row async for row in await conn.execute(query)]
-            repairs = planner(rows)
-            before = conn.total_changes
-            await conn.executemany(
+        async with self.db.transaction() as db:
+            repairs = planner(await db.sql(query))
+            updated = await db.executemany(
                 UPDATE_GATE_SAMPLE_WINDOW,
-                [
-                    (window_json, sample_key, window_json)
-                    for sample_key, window_json in repairs.updates
-                ],
+                [(window_json, sample_key, window_json) for sample_key, window_json in repairs.updates],
             )
-            await conn.executemany(DELETE_GATE_SAMPLE, [(sample_key,) for sample_key in repairs.deletes])
-            await conn.executemany(
+            deleted = await db.executemany(DELETE_GATE_SAMPLE, [(sample_key,) for sample_key in repairs.deletes])
+            inserted = await db.executemany(
                 INSERT_GATE_SAMPLE,
                 [gate_sample_row(sample, created_at) for sample in repairs.inserts],
             )
-            return conn.total_changes - before
+            return updated + deleted + inserted
 
     async def prune_gate_samples(
         self,
         query: str,
-        classify: Callable[[Sequence[Row]], GatePruneClassification],
+        classify: Callable[[Sequence[Mapping[str, object]]], GatePruneClassification],
         *,
         dry_run: bool,
     ) -> GatePruneClassification:
@@ -646,17 +624,16 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         Classification renders every stored window, so it runs *outside* the write
         transaction — holding ``BEGIN IMMEDIATE`` across that O(table) work would starve
         the pipeline's 2s busy timeout. The reported counts therefore come from the scan
-        snapshot; the delete transaction asserts its own ``changes()`` against the planned
-        key count and raises on a mismatch, so a row added or removed between scan and
-        delete is a loud retry rather than a silent miscount. ``dry_run`` deletes nothing.
+        snapshot; the delete transaction asserts its own changed-row count against the
+        planned key count and raises on a mismatch, so a row added or removed between scan
+        and delete is a loud retry rather than a silent miscount. ``dry_run`` deletes nothing.
         """
-        classification = classify([row async for row in await self.store.conn.execute(query)])
+        classification = classify(await self.sql(query))
         if dry_run:
             return classification
-        async with self.store.transaction() as conn:
-            before = conn.total_changes
-            await conn.executemany(DELETE_GATE_SAMPLE, [(key,) for key in classification.empty_keys])
-            if (deleted := conn.total_changes - before) != len(classification.empty_keys):
+        async with self.db.transaction() as db:
+            deleted = await db.executemany(DELETE_GATE_SAMPLE, [(key,) for key in classification.empty_keys])
+            if deleted != len(classification.empty_keys):
                 raise RuntimeError(
                     f"prune deleted {deleted} rows but planned {len(classification.empty_keys)}; the gate table "
                     "changed between scan and delete — retry with the watch daemon unloaded"
@@ -665,19 +642,19 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
 
     async def gate_sample_family_mismatch_keys(self) -> set[str]:
         """Returns parents whose stored gate family contradicts the latest judge verdict."""
-        cur = await self.store.conn.execute(GATE_FAMILY_MISMATCH_QUERY)
-        return {str(row["dedup_key"]) async for row in cur}
+        return {str(row["dedup_key"]) for row in await self.sql(GATE_FAMILY_MISMATCH_QUERY)}
 
     async def gate_samples(self, *, kind: str | None = None) -> list[dict[str, object]]:
         """Returns gate samples, oldest first, optionally restricted to one kind."""
         query = "SELECT * FROM gate_sample" + (" WHERE kind = ?" if kind else "") + " ORDER BY id"
-        cur = await self.store.conn.execute(query, (kind,) if kind else ())
-        return [dict(row) async for row in cur]
+        return await self.sql(query, (kind,) if kind else ())
 
     async def gate_sample_stats(self) -> Mapping[str, int]:
         """Returns gate sample counts keyed by kind."""
-        cur = await self.store.conn.execute("SELECT kind, COUNT(*) AS n FROM gate_sample GROUP BY kind ORDER BY kind")
-        return {str(row["kind"]): int(row["n"]) async for row in cur}
+        return {
+            str(row["kind"]): int(row["n"])  # type: ignore[arg-type]
+            for row in await self.sql("SELECT kind, COUNT(*) AS n FROM gate_sample GROUP BY kind ORDER BY kind")
+        }
 
     async def negative_sessions(self) -> set[str]:
         """Returns the sessions already parsed for random negatives.
@@ -686,31 +663,32 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
         sample was dropped at insert carries no ``random_negative`` row, so the
         ``sampled_session`` marker is unioned in to stop it re-parsing every pass.
         """
-        cur = await self.store.conn.execute(
-            "SELECT session_id FROM sampled_session "
-            "UNION SELECT session_id FROM gate_sample WHERE kind = 'random_negative'"
-        )
-        return {str(row["session_id"]) async for row in cur}
+        return {
+            str(row["session_id"])
+            for row in await self.sql(
+                "SELECT session_id FROM sampled_session "
+                "UNION SELECT session_id FROM gate_sample WHERE kind = 'random_negative'"
+            )
+        }
 
     async def mark_sessions_sampled(self, session_ids: Sequence[str]) -> None:
         """Records that ``session_ids`` were parsed for random negatives, dropped-only included."""
         sampled_at = now()
-        async with self.store.transaction() as conn:
-            await conn.executemany(INSERT_SAMPLED_SESSION, [(session_id, sampled_at) for session_id in session_ids])
+        async with self.db.transaction() as db:
+            await db.executemany(INSERT_SAMPLED_SESSION, [(session_id, sampled_at) for session_id in session_ids])
 
     async def record_embeddings(self, rows: Sequence[tuple[str, str, str, int, bytes]]) -> None:
         """Upserts exemplar embeddings as ``(dedup_key, model, text_digest, dim, vector)`` rows."""
         created_at = now()
-        async with self.store.transaction() as conn:
-            await conn.executemany(INSERT_EMBEDDING, [(*row, created_at) for row in rows])
+        async with self.db.transaction() as db:
+            await db.executemany(INSERT_EMBEDDING, [(*row, created_at) for row in rows])
 
     async def embeddings(self, *, model: str) -> list[dict[str, object]]:
         """Returns every stored exemplar embedding for ``model``, oldest first."""
-        cur = await self.store.conn.execute(
+        return await self.sql(
             "SELECT dedup_key, text_digest, dim, vector FROM exemplar_embedding WHERE model = ? ORDER BY rowid",
             (model,),
         )
-        return [dict(row) async for row in cur]
 
     async def unenriched(self, log: CorrectionLog, *, limit: int | None = None) -> list[dict[str, object]]:
         """Returns refined pairs whose steering anchor carries no shared-ledger correction.
@@ -732,19 +710,17 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             One dict per unenriched pair with the columns the extractor and anchor
             resolution need, oldest event first.
         """
-        cur = await self.store.conn.execute(REFINED_PAIRS_QUERY)
         unenriched = [
             row
-            async for raw in cur
-            if (row := dict(raw))["session_id"] and row["event_uuid"]
-            if not log.for_anchor(SessionId(str(row["session_id"])), EventUuid(str(row["event_uuid"])))
+            for row in await self.sql(REFINED_PAIRS_QUERY)
+            if row["session_id"] and row["event_uuid"]
+            if not await log.for_anchor(SessionId(str(row["session_id"])), EventUuid(str(row["event_uuid"])))
         ]
         return unenriched if limit is None else unenriched[:limit]
 
     async def pairs(self) -> list[dict[str, object]]:
         """Returns every row of the ``refined_pairs`` view, the pipeline's deliverable."""
-        cur = await self.store.conn.execute("SELECT * FROM refined_pairs ORDER BY event_id, pair_index")
-        return [dict(row) async for row in cur]
+        return await self.sql("SELECT * FROM refined_pairs ORDER BY event_id, pair_index")
 
     async def candidates(self) -> list[dict[str, object]]:
         """Returns one row per event with its latest judge verdict and refine summary.
@@ -760,8 +736,7 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             (``auditor_is_steering``), the judge ``flipped`` flag, and the refine
             summary (``pair_count``, ``refine_version``, ``refine_model``).
         """
-        cur = await self.store.conn.execute(CANDIDATES_QUERY)
-        return [dict(row) async for row in cur]
+        return await self.sql(CANDIDATES_QUERY)
 
     async def lineage(self, dedup_key: str) -> dict[str, object]:
         """Returns one event with all its triage verdicts and latest refined pairs.
@@ -778,37 +753,29 @@ class FeedbackStore(VerdictStoreMixin, BaseFeedbackStore):
             first) and ``pairs`` (the latest refinement generation, by ``pair_index``),
             or ``{}`` when no event carries the key.
         """
-        conn = self.store.conn
-        event_cur = await conn.execute(
+        events = await self.sql(
             f"SELECT {EVENT_COLUMNS}, e.origin_path FROM feedback_events e WHERE e.dedup_key = ?", (dedup_key,)
         )
-        events = [dict(row) async for row in event_cur]
         if not events:
             return {}
-        verdict_cur = await conn.execute(LINEAGE_VERDICTS_QUERY, (dedup_key,))
-        verdicts = [dict(row) async for row in verdict_cur]
-        pair_cur = await conn.execute(LINEAGE_PAIRS_QUERY, (dedup_key,))
-        pairs = [dict(row) async for row in pair_cur]
+        verdicts = await self.sql(LINEAGE_VERDICTS_QUERY, (dedup_key,))
+        pairs = await self.sql(LINEAGE_PAIRS_QUERY, (dedup_key,))
         return {**events[0], "verdicts": verdicts, "pairs": pairs}
 
     async def triage_stats(self, *, prompt_version: int) -> TriageStats:
         """Returns triage coverage and acceptance at ``prompt_version``."""
-        conn = self.store.conn
-        total_cur = await conn.execute("SELECT COUNT(*) AS n FROM feedback_events WHERE quarantined_reason IS NULL")
-        by_category_cur = await conn.execute(
+        total_rows = await self.sql("SELECT COUNT(*) AS n FROM feedback_events WHERE quarantined_reason IS NULL")
+        by_category_rows = await self.sql(
             "SELECT t.category, COUNT(*) AS n, SUM(t.is_steering) AS accepted FROM triage t "
             "JOIN feedback_events e ON e.dedup_key = t.dedup_key "
             "WHERE t.role = 'judge' AND t.prompt_version = ? AND e.quarantined_reason IS NULL "
             "GROUP BY t.category ORDER BY n DESC",
             (prompt_version,),
         )
-        by_category = {row["category"]: (row["n"], row["accepted"]) async for row in by_category_cur}
+        by_category = {row["category"]: (row["n"], row["accepted"]) for row in by_category_rows}
         return TriageStats(
-            total=[row["n"] async for row in total_cur][0],
-            judged=sum(n for n, _ in by_category.values()),
-            accepted=sum(accepted for _, accepted in by_category.values()),
-            by_category={category: n for category, (n, _) in by_category.items()},
+            total=total_rows[0]["n"],  # type: ignore[arg-type]
+            judged=sum(n for n, _ in by_category.values()),  # type: ignore[misc]
+            accepted=sum(accepted for _, accepted in by_category.values()),  # type: ignore[misc]
+            by_category={category: n for category, (n, _) in by_category.items()},  # type: ignore[misc]
         )
-
-
-TRIAGE_DDL = FeedbackStore.verdicts_ddl() + TRIAGE_VIEWS_DDL

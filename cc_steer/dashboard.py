@@ -23,7 +23,7 @@ from cc_steer.enrich import SOURCE
 from cc_steer.evaluate import load_golden
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from cc_transcript.context import ContextWindow, TurnRef
 
@@ -49,7 +49,7 @@ def edit_json(old: str, new: str) -> dict[str, str]:
     return {"old": report.truncate(old, LIST_TEXT_LIMIT), "new": report.truncate(new, LIST_TEXT_LIMIT)}
 
 
-def evidence_resolver(log: CorrectionLog) -> Callable[[Mapping[str, object]], EvidenceRow | None]:
+def evidence_resolver(log: CorrectionLog) -> Callable[[Mapping[str, object]], Awaitable[EvidenceRow | None]]:
     """Resolves a refined-pair row's grounding evidence from the shared ledger by anchor.
 
     A pair's steering anchor is its event's ``(session_id, event_uuid)``; the enrich
@@ -58,10 +58,10 @@ def evidence_resolver(log: CorrectionLog) -> Callable[[Mapping[str, object]], Ev
     correction.
     """
 
-    def resolve(row: Mapping[str, object]) -> EvidenceRow | None:
+    async def resolve(row: Mapping[str, object]) -> EvidenceRow | None:
         if not (row["session_id"] and row["event_uuid"]):
             return None
-        anchor = log.for_anchor(SessionId(str(row["session_id"])), EventUuid(str(row["event_uuid"])))
+        anchor = await log.for_anchor(SessionId(str(row["session_id"])), EventUuid(str(row["event_uuid"])))
         return next(
             (report.EvidenceRow.from_correction(c) for c in anchor if c.source == SOURCE),
             None,
@@ -214,7 +214,7 @@ def serialize_lineage(lineage: Lineage, golden_map: Mapping[str, GoldenRow]) -> 
     }
 
 
-def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
+async def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
     """Builds the dashboard app over an open store, serving the client and JSON API.
 
     Args:
@@ -226,7 +226,7 @@ def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
         The configured :class:`fastapi.FastAPI` application.
     """
     golden_map = {row.dedup_key: row for row in load_golden()}
-    evidence_of = evidence_resolver(CorrectionLog.open())
+    evidence_of = evidence_resolver(await CorrectionLog.open())
     app = FastAPI(title="cc-steer")
     app.mount("/static", StaticFiles(directory=ASSETS), name="static")
 
@@ -236,7 +236,7 @@ def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
 
     @app.get("/api/pairs")
     async def api_pairs() -> dict[str, object]:
-        return {"pairs": [serialize_pair(row, evidence_of(row)) for row in await store.pairs()]}
+        return {"pairs": [serialize_pair(row, await evidence_of(row)) for row in await store.pairs()]}
 
     @app.get("/api/candidates")
     async def api_candidates() -> dict[str, object]:
@@ -246,7 +246,7 @@ def build_app(store: FeedbackStore, *, summary: Summary) -> FastAPI:
     async def api_lineage(dedup_key: str) -> dict[str, object]:
         if not (data := await store.lineage(dedup_key)):
             raise HTTPException(status_code=404, detail="unknown dedup_key")
-        return serialize_lineage(report.Lineage.from_lineage(data, evidence_of=evidence_of), golden_map)
+        return serialize_lineage(await report.Lineage.from_lineage(data, evidence_of=evidence_of), golden_map)
 
     @app.get("/api/stats")
     async def api_stats() -> dict[str, object]:

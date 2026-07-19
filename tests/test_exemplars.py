@@ -58,7 +58,7 @@ def window_json(session: str, uuid: str) -> str:
 
 
 async def seed_steering(store: FeedbackStore, key: str, session: str, uuid: str) -> None:
-    await store.store.conn.execute(
+    await store.execute(
         "INSERT INTO feedback_events (dedup_key, source_kind, session_id, event_uuid, "
         "occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",

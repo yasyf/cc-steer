@@ -235,8 +235,7 @@ async def build_index(
     Returns:
         The :class:`IndexReport` for this pass.
     """
-    cur = await store.store.conn.execute(EXEMPLAR_EVENTS_QUERY)
-    rows = [dict(row) async for row in cur]
+    rows = await store.sql(EXEMPLAR_EVENTS_QUERY)
     known = {str(row["dedup_key"]): str(row["text_digest"]) for row in await store.embeddings(model=model)}
     pending: list[tuple[str, str, str]] = []
     current = 0
@@ -332,8 +331,10 @@ async def exemplars_for(
     scores: Mapping[str, float] = dict(hits)
     keys = list(scores)
     marks = ",".join("?" for _ in keys)
-    cur = await store.store.conn.execute(f"{EXEMPLAR_DETAIL_QUERY} WHERE e.dedup_key IN ({marks})", keys)
-    by_key = {str(row["dedup_key"]): dict(row) async for row in cur}
+    by_key = {
+        str(row["dedup_key"]): row
+        for row in await store.sql(f"{EXEMPLAR_DETAIL_QUERY} WHERE e.dedup_key IN ({marks})", keys)
+    }
     exemplars = []
     for key, score in hits:
         if (row := by_key.get(key)) is None:

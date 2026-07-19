@@ -108,7 +108,7 @@ async def test_enrich_appends_one_correction_to_the_shared_ledger(
     assert (report.enriched, report.corrections, report.skipped, report.pending) == (1, 1, 0, 0)
 
     edit_input = {"file_path": "/repo/app.py", "old_string": INCORRECT_OLD, "new_string": INCORRECT_NEW}
-    (row,) = CorrectionLog.open().by_digest(SessionId(SESSION), incorrect_digest=tool_digest("Edit", edit_input))
+    (row,) = await (await CorrectionLog.open()).by_digest(SessionId(SESSION), incorrect_digest=tool_digest("Edit", edit_input))
     assert (row.source, row.incorrect_file) == ("cc-steer", "/repo/app.py")
     assert (row.incorrect_old, row.incorrect_new) == (INCORRECT_OLD, INCORRECT_NEW)
     assert (row.correction_origin, row.correction_old, row.correction_new) == ("session", INCORRECT_NEW, CORRECT_NEW)
@@ -126,7 +126,7 @@ async def test_enrich_is_idempotent_per_anchor(
     assert (await enrich(store)).corrections == 1
     again = await enrich(store)
     assert (again.enriched, again.corrections, again.pending) == (0, 0, 0)
-    assert len(CorrectionLog.open().for_session(SessionId(SESSION))) == 1
+    assert len(await (await CorrectionLog.open()).for_session(SessionId(SESSION))) == 1
 
 
 @pytest.mark.integration
@@ -138,9 +138,9 @@ async def test_enrich_stamps_the_repo_into_the_correction_detail(
     await seed_refined(store, monkeypatch, entries)
 
     await enrich(store)
-    (row,) = CorrectionLog.open().for_session(SessionId(SESSION))
+    (row,) = await (await CorrectionLog.open()).for_session(SessionId(SESSION))
     assert row.detail == {"repo": "/repo"}  # the anchor event's cwd
-    assert CorrectionLog.open().for_repo("/repo") == (row,)
+    assert await (await CorrectionLog.open()).for_repo("/repo") == (row,)
 
 
 @pytest.mark.integration
@@ -156,7 +156,7 @@ async def test_enrich_resolves_a_transcript_by_origin_path_outside_the_discovery
 
     report = await enrich(store)
     assert (report.corrections, report.pending) == (1, 0)
-    assert len(CorrectionLog.open().for_session(SessionId(SESSION))) == 1
+    assert len(await (await CorrectionLog.open()).for_session(SessionId(SESSION))) == 1
 
 
 @pytest.mark.integration
@@ -169,7 +169,7 @@ async def test_expired_transcript_skips_without_a_correction(
     # No anchor row lands, so the pair cannot settle; it is skipped, not corrected.
     assert (report.enriched, report.corrections, report.skipped) == (1, 0, 1)
     assert report.pending == 1
-    assert CorrectionLog.open().for_session(SessionId(SESSION)) == ()
+    assert await (await CorrectionLog.open()).for_session(SessionId(SESSION)) == ()
 
 
 @pytest.mark.integration
@@ -187,7 +187,7 @@ async def test_editless_window_skips_without_an_llm_call(
 
     report = await enrich(store)
     assert (report.corrections, report.skipped, report.pending) == (0, 1, 1)
-    assert CorrectionLog.open().for_session(SessionId(SESSION)) == ()
+    assert await (await CorrectionLog.open()).for_session(SessionId(SESSION)) == ()
 
 
 @pytest.mark.integration
@@ -233,12 +233,12 @@ async def test_pairs_sharing_one_anchor_settle_together(
     monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: refiner)
     assert (await refine(store)).pairs == 2
 
-    assert len(await store.unenriched(CorrectionLog.open())) == 2  # two pairs, one shared anchor
+    assert len(await store.unenriched(await CorrectionLog.open())) == 2  # two pairs, one shared anchor
     # Serialize the pass so the per-anchor idempotency is observed in order: the
     # first pair writes the anchor's row, the second sees it and is a clean no-op.
     report = await enrich(store, concurrency=1)
     assert (report.enriched, report.corrections, report.skipped, report.pending) == (2, 1, 1, 0)
-    assert len(CorrectionLog.open().for_session(SessionId(SESSION))) == 1
+    assert len(await (await CorrectionLog.open()).for_session(SessionId(SESSION))) == 1
 
 
 @pytest.mark.integration
@@ -250,17 +250,17 @@ async def test_a_grounded_anchor_stays_settled_across_a_refine_rerun(
     await seed_refined(store, monkeypatch, entries)
 
     assert (await enrich(store)).pending == 0
-    assert await store.unenriched(CorrectionLog.open()) == []
+    assert await store.unenriched(await CorrectionLog.open()) == []
 
     # A fresh refine generation reuses the same steering anchor, which already
     # carries a correction — so the pair stays settled and enrich never re-writes.
     monkeypatch.setattr("cc_steer.refine.PROMPT_VERSION", REFINE_VERSION + 1)
     await refine(store)
-    assert await store.unenriched(CorrectionLog.open()) == []
+    assert await store.unenriched(await CorrectionLog.open()) == []
 
     report = await enrich(store)
     assert (report.corrections, report.skipped, report.pending) == (0, 0, 0)
-    assert len(CorrectionLog.open().for_session(SessionId(SESSION))) == 1
+    assert len(await (await CorrectionLog.open()).for_session(SessionId(SESSION))) == 1
 
 
 @pytest.mark.integration
@@ -271,8 +271,8 @@ async def test_unenriched_skips_pairs_whose_anchor_already_has_a_ledger_row(
     write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
     await seed_refined(store, monkeypatch, entries)
 
-    log = CorrectionLog.open()
+    log = await CorrectionLog.open()
     [pending] = await store.unenriched(log)
     assert (pending["session_id"], pending["event_uuid"]) == (SESSION, EventUuid(str(pending["event_uuid"])))
     await enrich(store)
-    assert await store.unenriched(CorrectionLog.open()) == []
+    assert await store.unenriched(await CorrectionLog.open()) == []

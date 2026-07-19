@@ -50,7 +50,6 @@ from cc_steer.triage import AUDIT_VERSION, PROMPT_VERSION, STEERING_CATEGORIES
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from aiosqlite import Row
     from cc_transcript.corrections import Correction
 
     from cc_steer.store import FeedbackStore
@@ -380,7 +379,7 @@ def evidence_entry(correction: Correction) -> Evidence:
     }
 
 
-def trace_meta(row: Row) -> str:
+def trace_meta(row: Mapping[str, object]) -> str:
     payload = json.loads(str(row["payload_json"]))
     return json.dumps(
         {"signal": payload["signal"]}
@@ -394,7 +393,7 @@ def trace_meta(row: Row) -> str:
     )
 
 
-def trace_row(row: Row, pairs: list[Pair], log: CorrectionLog) -> Trace:
+async def trace_row(row: Mapping[str, object], pairs: list[Pair], log: CorrectionLog) -> Trace:
     window = ContextWindow.from_json(str(row["context_json"]))
     session_id = str(row["session_id"])
     is_steering = bool(row["is_steering"])
@@ -421,7 +420,7 @@ def trace_row(row: Row, pairs: list[Pair], log: CorrectionLog) -> Trace:
         "pairs": pairs if is_steering else [],
         "evidence": [
             evidence_entry(correction)
-            for correction in log.for_anchor(SessionId(session_id), EventUuid(str(row["event_uuid"])))
+            for correction in await log.for_anchor(SessionId(session_id), EventUuid(str(row["event_uuid"])))
             if correction.source == SOURCE
         ],
         "split": split_of(session_id),
@@ -503,7 +502,7 @@ def dpo_split(traces: Sequence[Trace]) -> list[DpoRow]:
     )
 
 
-def gate_row(row: Row) -> GateRow | None:
+def gate_row(row: Mapping[str, object]) -> GateRow | None:
     try:
         window = ContextWindow.from_json(str(row["window_json"]))
     except (ValueError, KeyError):
@@ -579,7 +578,7 @@ def watcher_positive(trace: Trace) -> WatcherRow:
     }
 
 
-def watcher_negative(row: Row) -> WatcherRow | None:
+def watcher_negative(row: Mapping[str, object]) -> WatcherRow | None:
     try:
         window = ContextWindow.from_json(str(row["window_json"]))
     except (ValueError, KeyError):
@@ -598,7 +597,7 @@ def watcher_negative(row: Row) -> WatcherRow | None:
     }
 
 
-def watcher_rows(traces: Sequence[Trace], gate_samples: Sequence[Row]) -> list[WatcherRow]:
+def watcher_rows(traces: Sequence[Trace], gate_samples: Sequence[Mapping[str, object]]) -> list[WatcherRow]:
     positives = [watcher_positive(trace) for trace in traces if trace["is_steering"]]
     negatives = [
         rendered
@@ -702,7 +701,7 @@ def live_gate_row(reaction: Mapping[str, object]) -> GateRow | None:
 
 def config_rows(
     traces: list[Trace],
-    gate_samples: Sequence[Row] = (),
+    gate_samples: Sequence[Mapping[str, object]] = (),
     *,
     live_watcher: Sequence[WatcherRow] = (),
     live_gate: Sequence[GateRow] = (),
@@ -833,10 +832,9 @@ def dataset_card(counts: Mapping[str, Mapping[str, int]], *, steering_count: int
 
 
 async def load_traces(store: FeedbackStore) -> list[Trace]:
-    log = CorrectionLog.open()
-    pair_cur = await store.store.conn.execute(LATEST_PAIRS_QUERY)
+    log = await CorrectionLog.open()
     pairs_by_key: dict[str, list[Pair]] = {}
-    async for pair in pair_cur:
+    for pair in await store.sql(LATEST_PAIRS_QUERY):
         pairs_by_key.setdefault(str(pair["dedup_key"]), []).append(
             Pair(
                 pair_index=pair["pair_index"],
@@ -845,8 +843,10 @@ async def load_traces(store: FeedbackStore) -> list[Trace]:
                 direction=pair["direction"],
             )
         )
-    cur = await store.store.conn.execute(TRACES_QUERY, (PROMPT_VERSION, AUDIT_VERSION))
-    return [trace_row(row, pairs_by_key.get(str(row["dedup_key"]), []), log) async for row in cur]
+    return [
+        await trace_row(row, pairs_by_key.get(str(row["dedup_key"]), []), log)
+        for row in await store.sql(TRACES_QUERY, (PROMPT_VERSION, AUDIT_VERSION))
+    ]
 
 
 async def load_live_reactions(
@@ -860,10 +860,10 @@ async def load_live_reactions(
     keys = [key for row in reactions if (key := str(row["feedback_dedup_key"] or ""))]
     if not keys:
         return reactions, {}
-    cur = await store.store.conn.execute(
+    rows = await store.sql(
         f"SELECT dedup_key, text FROM feedback_events WHERE dedup_key IN ({','.join('?' for _ in keys)})", keys
     )
-    return reactions, {str(row["dedup_key"]): str(row["text"]) async for row in cur}
+    return reactions, {str(row["dedup_key"]): str(row["text"]) for row in rows}
 
 
 async def export(
@@ -896,8 +896,7 @@ async def export(
         The export report with per-config row counts and live-reaction quarantines.
     """
     traces = await load_traces(store)
-    gate_cur = await store.store.conn.execute(GATE_SAMPLES_QUERY)
-    gate_samples = [row async for row in gate_cur]
+    gate_samples = await store.sql(GATE_SAMPLES_QUERY)
     reactions, reply_texts = await load_live_reactions(store, shadow_db)
     labelled_reactions = [reaction for reaction in reactions if str(reaction["kind"]) in LIVE_LABEL]
     live_reactions = [reaction for reaction in labelled_reactions if live_render_has_substantive_content(reaction)]

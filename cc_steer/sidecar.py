@@ -17,12 +17,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cc_transcript import TranscriptDiscovery
 from cc_transcript.activity import SessionActivity
+from cc_transcript.discovery import find_in
 from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef, SessionId
 from cc_transcript.mining import REVIEW_COMMENT, FeedbackCandidate, dedup_key, firm
-from cc_transcript.parser import parse_events_async
+from cc_transcript.parser import parse
 
 from cc_steer.capture import capture_anchored_window
 
@@ -135,9 +135,9 @@ async def session_ranges(dirs: Sequence[Path]) -> list[tuple[Path, datetime, dat
     return [
         (path, start, end)
         for directory in dirs
-        for path, _ in await TranscriptDiscovery.find_in(directory)
+        for path, _ in find_in(directory)
         if "subagents" not in path.parts
-        if (rng := time_range(await parse_events_async(path))) is not None
+        if (rng := time_range(parse(path).events)) is not None
         for start, end in (rng,)
     ]
 
@@ -145,7 +145,7 @@ async def session_ranges(dirs: Sequence[Path]) -> list[tuple[Path, datetime, dat
 async def anchor_for(roots: Sequence[Path], uuid: str, when: datetime) -> Anchor | None:
     if (winner := closest_session(await session_ranges(candidate_session_dirs(roots, uuid)), when)) is None:
         return None
-    events = await parse_events_async(winner)
+    events = parse(winner).events
     activity = SessionActivity.from_events(SessionId(winner.stem), events)
     meta = min(
         (m for event in events if (m := event_meta(event)) is not None),

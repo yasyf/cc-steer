@@ -22,8 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cc_transcript import TranscriptParser
-from cc_transcript.activity import SessionActivity
 from cc_transcript.context import ContextWindow
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import sample_windows
@@ -144,14 +142,14 @@ def event_samples(rows: Sequence[Mapping[str, object]], *, offsets: int = W_MAX,
 
 
 def random_samples(
-    activity: SessionActivity,
+    raw: bytes,
     exclude: Sequence[EventRef],
     *,
     per_session: int,
     seed: int,
 ) -> list[GateSample]:
     """Samples assistant-anchored windows from one session's quiet stretches."""
-    windows = sample_windows(activity, n=per_session, exclude=exclude, exclusion_radius=EXCLUSION_RADIUS, seed=seed)
+    windows = sample_windows(raw, n=per_session, exclude=exclude, exclusion_radius=EXCLUSION_RADIUS, seed=seed)
     return [
         GateSample(
             sample_key=f"rand:{window.anchor.session_id}:{window.anchor.event_uuid}",
@@ -220,8 +218,7 @@ async def sample_negatives(
     Returns:
         The :class:`NegativesReport` with per-kind insert counts.
     """
-    cur = await store.store.conn.execute(EVENT_WINDOWS_QUERY)
-    event_rows = [dict(row) async for row in cur]
+    event_rows = await store.sql(EVENT_WINDOWS_QUERY)
     inserted = {
         "positive_window": 0,
         "hard_negative": 0,
@@ -232,9 +229,8 @@ async def sample_negatives(
         batch = [sample for sample in from_events if sample.kind == kind]
         inserted[kind] = await store.record_gate_samples(batch)
 
-    anchor_cur = await store.store.conn.execute(ANCHORS_QUERY)
     anchors: dict[str, list[EventRef]] = {}
-    async for row in anchor_cur:
+    for row in await store.sql(ANCHORS_QUERY):
         session = str(row["session_id"])
         anchors.setdefault(session, []).append(
             EventRef(session_id=SessionId(session), event_uuid=EventUuid(str(row["event_uuid"])), tool_use_id=None)
@@ -245,13 +241,13 @@ async def sample_negatives(
     rng = random.Random(seed)
     chosen = rng.sample(candidates, min(sessions, len(candidates)))
     marked: list[str] = []
-    async for parsed in TranscriptParser.stream_transcripts([(path, path.stat().st_mtime) for path in chosen]):
-        session_id = SessionId(Path(parsed.path).stem)
-        activity = SessionActivity.from_events(session_id, parsed.events)
-        marked.append(str(session_id))
-        if not activity.turns:
+    for path in chosen:
+        session_id = SessionId(path.stem)
+        try:
+            batch = random_samples(path.read_bytes(), anchors.get(str(session_id), []), per_session=per_session, seed=seed)
+        except (OSError, KeyError, ValueError, TypeError, StopIteration):
             continue
-        batch = random_samples(activity, anchors.get(str(session_id), []), per_session=per_session, seed=seed)
         inserted["random_negative"] += await store.record_gate_samples(batch)
+        marked.append(str(session_id))
     await store.mark_sessions_sampled(marked)
     return NegativesReport(inserted=inserted, sessions_sampled=len(marked))

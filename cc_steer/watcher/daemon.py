@@ -1,19 +1,20 @@
 """The live watcher daemon: tail transcripts, evaluate quiet sessions, deliver proposals.
 
-Mirrors :mod:`cc_transcript.watch`'s tick/watch split: :meth:`Watcher.step` is
-one deterministic step over an already-tailed event batch and an explicit
+Mirrors :class:`cc_transcript.watch.Watcher`'s tick/stream split: :meth:`Watcher.step`
+is one deterministic step over an already-tailed event batch and an explicit
 clock — directly drivable by tests — and :meth:`Watcher.run` is the thin
-poll-forever loop that drives :func:`cc_transcript.watch.tick` and the
-monotonic clock through it. (The :func:`~cc_transcript.watch.watch` generator
-yields nothing while sessions are silent, which is exactly when the debounce
-must fire, so the loop drives ``tick`` — the same event source — directly.)
+poll-forever loop that drives a held :class:`cc_transcript.watch.Watcher`'s
+:meth:`~cc_transcript.watch.Watcher.tick` and the monotonic clock through it.
+(:meth:`~cc_transcript.watch.Watcher.stream` yields nothing while sessions are
+silent, which is exactly when the debounce must fire, so the loop drives ``tick`` —
+the same event source — directly.)
 
 A session is evaluated only when it goes quiet — no new event for
 ``debounce_s`` — and a turn has completed since the last look. The final turn
 is possibly still in flight and never judged; the window ends at the last
 completed turn, built as the negatives' triggerless shape: the anchored turn
 is the last element of ``before``, previews render through
-:func:`~cc_transcript.context.turn_ref` at the same ``Budget(200, 200)`` the
+:func:`~cc_steer.capture.turn_ref` at the same ``Budget(200, 200)`` the
 training pipeline's ``capture_window`` used, so live model input is
 byte-compatible with training.
 """
@@ -26,13 +27,14 @@ from typing import TYPE_CHECKING
 
 import anyio
 from cc_transcript.activity import SessionActivity
-from cc_transcript.context import ContextWindow, turn_ref
+from cc_transcript.context import ContextWindow
 from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import SessionId
 from cc_transcript.render import Budget
-from cc_transcript.watch import TailState, tick
+from cc_transcript.watch import Watcher as TranscriptWatcher
 
-from cc_steer.watcher.live import scrub_event
+from cc_steer.capture import turn_ref
+from cc_steer.watcher.live import scrub_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -99,6 +101,7 @@ class Watcher:
         self.poll = poll
         self.buffer_limit = buffer_limit
         self.buffers: dict[str, SessionBuffer] = {}
+        self._tailer = TranscriptWatcher(self.roots)
 
     def ingest(self, events: Sequence[WatchEvent], *, now: float) -> None:
         """Buffers freshly tailed main-session events; sidechains never steer."""
@@ -106,7 +109,7 @@ class Watcher:
             if event.is_sidechain:
                 continue
             buffer = self.buffers.setdefault(str(event.session_id), SessionBuffer())
-            buffer.events.append(scrub_event(event.event))
+            buffer.events.append(event.event)
             del buffer.events[: -self.buffer_limit]
             buffer.last_event_at = now
             buffer.dirty = True
@@ -168,9 +171,8 @@ class Watcher:
 
     async def run(self) -> None:
         """Tails the roots forever, one :meth:`step` per poll; never returns."""
-        state = TailState()
         while True:
-            await self.step(await tick(state, self.roots), now=time.monotonic())
+            await self.step(await self._tailer.tick(), now=time.monotonic())
             await anyio.sleep(self.poll)
 
 
@@ -193,7 +195,10 @@ def live_window(turns: Sequence[Turn]) -> ContextWindow | None:
     Returns:
         The window, or None when the last turn carries no resolvable event.
     """
-    refs = tuple(turn_ref(turn, WINDOW_BUDGET) for turn in turns[-WINDOW_TURNS:])
+    refs = tuple(
+        dataclasses.replace(ref := turn_ref(turn, WINDOW_BUDGET), preview=scrub_text(ref.preview))
+        for turn in turns[-WINDOW_TURNS:]
+    )
     if not refs or not refs[-1].refs:
         return None
     return ContextWindow(

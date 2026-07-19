@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from cc_transcript.activity import SessionActivity
-from cc_transcript.context import capture_window
+from cc_steer.capture import capture_window
 from cc_transcript.ids import SessionId
 from cc_transcript.mining.sampling import fold_trigger, turn_anchor
 from cc_transcript.watch import WatchEvent

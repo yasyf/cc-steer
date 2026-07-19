@@ -11,24 +11,25 @@ kill. Two kill switches (``~/.cc-steer/live.off`` and ``$CC_STEER_LIVE_OFF``) st
 the daemon and the hook.
 
 The steer is surfaced inside a ``<cc-steer-proposal>`` span so the model sees it, and
-:func:`scrub_events` strips that span from transcript text before mining, so the watcher never
+:func:`scrubbed_events` strips that span from transcript text before mining, so the watcher never
 learns from its own suggestion and the whole user turn survives the junk filter's whole-turn drop.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
+import json
 import math
 import os
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import aiosqlite
-from cc_transcript.models import UserEvent
+from cc_transcript.parser import parse
 
 from cc_steer.watcher.delivery import SCORED_MOMENTS_DDL, SHADOW_DDL
 
@@ -288,15 +289,20 @@ def steer_deliverable(steer: str) -> bool:
 
 
 def scrub_text(text: str) -> str:
-    """Strips every ``<cc-steer-proposal …>…</cc-steer-proposal>`` span by a linear index scan, no backtracking."""
+    """Strips every ``<cc-steer-proposal …>…</cc-steer-proposal>`` span by a linear index scan, no backtracking.
+
+    An open tag with no matching close — a span a preview truncation clipped mid-content —
+    is dropped from the tag to the end of the string, so no proposal content survives whether
+    scrubbing runs before or after truncation.
+    """
     out: list[str] = []
     cursor = 0
     while (start := text.find(OPEN_TAG, cursor)) != -1:
         opener_end = text.find(">", start + len(OPEN_TAG))
         close = text.find(CLOSE_TAG, opener_end + 1) if opener_end != -1 else -1
-        if opener_end == -1 or close == -1:
-            break
         out.append(text[cursor:start])
+        if opener_end == -1 or close == -1:
+            return "".join(out)
         cursor = close + len(CLOSE_TAG)
         while cursor < len(text) and text[cursor] in " \t\r\n":
             cursor += 1
@@ -304,20 +310,31 @@ def scrub_text(text: str) -> str:
     return "".join(out)
 
 
-def scrub_event(event: TranscriptEvent) -> TranscriptEvent:
-    """Returns ``event`` with the injected steer span stripped, when it is a user turn carrying one."""
-    if isinstance(event, UserEvent) and (scrubbed := scrub_text(event.text)) != event.text:
-        return dataclasses.replace(event, text=scrubbed)
-    return event
+def scrub_line(line: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Strips the injected steer span from a raw user entry before it is parsed and mined.
 
-
-def scrub_events(events: Sequence[TranscriptEvent]) -> list[TranscriptEvent]:
-    """Returns ``events`` with the injected steer span removed from any user turn that carries one.
-
-    Runs before mining so a surfaced steer never trains the watcher on its own suggestion, and so the
-    junk filter's whole-turn drop never junks the user's authored reply along with the span.
+    v14 transcript events are immutable native views, so the span is removed at the
+    raw-entry layer instead: a user entry whose text carries a span is returned with
+    the span gone; every other entry passes through untouched.
     """
-    return [scrub_event(event) for event in events]
+    if line.get("type") != "user" or not isinstance(message := line.get("message"), Mapping):
+        return line
+    content = message.get("content")
+    if not isinstance(content, str) or (scrubbed := scrub_text(content)) == content:
+        return line
+    return {**line, "message": {**message, "content": scrubbed}}
+
+
+def scrubbed_events(path: Path) -> list[TranscriptEvent]:
+    """Parses ``path`` with every injected steer span removed from its user turns before mining.
+
+    Scrubs each raw entry, then reparses the reserialized stream natively — so a
+    surfaced steer never trains the watcher on its own suggestion and the junk
+    filter's whole-turn drop never junks the user's authored reply along with the
+    span, while an unparseable copy still raises exactly as a direct path parse would.
+    """
+    scrubbed = (scrub_line(json.loads(line)) for line in path.read_text().splitlines() if line.strip())
+    return parse(b"\n".join(json.dumps(line).encode() for line in scrubbed)).events
 
 
 class MailboxDelivery:

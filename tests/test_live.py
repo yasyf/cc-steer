@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from cc_transcript import keep
+from cc_transcript.parser import parse_events
 
 from cc_steer.detectors import detect
 from cc_steer.spec import STEERING_SPEC
@@ -16,7 +17,7 @@ from cc_steer.watcher.live import (
     format_additional_context,
     holdout,
     is_killed,
-    scrub_events,
+    scrub_line,
     scrub_text,
     steer_deliverable,
 )
@@ -139,22 +140,22 @@ def test_scrub_text_strips_span_keeps_authored() -> None:
     assert scrub_text(text) == "actually use pytest not unittest"
 
 
-def test_scrub_events_leaves_the_authored_reply_minable(tmp_path: Path) -> None:
+def test_scrub_leaves_the_authored_reply_minable() -> None:
     fused = "<cc-steer-proposal id=3>abstract the retry loop</cc-steer-proposal>\n\nno, keep it inline and add a test"
-    [event] = scrub_events(parse([user_text(fused)]))
+    [event] = parse_events(scrub_line(user_text(fused)))
     assert event.text == "no, keep it inline and add a test"
     assert keep(event, STEERING_SPEC)
 
 
-def test_scrub_events_drops_a_pure_steer_turn_to_short() -> None:
-    [event] = scrub_events(parse([user_text("<cc-steer-proposal id=1>do the thing</cc-steer-proposal>")]))
+def test_scrub_drops_a_pure_steer_turn_to_short() -> None:
+    [event] = parse_events(scrub_line(user_text("<cc-steer-proposal id=1>do the thing</cc-steer-proposal>")))
     assert event.text.strip() == ""
     assert not keep(event, STEERING_SPEC)
 
 
-def test_scrub_events_leaves_untagged_events_untouched() -> None:
-    original = parse([user_text("just a normal correction")])
-    assert scrub_events(original) == original
+def test_scrub_leaves_untagged_entries_untouched() -> None:
+    line = user_text("just a normal correction")
+    assert scrub_line(line) is line
 
 
 def test_scrub_text_strips_multiple_spans_linearly() -> None:
@@ -165,23 +166,26 @@ def test_scrub_text_strips_multiple_spans_linearly() -> None:
     assert scrub_text(text) == "keep me\ntail"
 
 
-def test_scrub_text_leaves_an_unterminated_opener_intact() -> None:
+def test_scrub_text_drops_an_unterminated_opener() -> None:
     text = "before <cc-steer-proposal id=1>dangling opener never closed"
-    assert scrub_text(text) == text
+    assert scrub_text(text) == "before "
+
+
+def test_scrub_text_drops_a_span_a_truncation_clipped_mid_content() -> None:
+    scrubbed = scrub_text("here is my answer <cc-steer-proposal id=9>the secret suggestion the model shou")
+    assert scrubbed == "here is my answer "
+    assert PROPOSAL_TAG not in scrubbed
+    assert "secret suggestion" not in scrubbed
 
 
 def test_injected_steer_attachment_never_mines_a_span_candidate() -> None:
     steer_span = format_additional_context(7, "abstract the retry loop before you touch it")
-    events = scrub_events(
-        parse(
-            [
-                assistant_text("here is the initial approach"),
-                user_text("no, keep it inline and add a real test first"),
-                hook_context_attachment(steer_span),
-            ]
-        )
-    )
-    candidates = detect(events)
+    entries = [
+        assistant_text("here is the initial approach"),
+        user_text("no, keep it inline and add a real test first"),
+        hook_context_attachment(steer_span),
+    ]
+    candidates = detect(parse([scrub_line(entry) for entry in entries]))
     assert candidates, "the authored correction must survive mining"
     assert all(PROPOSAL_TAG not in candidate.text for candidate in candidates)
     assert any("keep it inline" in candidate.text for candidate in candidates)

@@ -5,10 +5,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from cc_transcript.activity import SessionActivity
-from cc_transcript.context import capture_window
 from cc_transcript.ids import SessionId
 
-from cc_steer.capture import capture_anchored_window
+from cc_steer.capture import capture_anchored_window, capture_window
 from cc_steer.detectors import detect, plan_reviews
 from cc_steer.rendering import context_turns, messages
 from tests.builders import (

@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cc_transcript import TranscriptDiscovery, TranscriptParser
+from cc_transcript.discovery import find_in
 
 from cc_steer.detectors import detect
 from cc_steer.sidecar import candidates_for, discover_sidecars
-from cc_steer.watcher.live import scrub_events
+from cc_steer.watcher.live import scrubbed_events
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -59,11 +59,15 @@ async def scan(
     known = None if full else await store.file_mtimes()
     paths: list[tuple[Path, float]] = []
     for root in roots:
-        paths.extend(await TranscriptDiscovery.find_in(root, known_mtimes=known))
+        paths.extend(find_in(root, known_mtimes=known))
     scanned = 0
     inserted = 0
-    async for parsed in TranscriptParser.stream_transcripts(paths):
-        inserted += await store.record_file_scan(str(parsed.path), parsed.mtime, detect(scrub_events(parsed.events)))
+    for path, mtime in paths:
+        try:
+            candidates = detect(scrubbed_events(path))
+        except (OSError, KeyError, ValueError, TypeError):
+            continue
+        inserted += await store.record_file_scan(str(path), mtime, candidates)
         scanned += 1
     for sidecar in discover_sidecars(findings_dirs):
         mtime = sidecar.stat().st_mtime

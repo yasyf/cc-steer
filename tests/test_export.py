@@ -145,7 +145,7 @@ async def seed(store: FeedbackStore) -> None:
         ),
     ]
     for i, (key, kind, session, uuid, text, payload, ctx) in enumerate(events):
-        await store.store.conn.execute(
+        await store.execute(
             "INSERT INTO feedback_events (dedup_key, source_kind, session_id, event_uuid, "
             "occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -220,10 +220,10 @@ async def seed(store: FeedbackStore) -> None:
         ]
     )
     await store.record_refinement(DedupKey("k1"), latest, prompt_version=2, model="sonnet")
-    log = CorrectionLog.open()
-    log.append(correction("u1", ts_ms=1))
-    log.append(correction("u1", ts_ms=2, grounded=False))
-    log.append(correction("u1", ts_ms=3, source="captain-hook"))
+    log = await CorrectionLog.open()
+    await log.append(correction("u1", ts_ms=1))
+    await log.append(correction("u1", ts_ms=2, grounded=False))
+    await log.append(correction("u1", ts_ms=3, source="captain-hook"))
 
 
 def rows(out: Path, config: str, split: str) -> list[dict[str, object]]:

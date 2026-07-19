@@ -9,7 +9,7 @@ from click.testing import CliRunner
 
 from cc_steer.cli import main
 from cc_steer.export import LIVE_LABEL, live_gate_row, live_watcher_row
-from cc_steer.store import INSERT_EVENT, FeedbackStore
+from cc_steer.store import FeedbackStore
 from cc_steer.watcher.delivery import ShadowDelivery
 from cc_steer.watcher.live import LiveConfig, MailboxDelivery
 from cc_steer.watcher.reactions import (
@@ -34,6 +34,11 @@ STEER = "run the linter before you push the code"
 ACCEPT_REPLY = "run the linter before you push the code"
 EDIT_REPLY = "run the linter before pushing"
 DIVERGE_REPLY = "actually revert that change entirely"
+INSERT_EVENT = """
+INSERT INTO feedback_events
+  (dedup_key, source_kind, session_id, event_uuid, occurred_at, text, payload_json, context_json, cc_version, ingested_at, origin_path)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
 
 
 def delivery_row(
@@ -185,11 +190,10 @@ async def seed_proposals(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def plant_reply(store: FeedbackStore, *, session: str, occurred: str, text: str, key: str) -> None:
-    async with store.store.transaction() as conn:
-        await conn.execute(
-            INSERT_EVENT,
-            (key, "transcript_message", session, f"u-{key}", occurred, text, "{}", "{}", "2.0.0", occurred, None),
-        )
+    await store.execute(
+        INSERT_EVENT,
+        (key, "transcript_message", session, f"u-{key}", occurred, text, "{}", "{}", "2.0.0", occurred, None),
+    )
 
 
 async def test_attribute_reactions_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

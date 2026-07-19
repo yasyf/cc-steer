@@ -32,7 +32,7 @@ from cc_steer.negatives import GateSample, truncated
 from cc_steer.rendering import messages
 from cc_steer.store import FeedbackStore, TriageStats
 from cc_steer.triage import JUDGE, PROMPT_VERSION, Verdict
-from cc_steer.watcher.live import scrub_events
+from cc_steer.watcher.live import scrub_line
 from tests.builders import (
     assistant_text,
     assistant_tool_use,
@@ -45,6 +45,7 @@ from tests.builders import (
 
 if TYPE_CHECKING:
     from cc_transcript.mining import FeedbackCandidate
+    from cc_transcript.models import TranscriptEvent
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
 
@@ -102,7 +103,7 @@ def compacted_plan_entries(session_id: str) -> list[dict[str, object]]:
 def detected(entries: list[dict[str, object]], anchor_uuid: str) -> FeedbackCandidate:
     [candidate] = [
         candidate
-        for candidate in detect(scrub_events(parse(entries)))
+        for candidate in detect(parse([scrub_line(entry) for entry in entries]))
         if str(candidate.ref.event_uuid) == anchor_uuid
     ]
     return candidate
@@ -152,7 +153,7 @@ async def seed_gate_samples_raw(store: FeedbackStore, samples: list[GateSample])
     # Bypass record_gate_samples' substantive-content guard to stage legacy rows
     # (empty rewinds / broken windows) the rebuild is expected to reconcile away.
     for sample in samples:
-        await store.store.conn.execute(
+        await store.execute(
             "INSERT INTO gate_sample (sample_key, kind, dedup_key, session_id, anchor_uuid, occurred_at, "
             "offset_turns, window_json, seed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
@@ -189,13 +190,10 @@ async def test_rebuild_recovers_context_and_second_run_is_a_noop(
     )
 
     first = await rebuild_contexts(store, (mirror_root, projects_root))
-    row = await (
-        await store.store.conn.execute(
-            "SELECT context_json, quarantined_reason FROM feedback_events WHERE dedup_key = ?",
-            (candidate.dedup_key,),
-        )
-    ).fetchone()
-    assert row is not None
+    [row] = await store.sql(
+        "SELECT context_json, quarantined_reason FROM feedback_events WHERE dedup_key = ?",
+        (candidate.dedup_key,),
+    )
     content = "\n".join(
         message["content"] for message in messages(ContextWindow.from_json(str(row["context_json"])).before)
     )
@@ -345,7 +343,7 @@ async def test_rebuild_leaves_a_quarantined_parents_gate_samples_untouched(
     await store.record_gate_samples(
         [gate_sample(candidate, f"pos:{candidate.dedup_key}:0", "positive_window")]
     )
-    await store.store.conn.execute(
+    await store.execute(
         "UPDATE feedback_events SET context_json = ?, quarantined_reason = 'anchor_not_found' WHERE dedup_key = ?",
         (current.window.to_json(), candidate.dedup_key),
     )
@@ -378,13 +376,11 @@ async def test_rebuild_quarantines_unresolvable_context_and_excludes_it_from_dat
     )
 
     report = await rebuild_contexts(store, (tmp_path / "missing-mirror", projects_root))
-    row = await (
-        await store.store.conn.execute(
-            "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
-        )
-    ).fetchone()
+    [row] = await store.sql(
+        "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
+    )
     assert report == rebuild_report(quarantined=1)
-    assert row is not None and row["quarantined_reason"] == "transcript_not_found"
+    assert row["quarantined_reason"] == "transcript_not_found"
     assert await load_traces(store) == []
     assert await store.unrefined(prompt_version=1, model="sonnet") == []
     assert await store.unjudged(role=JUDGE, prompt_version=PROMPT_VERSION) == []
@@ -406,12 +402,10 @@ async def test_rebuild_retries_a_previous_transcript_failure(
     assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(quarantined=1)
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
     assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(rebuilt=1)
-    row = await (
-        await store.store.conn.execute(
-            "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
-        )
-    ).fetchone()
-    assert row is not None and row["quarantined_reason"] is None
+    [row] = await store.sql(
+        "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
+    )
+    assert row["quarantined_reason"] is None
 
 
 async def test_rebuild_preserves_plan_reentry_clamped_boundary(
@@ -421,7 +415,9 @@ async def test_rebuild_preserves_plan_reentry_clamped_boundary(
     entries = plan_reentry_entries(session_id)
     events = parse(entries)
     [candidate] = [
-        candidate for candidate in detect(scrub_events(events)) if candidate.payload == {"detector": "plan_reentry"}
+        candidate
+        for candidate in detect(parse([scrub_line(entry) for entry in entries]))
+        if candidate.payload == {"detector": "plan_reentry"}
     ]
     buggy = replace(
         candidate,
@@ -432,12 +428,9 @@ async def test_rebuild_preserves_plan_reentry_clamped_boundary(
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
 
     assert await rebuild_contexts(store, (projects_root,)) == rebuild_report(rebuilt=1)
-    row = await (
-        await store.store.conn.execute(
-            "SELECT context_json FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
-        )
-    ).fetchone()
-    assert row is not None
+    [row] = await store.sql(
+        "SELECT context_json FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
+    )
     before = ContextWindow.from_json(str(row["context_json"])).before
     assert len(before) == 1
     assert "continue the current pass" in before[0].preview
@@ -459,12 +452,9 @@ async def test_rebuild_selects_maximal_content_copy_over_newer_compacted(
     os.utime(compacted, (2, 2))
 
     assert await rebuild_contexts(store, (tmp_path / "complete", tmp_path / "compacted")) == rebuild_report(rebuilt=1)
-    row = await (
-        await store.store.conn.execute(
-            "SELECT context_json FROM feedback_events WHERE dedup_key = ?", (compacted_candidate.dedup_key,)
-        )
-    ).fetchone()
-    assert row is not None
+    [row] = await store.sql(
+        "SELECT context_json FROM feedback_events WHERE dedup_key = ?", (compacted_candidate.dedup_key,)
+    )
     content = "\n".join(
         message["content"] for message in messages(ContextWindow.from_json(str(row["context_json"])).before)
     )
@@ -496,22 +486,10 @@ async def test_rebuild_reports_detector_drift_without_changing_the_stored_row(
     stored = replace(current, dedup_key=DedupKey("legacy-detector-dedup-key"))
     await store.record_file_scan("/obsolete/.cc-pushback/drift.jsonl", 1.0, [stored])
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
-    before = dict(
-        await (
-            await store.store.conn.execute(
-                "SELECT * FROM feedback_events WHERE dedup_key = ?", (stored.dedup_key,)
-            )
-        ).fetchone()
-    )
+    [before] = await store.sql("SELECT * FROM feedback_events WHERE dedup_key = ?", (stored.dedup_key,))
 
     report = await rebuild_contexts(store, (projects_root,))
-    after = dict(
-        await (
-            await store.store.conn.execute(
-                "SELECT * FROM feedback_events WHERE dedup_key = ?", (stored.dedup_key,)
-            )
-        ).fetchone()
-    )
+    [after] = await store.sql("SELECT * FROM feedback_events WHERE dedup_key = ?", (stored.dedup_key,))
     assert report == replace(
         rebuild_report(),
         drifted=(DetectorDrift(stored.dedup_key, current.dedup_key),),
@@ -532,20 +510,10 @@ async def test_rebuild_marks_shared_event_uuid_detector_drift_as_ambiguous(
     await store.record_file_scan("/obsolete/.cc-pushback/shared-event.jsonl", 1.0, [old_a, old_b])
     monkeypatch.setattr(context_rebuild, "detect", lambda _: [new_a, new_b])
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
-    before = [
-        dict(row)
-        async for row in await store.store.conn.execute(
-            "SELECT * FROM feedback_events ORDER BY id"
-        )
-    ]
+    before = await store.sql("SELECT * FROM feedback_events ORDER BY id")
 
     report = await rebuild_contexts(store, (projects_root,))
-    after = [
-        dict(row)
-        async for row in await store.store.conn.execute(
-            "SELECT * FROM feedback_events ORDER BY id"
-        )
-    ]
+    after = await store.sql("SELECT * FROM feedback_events ORDER BY id")
 
     assert report == replace(
         rebuild_report(found=2),
@@ -565,23 +533,20 @@ async def test_rebuild_quarantines_drift_rows_with_empty_stored_context(
     current = detected(entries, f"{session_id}-anchor")
     stored = replace(current, dedup_key=DedupKey("legacy-empty-dedup-key"))
     await store.record_file_scan("/obsolete/.cc-pushback/empty-drift.jsonl", 1.0, [stored])
-    await store.store.conn.execute(
+    await store.execute(
         "UPDATE feedback_events SET context_json = ?, quarantined_reason = NULL WHERE dedup_key = ?",
         (replace(stored.window, before=()).to_json(), str(stored.dedup_key)),
     )
-    await store.store.conn.commit()
     write_transcript(projects_root / "project" / f"{session_id}.jsonl", entries)
 
     report = await rebuild_contexts(store, (projects_root,))
 
     assert report == replace(rebuild_report(), quarantined=1)
-    row = await (
-        await store.store.conn.execute(
-            "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?",
-            (str(stored.dedup_key),),
-        )
-    ).fetchone()
-    assert row is not None and row["quarantined_reason"] == "rebuilt_context_empty"
+    [row] = await store.sql(
+        "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?",
+        (str(stored.dedup_key),),
+    )
+    assert row["quarantined_reason"] == "rebuilt_context_empty"
 
 
 async def test_rebuild_marks_tied_fresh_detector_drift_as_ambiguous(
@@ -655,12 +620,10 @@ async def test_rebuild_isolates_a_corrupt_copy_and_reports_it(
     assert len(report.parse_failures) == 1
     assert report.parse_failures[0].path == corrupt.resolve()
     assert "message" in report.parse_failures[0].error
-    row = await (
-        await store.store.conn.execute(
-            "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
-        )
-    ).fetchone()
-    assert row is not None and row["quarantined_reason"] is None
+    [row] = await store.sql(
+        "SELECT quarantined_reason FROM feedback_events WHERE dedup_key = ?", (candidate.dedup_key,)
+    )
+    assert row["quarantined_reason"] is None
 
 
 async def test_rebuild_isolates_copy_io_failure_across_the_full_copy_lifecycle(
@@ -671,14 +634,14 @@ async def test_rebuild_isolates_copy_io_failure_across_the_full_copy_lifecycle(
     await store.record_file_scan("/obsolete/.cc-pushback/io.jsonl", 1.0, [candidate])
     valid = write_transcript(tmp_path / "valid" / f"{session_id}.jsonl", entries)
     inaccessible = write_transcript(tmp_path / "inaccessible" / f"{session_id}.jsonl", entries)
-    transcript_mtime = context_rebuild.TranscriptDiscovery.transcript_mtime
+    real_scrubbed_events = context_rebuild.scrubbed_events
 
-    async def permission_error(path: Path) -> float:
+    def deny_inaccessible(path: Path) -> list[TranscriptEvent]:
         if path == inaccessible.resolve():
             raise PermissionError("fixture denied")
-        return await transcript_mtime(path)
+        return real_scrubbed_events(path)
 
-    monkeypatch.setattr(context_rebuild.TranscriptDiscovery, "transcript_mtime", permission_error)
+    monkeypatch.setattr(context_rebuild, "scrubbed_events", deny_inaccessible)
 
     report = await rebuild_contexts(store, (valid.parent, inaccessible.parent))
     assert report.rebuilt == 1
@@ -715,7 +678,7 @@ async def test_rebuild_dry_run_reports_real_changes_without_writing(
 
     async def snapshot() -> dict[str, list[dict[str, object]]]:
         return {
-            table: [dict(row) async for row in await store.store.conn.execute(f"SELECT * FROM {table} ORDER BY id")]
+            table: await store.sql(f"SELECT * FROM {table} ORDER BY id")
             for table in ("feedback_events", "gate_sample", "triage")
         }
 
@@ -814,7 +777,7 @@ async def insert_gate_sample(
         fidelity="full",
         preview_chars=200,
     )
-    await store.store.conn.execute(
+    await store.execute(
         "INSERT INTO gate_sample (sample_key, kind, dedup_key, session_id, anchor_uuid, occurred_at, "
         "offset_turns, window_json, seed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (sample_key, kind, None, SESSION, "u1", None, offset_turns, window.to_json(), 0, "2026-01-01T00:00:00"),

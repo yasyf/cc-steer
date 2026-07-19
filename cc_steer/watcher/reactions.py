@@ -185,11 +185,8 @@ async def reply_turns(store: FeedbackStore, sessions: Sequence[str]) -> dict[str
     """The authored spec-surviving turns for ``sessions``, grouped by session, oldest first."""
     if not sessions:
         return {}
-    cur = await store.store.conn.execute(
-        REPLY_QUERY.format(marks=",".join("?" for _ in sessions)), tuple(sessions)
-    )
     grouped: dict[str, list[ReplyTurn]] = {}
-    async for row in cur:
+    for row in await store.sql(REPLY_QUERY.format(marks=",".join("?" for _ in sessions)), tuple(sessions)):
         grouped.setdefault(str(row["session_id"]), []).append(
             ReplyTurn(str(row["occurred_at"]), str(row["text"]), str(row["dedup_key"]))
         )

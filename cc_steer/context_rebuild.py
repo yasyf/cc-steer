@@ -12,22 +12,19 @@ from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cc_transcript import TranscriptDiscovery
 from cc_transcript.context import ContextWindow
 from cc_transcript.ids import SessionId
 from cc_transcript.mining import DedupKey
-from cc_transcript.parser import parse_events_async
 
 from cc_steer.detectors import detect
 from cc_steer.negatives import W_MAX, GateSample, truncated
 from cc_steer.rendering import has_substantive_content, has_substantive_gate_content, messages
 from cc_steer.store import REBUILD_QUARANTINE_REASONS
-from cc_steer.watcher.live import scrub_events
+from cc_steer.watcher.live import scrubbed_events
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
-    from aiosqlite import Row
     from cc_transcript.mining import FeedbackCandidate
 
     from cc_steer.store import FeedbackStore
@@ -172,8 +169,7 @@ type RebuildOutcome = RebuiltContext | QuarantinedContext | UnchangedContext | D
 
 
 async def database_path(store: FeedbackStore) -> Path | None:
-    async with store.store.conn.execute("PRAGMA database_list") as cur:
-        rows = [dict(row) async for row in cur]
+    rows = await store.sql("PRAGMA database_list")
     file = next(str(row["file"]) for row in rows if row["name"] == "main")
     return Path(file) if file and file != ":memory:" else None
 
@@ -212,14 +208,16 @@ async def rebuild_lock(database: Path | None) -> AsyncIterator[None]:
             os.close(fd)
 
 
+def scan_copy(path: Path) -> tuple[float, tuple[FeedbackCandidate, ...]]:
+    return path.stat().st_mtime, tuple(detect(scrubbed_events(path)))
+
+
 async def parse_copy(
     session_id: SessionId, path: Path, semaphore: asyncio.Semaphore
 ) -> CopyCandidates | CopyParseFailure:
     async with semaphore:
         try:
-            mtime = await TranscriptDiscovery.transcript_mtime(path)
-            events = await parse_events_async(path)
-            candidates = tuple(detect(scrub_events(events)))
+            mtime, candidates = await asyncio.to_thread(scan_copy, path)
         except (OSError, KeyError, ValueError, TypeError) as exc:
             return CopyParseFailure(session_id, path, f"{type(exc).__name__}: {exc}")
     return CopyCandidates(
@@ -253,7 +251,7 @@ def best_candidate(matching: Sequence[tuple[float, FeedbackCandidate]]) -> Feedb
     return max(matching, key=lambda item: (before_content_length(item[1].window), item[0]))[1]
 
 
-def quarantine_outcome(row: Row, dedup_key: DedupKey, reason: str) -> RebuildOutcome:
+def quarantine_outcome(row: Mapping[str, object], dedup_key: DedupKey, reason: str) -> RebuildOutcome:
     return (
         UnchangedContext(dedup_key)
         if row["quarantined_reason"] == reason
@@ -262,7 +260,7 @@ def quarantine_outcome(row: Row, dedup_key: DedupKey, reason: str) -> RebuildOut
 
 
 def rebuild_outcome(
-    row: Row, session: SessionCopies, *, ambiguous_event_uuid: bool
+    row: Mapping[str, object], session: SessionCopies, *, ambiguous_event_uuid: bool
 ) -> RebuildOutcome:
     dedup_key = DedupKey(str(row["dedup_key"]))
     if row["quarantined_reason"] not in (None, *REBUILD_QUARANTINE_REASONS):
@@ -331,7 +329,7 @@ def persistence_rows(
     return rebuilt, quarantined
 
 
-def gate_sample_parent(row: Row, outcome: RebuildOutcome) -> GateSampleParent | None:
+def gate_sample_parent(row: Mapping[str, object], outcome: RebuildOutcome) -> GateSampleParent | None:
     match outcome:
         case QuarantinedContext():
             return None
@@ -370,7 +368,7 @@ def positive_gate_samples(parent: GateSampleParent, seed: int) -> tuple[GateSamp
 
 
 def gate_sample_repairs(
-    parents: Mapping[str, GateSampleParent], rows: Sequence[Row]
+    parents: Mapping[str, GateSampleParent], rows: Sequence[Mapping[str, object]]
 ) -> GateSampleRepairs:
     updates: list[tuple[str, str]] = []
     deletes: list[str] = []
@@ -405,7 +403,7 @@ async def repair_gate_samples(
 ) -> int:
     """Reconciles stored gate families with their active parents' effective contexts."""
     if dry_run:
-        rows = [row async for row in await store.store.conn.execute(GATE_SAMPLES_QUERY)]
+        rows = await store.sql(GATE_SAMPLES_QUERY)
         return gate_sample_repairs(parents, rows).total
     return await store.repair_gate_samples(
         GATE_SAMPLES_QUERY,
@@ -413,7 +411,7 @@ async def repair_gate_samples(
     )
 
 
-def empty_gate_sample_keys(rows: Sequence[Row]) -> tuple[str, ...]:
+def empty_gate_sample_keys(rows: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
     return tuple(
         str(row["sample_key"])
         for row in rows
@@ -421,7 +419,7 @@ def empty_gate_sample_keys(rows: Sequence[Row]) -> tuple[str, ...]:
     )
 
 
-def classify_gate_rows(rows: Sequence[Row]) -> GatePruneClassification:
+def classify_gate_rows(rows: Sequence[Mapping[str, object]]) -> GatePruneClassification:
     empty = set(empty_gate_sample_keys(rows))
     positive = [row for row in rows if str(row["kind"]) == "positive_window"]
     return GatePruneClassification(
@@ -465,7 +463,7 @@ async def prune_empty_gate_samples(store: FeedbackStore, *, dry_run: bool) -> Ga
 async def execute_context_rebuild(
     store: FeedbackStore, roots: Sequence[Path], *, dry_run: bool
 ) -> ContextRebuildReport:
-    rows = [row async for row in await store.store.conn.execute(CONTEXTS_QUERY)]
+    rows = await store.sql(CONTEXTS_QUERY)
     rows_by_session = {
         SessionId(session_id): list(group)
         for session_id, group in groupby(
@@ -479,7 +477,7 @@ async def execute_context_rebuild(
     rebuilt = 0
     quarantined = 0
     failures: list[CopyParseFailure] = []
-    resolved: list[tuple[Row, RebuildOutcome]] = []
+    resolved: list[tuple[Mapping[str, object], RebuildOutcome]] = []
     for offset in range(0, len(session_ids), SESSION_BATCH_SIZE):
         batch = session_ids[offset : offset + SESSION_BATCH_SIZE]
         parsed = dict(
@@ -512,7 +510,7 @@ async def execute_context_rebuild(
     }
     gate_repaired = await repair_gate_samples(store, parents, dry_run=dry_run)
     mismatch_keys = await store.gate_sample_family_mismatch_keys()
-    [count_row] = await (await store.store.conn.execute(ROWS_COUNT_QUERY)).fetchall()
+    [count_row] = await store.sql(ROWS_COUNT_QUERY)
     return ContextRebuildReport(
         found=len(rows),
         rebuilt=rebuilt,
