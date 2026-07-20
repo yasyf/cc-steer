@@ -23,12 +23,29 @@ from athome.train.spec import EvalRow, MlxModelId
 from cc_steer.rendering import NO_STEER
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import numpy.typing as npt
     from athome.train.spec import SavedCheckpoint
+
+DUMMY_ANSWER = "zzz other"
 
 
 class NonFiniteAUCError(RuntimeError):
     """A scored AUC is non-finite (a single-class validation set), so it cannot rank checkpoints."""
+
+
+def prefix_and_sentinel_via(render: Callable[[str], list[int]]) -> tuple[list[int], int]:
+    """Templated ids up to the answer position and the ``NO_STEER`` first-token id there.
+
+    ``render`` maps an assistant answer to the full templated id sequence for the
+    ``[system, user, assistant=answer]`` turn (``add_generation_prompt=False``). Diverging the
+    ``NO_STEER`` rendering from a dummy one finds the answer position exactly, regardless of the
+    ``<think></think>`` scaffold the template injects — the shared divergence core the local mlx
+    drafter, the offline eval, and the hosted http drafter all score at.
+    """
+    ns = render(NO_STEER)
+    return ns[: (cut := boundary(ns, render(DUMMY_ANSWER)))], ns[cut]
 
 
 def prefix_and_sentinel(system: str, user: str, mlx_id: str) -> tuple[list[int], int]:
@@ -39,9 +56,9 @@ def prefix_and_sentinel(system: str, user: str, mlx_id: str) -> tuple[list[int],
     """
     model = MlxModelId(mlx_id)
     base = [Message(role="system", content=system), Message(role="user", content=user)]
-    ns = chat_ids([*base, Message(role="assistant", content=NO_STEER)], model, add_generation_prompt=False)
-    dummy = chat_ids([*base, Message(role="assistant", content="zzz other")], model, add_generation_prompt=False)
-    return ns[: (cut := boundary(ns, dummy))], ns[cut]
+    return prefix_and_sentinel_via(
+        lambda answer: chat_ids([*base, Message(role="assistant", content=answer)], model, add_generation_prompt=False)
+    )
 
 
 def sentinel_eval_row(system: str, user: str, mlx_id: str) -> EvalRow:

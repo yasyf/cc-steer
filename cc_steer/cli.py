@@ -1050,7 +1050,8 @@ def hosted_group() -> None:
 @click.option(
     "--endpoint",
     required=True,
-    help="OpenAI-compatible base URL the hosted watcher is served at; /v1/chat/completions is appended.",
+    help="vLLM-compatible base URL the hosted watcher is served at; scoring posts prompt_logprobs "
+    "to /v1/completions (a vLLM extension pure OpenAI lacks).",
 )
 @click.option("--model", required=True, help="Model/adapter name the endpoint serves (the OpenAI `model` field).")
 @click.option(
@@ -1088,7 +1089,7 @@ async def hosted_calibrate(
 ) -> None:
     """Calibrate a hosted watcher threshold against a live endpoint and promote it into the hosted registry lane.
 
-    Scores the frozen watcher eval frame through the OpenAI-compatible ENDPOINT with the exact
+    Scores the frozen watcher eval frame through the vLLM-compatible ENDPOINT with the exact
     HttpDrafter sentinel semantics, fits a substrate-specific P(NO_STEER) threshold at the fire
     budget, and (unless ``--dry-run``) mints and promotes a new ``--component`` version copying the
     promoted local watcher adapter's bytes verbatim with the hosted threshold. The local ``watcher``
@@ -1494,15 +1495,16 @@ def pipeline_uninstall_launchd() -> None:
     type=click.Choice(["auto", "spawn", "mlx", "http"]),
     default="auto",
     show_default=True,
-    help="Stage-2 drafter: the local trained watcher (mlx), a hosted OpenAI-compatible endpoint (http), "
+    help="Stage-2 drafter: the local trained watcher (mlx), a hosted vLLM-compatible endpoint (http), "
     "or the claude CLI (spawn); auto picks mlx when a watcher model is promoted and the mlx extra is "
     "installed, and never selects http (opt in explicitly).",
 )
 @click.option(
     "--drafter-endpoint",
     default=None,
-    help="OpenAI-compatible base URL for the http drafter (e.g. https://<app>.modal.run); "
-    "/v1/chat/completions is appended. Required for --drafter http.",
+    help="vLLM-compatible base URL for the http drafter (e.g. https://<app>.modal.run); scoring posts "
+    "prompt_logprobs to /v1/completions (a vLLM extension pure OpenAI lacks) and generation uses "
+    "/v1/chat/completions. Required for --drafter http.",
 )
 @click.option(
     "--drafter-model",
@@ -1516,14 +1518,6 @@ def pipeline_uninstall_launchd() -> None:
     show_default=True,
     help="Per-request timeout in seconds for the http drafter; a hanging endpoint fails open to "
     f"NO_STEER. The API key is read from ${DRAFTER_API_KEY_ENV}. Ignored for other drafters.",
-)
-@click.option(
-    "--drafter-render-version",
-    type=int,
-    default=2,
-    show_default=True,
-    help="Prompt-render contract for the http drafter; the retrain lane renders v2 unconditionally, "
-    "so a hosted watcher expects 2. Ignored for other drafters.",
 )
 @click.option(
     "--stage2-threshold",
@@ -1585,7 +1579,6 @@ async def watch_(
     drafter_endpoint: str | None,
     drafter_model: str | None,
     drafter_timeout: float,
-    drafter_render_version: int,
     stage2_threshold: float | None,
     stage2_idle_ttl: float,
     refiner_kind: str,
@@ -1677,11 +1670,10 @@ async def watch_(
         )
         drafter = http_drafter
         stage2_model = drafter_model
-        render_version = drafter_render_version
+        render_version = 2  # the retrain lane renders v2 unconditionally, so the hosted watcher expects v2
         click.echo(
             f"drafter: http {drafter_endpoint} (model {drafter_model}, "
-            f"P(NO_STEER) abstain threshold {stage2_threshold:.4f}, timeout {drafter_timeout:.1f}s, "
-            f"render v{render_version})"
+            f"P(NO_STEER) abstain threshold {stage2_threshold:.4f}, timeout {drafter_timeout:.1f}s)"
         )
     else:
         drafter = SpawnDrafter(model=stage2_model)

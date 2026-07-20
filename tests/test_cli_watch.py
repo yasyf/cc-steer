@@ -184,7 +184,7 @@ def _invoke_http_watch(tmp_path: Path, *extra: str) -> Result:
     )
 
 
-def test_http_drafter_render_version_defaults_to_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_http_drafter_renders_v2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cc_steer.registry.current", lambda _component, **_kwargs: None)
     monkeypatch.setattr(cc_steer.watcher.drafter_http, "HttpDrafter", FakeHttpDrafter)
     monkeypatch.setattr(cc_steer.watcher.cascade, "Cascade", RecordingCascade)
@@ -193,17 +193,6 @@ def test_http_drafter_render_version_defaults_to_two(tmp_path: Path, monkeypatch
     assert result.exit_code == 0, result.output
     assert RecordingCascade.last_config is not None
     assert RecordingCascade.last_config.render_version == 2
-
-
-def test_http_drafter_render_version_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cc_steer.registry.current", lambda _component, **_kwargs: None)
-    monkeypatch.setattr(cc_steer.watcher.drafter_http, "HttpDrafter", FakeHttpDrafter)
-    monkeypatch.setattr(cc_steer.watcher.cascade, "Cascade", RecordingCascade)
-    monkeypatch.setattr(cc_steer.watcher.daemon, "Watcher", StopWatcher)
-    result = _invoke_http_watch(tmp_path, "--drafter-render-version", "1")
-    assert result.exit_code == 0, result.output
-    assert RecordingCascade.last_config is not None
-    assert RecordingCascade.last_config.render_version == 1
 
 
 def test_http_drafter_requires_an_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

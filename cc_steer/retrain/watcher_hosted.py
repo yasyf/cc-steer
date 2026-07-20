@@ -2,26 +2,22 @@
 
 The HTTP sibling of the local frame-scoring-plus-threshold-fit-plus-mint lineage in
 :mod:`cc_steer.retrain.watcher` and :mod:`cc_steer.retrain.refit`, for a watcher served over a
-hosted OpenAI-compatible endpoint (the athome ``[serve.modal-vllm]`` scale-to-zero recipe). A
-served model's abstain probabilities are substrate-specific — the spike measured the same cutoff
-firing 9 rows locally versus 26 through the hosted endpoint — so a hosted deployment needs its own
-threshold, fit from probabilities the endpoint actually produces.
+hosted vLLM endpoint (the athome ``[serve.modal-vllm]`` scale-to-zero recipe). A served model's
+abstain probabilities are substrate-specific — the spike measured the same cutoff firing 9 rows
+locally versus 26 through the hosted endpoint — so a hosted deployment needs its own threshold, fit
+from probabilities the endpoint actually produces.
 
 :func:`score_frame_http` drives :class:`~cc_steer.watcher.drafter_http.HttpDrafter` as a library:
-one ``max_tokens=1`` teacher-forced scoring call per frame row, with the exact scaffold messages
-:meth:`~cc_steer.watcher.drafter_mlx.MlxDrafter._prefix_and_sentinel` builds locally, so the two
-substrates score the identical prompt and differ only where the recon measured — a full-vocabulary
-softmax locally versus the endpoint's top-``k`` logprobs here. Rows whose ``NO_STEER`` sentinel
-falls below the endpoint's top-``k`` carry no reportable probability and fire unconditionally in
-production (the abstain guard fails on a ``None`` prob), so the fit reserves budget for them —
-folding one guaranteed fire per below-top-``k`` row in before :func:`fit_threshold` fits the served
-``P(NO_STEER)`` operating point through
-:func:`~cc_steer.retrain.promotion.threshold_for_budget` in the same inverted convention the local
-lanes use, so the realized production fire count stays within budget. :func:`apply_calibration` mints and promotes the result under a component distinct
-from the local ``watcher`` lane, copying the promoted local adapter's bytes verbatim exactly as
-:func:`~cc_steer.retrain.refit.apply_refit` does. The local lane and the running daemon — which
-reads ``registry.current("watcher")`` by literal — are never touched, and unlike the daemon this
-never kicks the watch agent.
+one ``max_tokens=1`` teacher-forced ``prompt_logprobs`` scoring call per frame row, scoring the same
+divergence-found answer position :meth:`~cc_steer.watcher.drafter_mlx.MlxDrafter._prefix_and_sentinel`
+finds locally, so the two substrates score the identical prompt and differ only in substrate. The
+served ``P(NO_STEER)`` is exact and rank-independent — every row is scorable, so :func:`fit_threshold`
+fits the operating point through :func:`~cc_steer.retrain.promotion.threshold_for_budget` over every
+row in the same inverted convention the local lanes use. :func:`apply_calibration` mints and promotes
+the result under a component distinct from the local ``watcher`` lane, copying the promoted local
+adapter's bytes verbatim exactly as :func:`~cc_steer.retrain.refit.apply_refit` does. The local lane
+and the running daemon — which reads ``registry.current("watcher")`` by literal — are never touched,
+and unlike the daemon this never kicks the watch agent.
 """
 
 from __future__ import annotations
@@ -36,7 +32,6 @@ import numpy as np
 
 from cc_steer import registry
 from cc_steer.retrain import evalset, promotion
-from cc_steer.watcher.cascade import DRAFT_SYSTEM
 from cc_steer.watcher.drafter_http import DEFAULT_THRESHOLD, DrafterResponseError, HttpDrafter
 
 if TYPE_CHECKING:
@@ -62,10 +57,8 @@ class HostedCalibration:
         endpoint: The OpenAI-compatible base URL the frame was scored through.
         model: The served model/adapter name — the OpenAI ``model`` field.
         fires_per_100: The fire budget the threshold was fit to, per 100 eval rows.
-        n_rows: Every frame row — the budget denominator, including dropped rows.
-        n_scored: The rows whose sentinel was within the endpoint's top-``k`` and were fit.
-        n_below_top_k: The rows whose sentinel fell below top-``k`` and were dropped from the fit.
-        eval_auc: The served sentinel AUC over the scored rows — a sanity floor, not a gate.
+        n_rows: Every frame row — the budget denominator, all of which are scored and fit.
+        eval_auc: The served sentinel AUC over every row — a sanity floor, not a gate.
         current_threshold: The served threshold the parent local adapter carries today.
         fitted_threshold: The hosted-substrate threshold, in the watcher's abstain convention.
         passes: How many scored rows would fire under ``fitted_threshold``.
@@ -79,8 +72,6 @@ class HostedCalibration:
     model: str
     fires_per_100: float
     n_rows: int
-    n_scored: int
-    n_below_top_k: int
     eval_auc: float
     current_threshold: float
     fitted_threshold: float
@@ -91,7 +82,7 @@ class HostedCalibration:
 
     @property
     def per_100(self) -> float:
-        return 100.0 * (self.passes + self.n_below_top_k) / self.n_rows
+        return 100.0 * self.passes / self.n_rows
 
     def metadata(self) -> dict[str, object]:
         return self.parent.metadata | {
@@ -102,8 +93,6 @@ class HostedCalibration:
                 "model": self.model,
                 "fires_per_100": self.fires_per_100,
                 "n_rows": self.n_rows,
-                "n_scored": self.n_scored,
-                "n_below_top_k": self.n_below_top_k,
                 "eval_auc": self.eval_auc,
                 "eval_digest": self.digest,
             },
@@ -115,14 +104,13 @@ class HostedCalibration:
                 f"component: {self.component}",
                 f"endpoint: {self.endpoint}",
                 f"model: {self.model}",
-                f"eval rows: {self.n_rows} (scored {self.n_scored}, {self.n_below_top_k} below top-k)",
+                f"eval rows: {self.n_rows}",
                 f"served eval sentinel AUC: {self.eval_auc:.4f}",
                 f"parent adapter: {self.parent.version}",
                 f"current served threshold: {self.current_threshold:.6g}",
                 f"fitted threshold: {self.fitted_threshold:.6g}",
-                f"with fitted threshold, {self.passes} of {self.n_scored} scored rows fire; with the "
-                f"{self.n_below_top_k} below-top-k rows that always fire, {self.passes + self.n_below_top_k} "
-                f"fire in production ({self.per_100:.2f} per 100 of {self.n_rows})",
+                f"with fitted threshold, {self.passes} of {self.n_rows} rows fire in production "
+                f"({self.per_100:.2f} per 100)",
             )
         )
 
@@ -139,26 +127,24 @@ async def score_frame_http(
     """Teacher-forced first-answer-token ``P(NO_STEER)`` for every frame row, through a hosted endpoint.
 
     Drives :class:`~cc_steer.watcher.drafter_http.HttpDrafter` — the same object the daemon serves
-    ``--drafter http`` with — as a library, one ``max_tokens=1`` scoring call per row fanned out
-    concurrently under a bounded limiter. Each row's messages are the scaffold
-    :meth:`~cc_steer.watcher.drafter_mlx.MlxDrafter._prefix_and_sentinel` builds locally
-    (``[{system: DRAFT_SYSTEM}, {user: tail}]``), so the two substrates score the identical prompt
-    and differ only where the recon measured. A row whose ``NO_STEER`` sentinel falls below the
-    endpoint's top-``k`` has no reportable probability and is absent from the result — the
-    calibration counts those drops rather than fabricating a value. Unlike the daemon's fail-open, a
-    transport fault, timeout, or malformed response aborts the whole pass: an offline fit on a
-    silently partial frame is a worse outcome than a loud failure the operator re-runs.
+    ``--drafter http`` with — as a library, one ``max_tokens=1`` ``prompt_logprobs`` scoring call per
+    row fanned out concurrently under a bounded limiter. Each row scores the divergence-found answer
+    position :meth:`~cc_steer.watcher.drafter_mlx.MlxDrafter._prefix_and_sentinel` finds locally, so
+    the two substrates score the identical prompt and differ only in substrate. The served
+    ``P(NO_STEER)`` is exact and rank-independent, so every row is scorable. Unlike the daemon's
+    fail-open, a transport fault, timeout, or malformed response aborts the whole pass: an offline
+    fit on a silently partial frame is a worse outcome than a loud failure the operator re-runs.
 
     Args:
         frame: The frozen watcher eval frame whose ``tails`` are scored.
-        endpoint: The OpenAI-compatible base URL; ``/v1/chat/completions`` is appended.
+        endpoint: The vLLM base URL; ``/v1/completions`` is appended.
         model: The served model/adapter name — the OpenAI ``model`` field.
         timeout: Per-request timeout in seconds.
         api_key: The endpoint bearer token, or None for an unauthenticated endpoint.
         concurrency: The maximum in-flight scoring requests.
 
     Returns:
-        ``{row_id: P(NO_STEER)}`` for every row whose sentinel was within the endpoint's top-``k``.
+        ``{row_id: P(NO_STEER)}`` for every frame row.
     """
     drafter = HttpDrafter(endpoint=endpoint, model=model, threshold=DEFAULT_THRESHOLD, timeout=timeout, api_key=api_key)
     limiter = anyio.CapacityLimiter(concurrency)
@@ -166,11 +152,7 @@ async def score_frame_http(
 
     async def score(row_id: str, tail: str) -> None:
         async with limiter:
-            prob = await drafter.nosteer_prob(
-                [{"role": "system", "content": DRAFT_SYSTEM}, {"role": "user", "content": tail}]
-            )
-        if prob is not None:
-            probs[row_id] = prob
+            probs[row_id] = await drafter.nosteer_prob(tail)
 
     try:
         async with anyio.create_task_group() as group:
@@ -193,10 +175,8 @@ def fit_threshold(scored: np.ndarray, *, fires_per_100: float, total_turns: int)
     ``1 - p`` for the fitter and the fitted cut maps back with ``threshold = 1 - cut`` — the exact
     inversion :func:`~cc_steer.retrain.watcher.retrain_watcher` and
     :func:`~cc_steer.retrain.refit.plan_refit` use; getting it backwards silently inverts the
-    cascade. ``total_turns`` is the full frame so the budget denominator matches production; the
-    caller folds one ``P(NO_STEER)=0.0`` entry per below-top-``k`` row into ``scored`` first — each
-    scores ``1.0`` on the fire scale and consumes budget ahead of any scored row, reserving room for
-    the unconditional production fires those rows become.
+    cascade. ``total_turns`` is the full frame, matching the ``scored`` length since every row is
+    scorable on the exact ``prompt_logprobs`` path.
     """
     return 1.0 - promotion.threshold_for_budget(1.0 - scored, fires_per_100=fires_per_100, total_turns=total_turns)
 
@@ -214,11 +194,11 @@ async def plan_calibration(
 ) -> HostedCalibration:
     """Score the frozen frame through the endpoint and fit a hosted threshold, leaving the registry untouched.
 
-    Reads the promoted local ``watcher`` adapter as the byte source for the copy, scores the frozen
-    eval frame through ``endpoint`` with the HttpDrafter sentinel semantics, and fits the served
-    threshold. Refuses — before minting anything — when no local watcher is promoted, when the
-    endpoint scores no row within its top-``k``, or when the hosted-scored frame's sentinel AUC is
-    not finite and above chance (a broken served adapter, mirroring the fresh-epoch AUC floor).
+    Reads the promoted local ``watcher`` adapter as the byte source for the copy, scores every row of
+    the frozen eval frame through ``endpoint`` with the HttpDrafter sentinel semantics, and fits the
+    served threshold. Refuses — before minting anything — when no local watcher is promoted, or when
+    the hosted-scored frame's sentinel AUC is not finite and above chance (a broken served adapter,
+    mirroring the fresh-epoch AUC floor).
     """
     frame = evalset.EvalFrame.load(root=eval_root)
     parent = registry.current(SOURCE_COMPONENT, root=registry_root)
@@ -228,34 +208,21 @@ async def plan_calibration(
         )
     current_threshold = _current_threshold(parent)
     served = await score_frame_http(frame, endpoint=endpoint, model=model, timeout=timeout, api_key=api_key)
-    if not served:
-        raise HostedCalibrationError(
-            f"the endpoint scored none of the {len(frame)} frame rows within its top-k; nothing to fit — "
-            "the served model or its logprobs are misconfigured"
-        )
-    kept = [
-        (bool(label), served[row_id]) for row_id, label in zip(frame.ids, frame.labels, strict=True) if row_id in served
-    ]
-    labels = np.array([label for label, _ in kept], dtype=bool)
-    scored = np.array([prob for _, prob in kept], dtype=np.float64)
+    labels = np.asarray(frame.labels, dtype=bool)
+    scored = np.array([served[row_id] for row_id in frame.ids], dtype=np.float64)
     eval_auc = float(promotion.sentinel_auc(labels, 1.0 - scored))
     if not (np.isfinite(eval_auc) and eval_auc > 0.5):
         raise HostedCalibrationError(
-            f"the hosted-scored frame's sentinel AUC is {eval_auc} on {len(scored)} scored rows; it must be finite "
+            f"the hosted-scored frame's sentinel AUC is {eval_auc} on {len(scored)} rows; it must be finite "
             "and above chance (> 0.5) before a hosted threshold can be trusted — the served adapter is likely wrong"
         )
-    n_below = len(frame) - len(scored)
-    fitted = fit_threshold(
-        np.concatenate([scored, np.zeros(n_below)]), fires_per_100=fires_per_100, total_turns=len(frame)
-    )
+    fitted = fit_threshold(scored, fires_per_100=fires_per_100, total_turns=len(frame))
     return HostedCalibration(
         component=component,
         endpoint=endpoint,
         model=model,
         fires_per_100=fires_per_100,
         n_rows=len(frame),
-        n_scored=len(scored),
-        n_below_top_k=len(frame) - len(scored),
         eval_auc=eval_auc,
         current_threshold=current_threshold,
         fitted_threshold=fitted,
@@ -283,9 +250,9 @@ def apply_calibration(
     registry.promote(plan.component, info.version, root=registry_root)
     verdict = (
         f"hosted calibrate {plan.parent.version} -> {info.version}: {plan.threshold_key} "
-        f"{plan.current_threshold:.6g} -> {plan.fitted_threshold:.6g} on {plan.n_scored}/{plan.n_rows} scored rows "
+        f"{plan.current_threshold:.6g} -> {plan.fitted_threshold:.6g} on {plan.n_rows} rows "
         f"through {plan.model} at {plan.endpoint} "
-        f"({plan.passes + plan.n_below_top_k} would fire, {plan.per_100:.2f}/100)"
+        f"({plan.passes} would fire, {plan.per_100:.2f}/100)"
     )
     return promotion.journal(
         plan.component,
