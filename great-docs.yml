@@ -62,6 +62,15 @@ reference:
       - retrain.promotion.corrected_gate
       - retrain.promotion.GateResult
       - retrain.promotion.Verdict
+  - title: Instrument
+    desc: Paired fast-DeLong AUC comparison and the instrument-card decision rule.
+    contents:
+      - instrument.delong_se
+      - instrument.paired_delong
+      - instrument.PairedDeLong
+      - instrument.bootstrap_ci
+      - instrument.mde
+      - instrument.actionable
 
 # Composed by concatenation after each repo's local fragment: top-level keys
 # here must not collide with any repo fragment (last key silently wins).
