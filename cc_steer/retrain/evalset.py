@@ -333,7 +333,7 @@ def build_steer_type_eval(*, dataset_dir: Path | None = None, seed: int = 1729) 
         }
         for record in pq.read_table(source).to_pylist()
     ]
-    kept, _ = near_dup_indices([row["text"] for row in rows], seed=seed)
+    kept, _ = near_dup_indices([str(row["text"]) for row in rows], seed=seed)
     schema = pa.schema(
         [
             ("id", pa.string()),
@@ -387,7 +387,7 @@ def build_pick_eval(*, decisions_path: Path | None = None, dataset_dir: Path | N
         and len(row.chosen_index) == 1
         and len(row.options) >= 2
     ]
-    kept, _ = near_dup_indices([row["text"] for row in rows], seed=seed)
+    kept, _ = near_dup_indices([str(row["text"]) for row in rows], seed=seed)
     schema = pa.schema(
         [
             ("id", pa.string()),
