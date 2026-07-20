@@ -18,6 +18,17 @@ from cc_steer import launchd, registry
 from cc_steer.claude import claude_available
 from cc_steer.context_rebuild import prune_empty_gate_samples, rebuild_contexts, rebuild_lock
 from cc_steer.dashboard import build_app
+from cc_steer.decisions import (
+    DEFAULT_DECISIONS_PATH,
+    read_decisions,
+    write_decisions,
+)
+from cc_steer.decisions import (
+    mine as mine_decisions,
+)
+from cc_steer.decisions import (
+    stats_of as decision_stats_of,
+)
 from cc_steer.evaluate import evaluate, flip_report
 from cc_steer.imports import import_batch
 from cc_steer.journal import Journal
@@ -40,6 +51,7 @@ if TYPE_CHECKING:
 
 SOURCE_KINDS = [*STEERING_SOURCE_KINDS]
 TIERS = ["small", "medium", "large"]
+QUARANTINE_PREVIEW = 10
 DRAFTER_API_KEY_ENV = "CC_STEER_DRAFTER_API_KEY"
 DATASET_DIR = Path.home() / ".cc-steer" / "dataset"
 MIRRORS_DIR = Path.home() / ".cc-steer" / "mirrors"
@@ -936,6 +948,51 @@ def models_rollback(component: str) -> None:
     except registry.RegistryError as error:
         raise click.ClickException(str(error)) from error
     click.echo(f"rolled back {component} to {info.version}")
+
+
+@main.group(name="decisions")
+def decisions_group() -> None:
+    """Mine and summarize AskUserQuestion decision rounds from transcript trees."""
+
+
+@decisions_group.command(name="mine")
+@click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Parquet output path. Defaults to ~/.cc-steer/dataset/decisions.parquet.",
+)
+def decisions_mine(root: Path, out: Path | None) -> None:
+    """Mine every AskUserQuestion decision round under ROOT into a parquet dataset.
+
+    ROOT is a transcript directory — a corpus mirror or ``~/.claude/projects``. Each
+    typed decision round becomes one row; ``AskUserQuestion`` uses whose result
+    predates the typed lift are counted and surfaced as quarantined, never dropped.
+    """
+    result = mine_decisions(root)
+    destination = out or DEFAULT_DECISIONS_PATH
+    digest = write_decisions(result, destination)
+    click.echo(f"mined {len(result.rows)} rounds, quarantined {len(result.quarantined)} -> {destination} ({digest})")
+    for record in result.quarantined[:QUARANTINE_PREVIEW]:
+        click.echo(f"  quarantined {record.result_type}: {record.session_id} {record.event_uuid}", err=True)
+    if len(result.quarantined) > QUARANTINE_PREVIEW:
+        click.echo(f"  ... and {len(result.quarantined) - QUARANTINE_PREVIEW} more quarantined", err=True)
+
+
+@decisions_group.command(name="stats")
+@click.option("--json", "as_json", is_flag=True, help="Emit the stats as JSON instead of text.")
+@click.option(
+    "--data",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Decisions parquet path. Defaults to ~/.cc-steer/dataset/decisions.parquet.",
+)
+def decisions_stats(as_json: bool, data: Path | None) -> None:
+    """Print counts for a mined decisions dataset: total, splits, and multi-select/custom shares."""
+    rows, _digest, quarantined = read_decisions(data or DEFAULT_DECISIONS_PATH)
+    stats = decision_stats_of(rows, quarantined=quarantined)
+    click.echo(json.dumps(stats.to_dict(), indent=2) if as_json else stats.render())
 
 
 @main.group(name="thresholds")

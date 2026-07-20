@@ -9,6 +9,7 @@ from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import firm, noise, weak
 from cc_transcript.mining.confidence import to_payload
 
+from cc_steer.claude import ClaudeResult
 from cc_steer.report import (
     Sample,
     build_summary,
@@ -127,8 +128,10 @@ def test_candidate_pool_excludes_noise_and_caps() -> None:
 
 @pytest.mark.anyio
 async def test_build_summary_uses_claude(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run(*_: object, **__: object) -> str:
-        return '{"narrative": "Terse and direct.", "highlights": [{"id": 1, "why": "cites a file"}]}'
+    async def fake_run(*_: object, **__: object) -> ClaudeResult:
+        return ClaudeResult(
+            text='{"narrative": "Terse and direct.", "highlights": [{"id": 1, "why": "cites a file"}]}', usage=None
+        )
 
     monkeypatch.setattr("cc_steer.report.run_claude", fake_run)
     summary = await build_summary(corpus(), model="m")
@@ -138,8 +141,10 @@ async def test_build_summary_uses_claude(monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.mark.anyio
 async def test_build_summary_serves_an_all_noise_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run(*_: object, **__: object) -> str:
-        return '{"narrative": "Mostly bare interruptions.", "highlights": [{"id": 2, "why": "made up"}]}'
+    async def fake_run(*_: object, **__: object) -> ClaudeResult:
+        return ClaudeResult(
+            text='{"narrative": "Mostly bare interruptions.", "highlights": [{"id": 2, "why": "made up"}]}', usage=None
+        )
 
     monkeypatch.setattr("cc_steer.report.run_claude", fake_run)
     all_noise = [
@@ -153,8 +158,8 @@ async def test_build_summary_serves_an_all_noise_corpus(monkeypatch: pytest.Monk
 
 @pytest.mark.anyio
 async def test_build_summary_raises_when_picks_miss_a_nonempty_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run(*_: object, **__: object) -> str:
-        return '{"narrative": "x", "highlights": [{"id": 999, "why": "hallucinated"}]}'
+    async def fake_run(*_: object, **__: object) -> ClaudeResult:
+        return ClaudeResult(text='{"narrative": "x", "highlights": [{"id": 999, "why": "hallucinated"}]}', usage=None)
 
     monkeypatch.setattr("cc_steer.report.run_claude", fake_run)
     with pytest.raises(ValueError, match="no valid highlight ids"):

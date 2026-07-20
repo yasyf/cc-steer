@@ -492,7 +492,7 @@ async def build_summary(samples: Sequence[Sample], *, model: str) -> Summary:
     """
     stats, pool = corpus_stats(samples), candidate_pool(samples)
     narrative, picks = parse_summary_json(
-        await run_claude(summary_prompt(pool, stats), system=SUMMARY_SYSTEM, model=model)
+        (await run_claude(summary_prompt(pool, stats), system=SUMMARY_SYSTEM, model=model)).text
     )
     valid = {s.id for group in pool.values() for s in group}
     highlights = tuple(Highlight(pick["id"], pick.get("why")) for pick in picks if pick["id"] in valid)

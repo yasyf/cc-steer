@@ -144,7 +144,7 @@ class SpawnDrafter:
     model: str = "medium"
 
     async def draft(self, prompt: list[Message]) -> Draft:
-        return Draft(await run_claude(flattened(prompt), system=DRAFT_SYSTEM, model=concrete_model(self.model)))
+        return Draft((await run_claude(flattened(prompt), system=DRAFT_SYSTEM, model=concrete_model(self.model))).text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +159,7 @@ class SpawnRefiner:
 
     async def refine(self, prompt: list[Message], draft: str, exemplars: Sequence[Exemplar]) -> str:
         body = REFINE_PROMPT.format(context=flattened(prompt), draft=draft, exemplars=exemplar_block(exemplars))
-        return await run_claude(body, system=REFINE_SYSTEM, model=concrete_model(self.tier))
+        return (await run_claude(body, system=REFINE_SYSTEM, model=concrete_model(self.tier))).text
 
 
 @dataclass(frozen=True, slots=True)

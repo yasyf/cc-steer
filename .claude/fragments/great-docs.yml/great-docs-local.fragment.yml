@@ -70,3 +70,14 @@ reference:
       - instrument.bootstrap_ci
       - instrument.mde
       - instrument.actionable
+  - title: Decisions
+    desc: Mine AskUserQuestion decision rounds from transcript trees into a parquet dataset.
+    contents:
+      - decisions.mine
+      - decisions.DecisionRow
+      - decisions.MineResult
+      - decisions.Quarantine
+      - decisions.write_decisions
+      - decisions.read_decisions
+      - decisions.stats_of
+      - decisions.DecisionStats
