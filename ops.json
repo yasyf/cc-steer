@@ -1,0 +1,1 @@
+{"v":1,"lamport":1,"session":"e0fa71e1-8988-4a8c-9299-c0147fb1bcf3","ops":[{"kind":"create_log","nonce":"2bbc3939758bb138a4d551b62846d220","title":"E43 — steer-type classifier (small model for the kind of steer)","tags":["cc-steer","campaign","E43","experiments"],"anchors":[]}]}
