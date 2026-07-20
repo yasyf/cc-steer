@@ -54,6 +54,13 @@ retrain = [
     "pyarrow>=18",
     "experiment-at-home[train]>=0.9.1,<0.10",
 ]
+encoder = [
+    "accelerate>=1.1",
+    "pyarrow>=18",
+    "scipy>=1.15",
+    "torch>=2.4",
+    "transformers>=5.12,<5.13",
+]
 dev = [
     "cc-steer[gate]",
     "pytest>=8.0",

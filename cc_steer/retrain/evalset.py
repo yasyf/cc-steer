@@ -24,7 +24,7 @@ import os
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, Protocol, get_args
 
 import numpy as np
 
@@ -126,6 +126,21 @@ class EvalFrame:
         )
 
 
+class ProbsFrame(Protocol):
+    """The frame surface :func:`write_probs` persists: the row ids and the order-invariant digest.
+
+    Both :class:`EvalFrame` and :class:`~cc_steer.retrain.encoder.EncoderFrame` satisfy it, so an
+    encoder arm's per-row probs land through the same single writer as the lexical gate's, keyed
+    under the same digest and comparable on the same frame.
+    """
+
+    @property
+    def ids(self) -> tuple[str, ...]: ...
+
+    @property
+    def digest(self) -> DatasetDigest: ...
+
+
 def eval_root(root: Path | None = None) -> Path:
     """The frozen-eval root: the parameter, env ``CC_STEER_EVAL``, or ``~/.cc-steer/eval``."""
     if root is not None:
@@ -198,7 +213,7 @@ def probs_path(version: str, *, root: Path | None = None) -> Path:
 
 
 def write_probs(
-    frame: EvalFrame,
+    frame: ProbsFrame,
     version: str,
     probs: Mapping[str, float],
     *,

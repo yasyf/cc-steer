@@ -70,6 +70,13 @@ reference:
     contents:
       - retrain.manyshot.build_exemplar_system
       - retrain.manyshot.score_frame
+  - title: Encoder gate
+    desc: Fine-tune a transformer encoder as the stage-1 gate and score it paired on the frozen gate frame.
+    contents:
+      - retrain.encoder.EncoderSpec
+      - retrain.encoder.EncoderModel
+      - retrain.encoder.train_encoder
+      - retrain.encoder.score_frozen
   - title: Instrument
     desc: Paired fast-DeLong AUC comparison and the instrument-card decision rule.
     contents:

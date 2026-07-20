@@ -13,6 +13,24 @@ supported-markers = [
 ]
 
 [[package]]
+name = "accelerate"
+version = "1.14.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "packaging", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyyaml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "safetensors", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "torch", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8d/75/94cd5d389649578aca399e5aa822637eec18319a1dadc400ffe2f9a7493f/accelerate-1.14.0.tar.gz", hash = "sha256:41b9c4377a54e0b460a959b0defa1b736e4ca0a2373252d9a539964c2afe3c8d", size = 412167, upload-time = "2026-06-11T13:45:52.326Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/db/253133d7e7cb40d3af384bb2f5c0b4a2b7fdcffbc95c688cc67a20a3c103/accelerate-1.14.0-py3-none-any.whl", hash = "sha256:e94390c2863b873be18f623f9df48a0d8fe5eff13ea7f1a00092b0a7904888c6", size = 389246, upload-time = "2026-06-11T13:45:50.477Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -350,6 +368,13 @@ embed = [
     { name = "sentence-transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "voyageai", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
+encoder = [
+    { name = "accelerate", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyarrow", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "torch", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
 gate = [
     { name = "joblib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scikit-learn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -378,6 +403,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "accelerate", marker = "extra == 'encoder'", specifier = ">=1.1" },
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "anyio", specifier = ">=4.4" },
     { name = "cc-steer", extras = ["gate"], marker = "extra == 'dev'" },
@@ -394,21 +420,25 @@ requires-dist = [
     { name = "mlx", marker = "extra == 'mlx'", specifier = ">=0.32" },
     { name = "mlx-lm", marker = "extra == 'mlx'", specifier = ">=0.31.3" },
     { name = "numpy", specifier = ">=2" },
+    { name = "pyarrow", marker = "extra == 'encoder'", specifier = ">=18" },
     { name = "pyarrow", marker = "extra == 'retrain'", specifier = ">=18" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-dotenv", marker = "extra == 'embed'", specifier = ">=1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "scikit-learn", marker = "extra == 'gate'", specifier = ">=1.5" },
+    { name = "scipy", marker = "extra == 'encoder'", specifier = ">=1.15" },
     { name = "scipy", marker = "extra == 'gate'", specifier = ">=1.15" },
     { name = "sentence-transformers", marker = "extra == 'embed'", specifier = ">=3" },
     { name = "spawnllm", specifier = ">=0.6.1,<0.7" },
+    { name = "torch", marker = "extra == 'encoder'", specifier = ">=2.4" },
+    { name = "transformers", marker = "extra == 'encoder'", specifier = ">=5.12,<5.13" },
     { name = "transformers", marker = "extra == 'mlx'", specifier = ">=5.12,<5.13" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.44" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "voyageai", marker = "extra == 'embed'", specifier = ">=0.3.7" },
 ]
-provides-extras = ["embed", "gate", "mlx", "retrain", "dev"]
+provides-extras = ["embed", "gate", "mlx", "retrain", "encoder", "dev"]
 
 [package.metadata.requires-dev]
 docs = [{ name = "great-docs", specifier = ">=0.15,<0.16" }]
