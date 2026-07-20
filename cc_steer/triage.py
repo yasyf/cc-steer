@@ -18,10 +18,12 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from cc_transcript.context import ContextWindow, HydratedWindow
-from cc_transcript.judge import resolved_model, run_verdicts, sample_audit, structured_judge
+from cc_transcript.judge import resolved_model, run_verdicts, sample_audit
 from cc_transcript.mining import DedupKey
 from cc_transcript.render import Budget
 from pydantic import BaseModel, Field
+
+from cc_steer.claude import cached_judge
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -32,8 +34,8 @@ if TYPE_CHECKING:
 
     from cc_steer.store import FeedbackStore
 
-PROMPT_VERSION = 6
-AUDIT_VERSION = 5
+PROMPT_VERSION = 7
+AUDIT_VERSION = 6
 JUDGE = "judge"
 AUDITOR = "auditor"
 TRIGGER_BUDGET = Budget(turn_chars=2000, tool_chars=6000)
@@ -64,7 +66,7 @@ Category = Literal[
     "other",
 ]
 
-JUDGE_PROMPT = """\
+JUDGE_SYSTEM = """\
 You are classifying one message a developer sent to an AI coding assistant (Claude),
 deciding whether it is genuine STEERING — the human shaping a decision the assistant
 faced or raised — or non-steering noise.
@@ -166,15 +168,16 @@ what_claude_did: ONE neutral sentence naming the assistant action or question th
 message responds to (e.g. "Force-pushed to the shared branch with git push --force").
 Write it even when the message is noise.
 confidence: your probability (0 to 1) that your steering-vs-noise call is correct.
-rationale: one short clause.
+rationale: one short clause."""
 
+JUDGE_USER = """\
 [source: {source_kind}]
 {context}
 {question_answer}
 === USER MESSAGE TO CLASSIFY ===
 {text}"""
 
-AUDIT_PROMPT = """\
+AUDIT_SYSTEM = """\
 A dataset is being built of developer steering: moments where a human, watching an AI
 coding assistant work, shaped its course — told it that something about its work was
 wrong, unwanted, or off-track, or settled a decision the assistant had put in the
@@ -236,8 +239,9 @@ Choose the single best-fitting label:
 
 Also provide: what_claude_did — one neutral sentence describing the assistant's
 preceding action or question; confidence — your probability (0 to 1) that your
-steering-vs-not call is right; rationale — one short clause.
+steering-vs-not call is right; rationale — one short clause."""
 
+AUDIT_USER = """\
 [source: {source_kind}]
 {context}
 {question_answer}
@@ -416,8 +420,8 @@ async def triage(
     fidelities: dict[str, Fidelity] = {}
     judged, failed = await run_verdicts(
         rows,
-        prompt_builder(JUDGE_PROMPT, fidelities),
-        structured_judge(Verdict, tier=tier),
+        prompt_builder(JUDGE_USER, fidelities),
+        cached_judge(Verdict, tier=tier, system=JUDGE_SYSTEM),
         persist_verdict(store, role=JUDGE, prompt_version=PROMPT_VERSION, model=model, fidelities=fidelities),
         concurrency=concurrency,
     )
@@ -465,8 +469,8 @@ async def audit(
     fidelities: dict[str, Fidelity] = {}
     judged, failed = await run_verdicts(
         fresh,
-        prompt_builder(AUDIT_PROMPT, fidelities),
-        structured_judge(Verdict, tier=tier),
+        prompt_builder(AUDIT_USER, fidelities),
+        cached_judge(Verdict, tier=tier, system=AUDIT_SYSTEM),
         persist_verdict(
             store, role=AUDITOR, prompt_version=AUDIT_VERSION, model=resolved_model(tier), fidelities=fidelities
         ),

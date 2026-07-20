@@ -16,10 +16,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from cc_transcript.context import ContextWindow
-from cc_transcript.judge import resolved_model, run_verdicts, structured_judge
+from cc_transcript.judge import resolved_model, run_verdicts
 from cc_transcript.mining import DedupKey
 from pydantic import BaseModel, Field
 
+from cc_steer.claude import cached_judge
 from cc_steer.triage import question_answer_block, render_context
 
 if TYPE_CHECKING:
@@ -29,9 +30,9 @@ if TYPE_CHECKING:
 
     from cc_steer.store import FeedbackStore
 
-PROMPT_VERSION = 3
+PROMPT_VERSION = 4
 
-REFINE_PROMPT = """\
+REFINE_SYSTEM = """\
 You are refining one piece of developer STEERING — a message a developer sent to an AI
 coding assistant (Claude) to shape what it does — into clean, atomic training pairs.
 
@@ -64,8 +65,9 @@ For EACH pair produce:
 - direction_verbatim: the exact, unedited span of the USER MESSAGE voicing this steering,
   copied character-for-character.
 - direction: one clean self-contained sentence distilling what the developer wants — the
-  correction to make or the choice to follow.
+  correction to make or the choice to follow."""
 
+REFINE_USER = """\
 [source: {source_kind}]
 [judge's hint about the action: {what_claude_did}]
 {context}
@@ -117,7 +119,7 @@ class RefineReport:
 
 async def build_refine_prompt(row: Mapping[str, object]) -> str:
     context, _ = await render_context(ContextWindow.from_json(str(row["context_json"])))
-    return REFINE_PROMPT.format(
+    return REFINE_USER.format(
         source_kind=row["source_kind"],
         what_claude_did=row["what_claude_did"],
         context=context,
@@ -144,7 +146,7 @@ async def run_refinements(
         pairs += len(refinement.pairs)
 
     refined, failed = await run_verdicts(
-        rows, build_refine_prompt, structured_judge(Refinement, tier=tier), persist, concurrency=concurrency
+        rows, build_refine_prompt, cached_judge(Refinement, tier=tier, system=REFINE_SYSTEM), persist, concurrency=concurrency
     )
     return refined, pairs, failed
 

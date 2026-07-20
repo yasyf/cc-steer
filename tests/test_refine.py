@@ -57,7 +57,7 @@ async def seed_accepted(store: FeedbackStore, monkeypatch: pytest.MonkeyPatch) -
     async def fake_judge(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: fake_judge)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: fake_judge)
     await triage(store)
     return len(await store.unrefined(prompt_version=PROMPT_VERSION, model=resolved_model("medium")))
 
@@ -99,7 +99,7 @@ async def test_refine_refines_all_accepted_then_noop(store: FeedbackStore, monke
         calls.append(prompt)
         return refinement()
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: fake)
     report = await refine(store)
     assert (report.refined, report.pairs, report.failed, report.pending) == (accepted, accepted, 0, 0)
     assert len(calls) == accepted
@@ -129,13 +129,13 @@ async def test_refine_only_touches_accepted_steering(store: FeedbackStore, monke
             rationale="r",
         )
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: picky_judge)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: picky_judge)
     await triage(store)
 
     async def fake(prompt: str) -> Refinement:
         return refinement()
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: fake)
     report = await refine(store)
     assert report.refined == 1
     rows = await store.pairs()
@@ -154,7 +154,7 @@ async def test_multi_direction_message_splits_into_atomic_pairs(
             return refinement("use a generator here", "this is wrong")
         return refinement()
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: splitter)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: splitter)
     report = await refine(store)
     assert report.pairs == report.refined + 1  # one event yields two pairs
 
@@ -173,13 +173,13 @@ async def test_refine_version_bump_re_refines_and_deliverable_shows_new(
     async def first(prompt: str) -> Refinement:
         return refinement("old direction")
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: first)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: first)
     await refine(store)
 
     async def second(prompt: str) -> Refinement:
         return refinement("new direction")
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: second)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: second)
     monkeypatch.setattr("cc_steer.refine.PROMPT_VERSION", PROMPT_VERSION + 1)
     report = await refine(store)
     assert report.refined >= 1
@@ -198,14 +198,14 @@ async def test_one_failing_event_does_not_abort_then_heals(
             raise JudgeError("claude exited 1")
         return refinement()
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: flaky)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: flaky)
     report = await refine(store)
     assert (report.refined, report.failed, report.pending) == (accepted - 1, 1, 1)
 
     async def healed(prompt: str) -> Refinement:
         return refinement()
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: healed)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: healed)
     retry = await refine(store)
     assert (retry.refined, retry.failed, retry.pending) == (1, 0, 0)
 
@@ -221,7 +221,7 @@ async def test_refine_leaves_triage_untouched(store: FeedbackStore, monkeypatch:
     async def fake(prompt: str) -> Refinement:
         return refinement()
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: fake)
     await refine(store)
     after = await store.judged(role=JUDGE, prompt_version=JUDGE_VERSION)
     assert {str(row["dedup_key"]) for row in after} == {str(row["dedup_key"]) for row in before}

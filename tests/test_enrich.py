@@ -77,7 +77,7 @@ async def seed_refined(
             rationale="r",
         )
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: judge)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: judge)
     await triage(store)
 
     async def refiner(prompt: str) -> Refinement:
@@ -91,7 +91,7 @@ async def seed_refined(
             ]
         )
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: refiner)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: refiner)
     report = await refine(store)
     assert report.refined == 1
 
@@ -275,7 +275,7 @@ async def test_pairs_sharing_one_anchor_settle_together(
             rationale="r",
         )
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: judge)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: judge)
     await triage(store)
 
     async def refiner(prompt: str) -> Refinement:
@@ -286,7 +286,7 @@ async def test_pairs_sharing_one_anchor_settle_together(
             ]
         )
 
-    monkeypatch.setattr("cc_steer.refine.structured_judge", lambda *_, **__: refiner)
+    monkeypatch.setattr("cc_steer.refine.cached_judge", lambda *_, **__: refiner)
     assert (await refine(store)).pairs == 2
 
     assert len(await store.unenriched(await CorrectionLog.open())) == 2  # two pairs, one shared anchor

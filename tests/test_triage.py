@@ -10,11 +10,11 @@ from cc_transcript.judge.verdicts import stratified
 
 from cc_steer.detectors import detect
 from cc_steer.triage import (
-    AUDIT_PROMPT,
+    AUDIT_USER,
     AUDIT_VERSION,
     AUDITOR,
     JUDGE,
-    JUDGE_PROMPT,
+    JUDGE_USER,
     KIND_QUOTAS,
     REMAINDER_KIND,
     Verdict,
@@ -93,7 +93,7 @@ async def test_build_prompt_renders_full_fidelity_while_the_transcript_lives(pro
     ]
     write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
     row = candidate_row(parse(entries), source_kind="interrupt_rejection")
-    prompt, fidelity = await build_prompt(JUDGE_PROMPT, row)
+    prompt, fidelity = await build_prompt(JUDGE_USER, row)
     assert fidelity == "full"
     assert "rm -rf build" in prompt
     assert "cleaning now" in prompt
@@ -118,7 +118,7 @@ async def test_build_prompt_renders_an_oversized_edit_unclipped(projects_root: P
     ]
     write_transcript(projects_root / "proj" / f"{SESSION}.jsonl", entries)
     row = candidate_row(parse(entries), source_kind="interrupt_rejection")
-    prompt, fidelity = await build_prompt(JUDGE_PROMPT, row)
+    prompt, fidelity = await build_prompt(JUDGE_USER, row)
     assert fidelity == "full"
     assert all(f"+ {line}" in prompt for line in long_new.splitlines())
     assert "…(+" not in prompt  # nothing in this window hits a budget
@@ -131,7 +131,7 @@ async def test_build_prompt_falls_back_to_labeled_previews_once_expired() -> Non
         user_text("no, this clobbers the config"),
     ]
     row = candidate_row(parse(entries), source_kind="transcript_message")  # no transcript on disk
-    prompt, fidelity = await build_prompt(AUDIT_PROMPT, row)
+    prompt, fidelity = await build_prompt(AUDIT_USER, row)
     assert fidelity == "summary"
     assert SUMMARY_LABEL in prompt
     assert "here is the diff" in prompt
@@ -166,7 +166,7 @@ async def test_triage_judges_all_then_noop(store: FeedbackStore, monkeypatch: py
         calls.append(prompt)
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: fake)
     report = await triage(store)
     assert (report.judged, report.failed, report.pending) == (total, 0, 0)
     assert len(calls) == total
@@ -184,7 +184,7 @@ async def test_triage_records_summary_fidelity_for_expired_transcripts(
     async def fake(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: fake)
     await triage(store)
     assert await judge_fidelities(store) == {"summary"}
 
@@ -199,7 +199,7 @@ async def test_refresh_summary_rejudges_at_full_fidelity_once_hydratable(
     async def fake(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: fake)
     await triage(store)
     assert await judge_fidelities(store) == {"summary"}
     assert (await triage(store)).judged == 0  # without the flag, summary rows stay settled
@@ -218,7 +218,7 @@ async def test_triage_leaves_feedback_events_untouched(store: FeedbackStore, mon
     async def fake(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: fake)
     await triage(store)
     assert await store.dedup_keys() == before
 
@@ -234,7 +234,7 @@ async def test_prompt_version_bump_rejudges_and_keeps_old_verdicts(
     async def fake(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: fake)
     await triage(store)
     monkeypatch.setattr("cc_steer.triage.PROMPT_VERSION", PROMPT_VERSION + 1)
     report = await triage(store)
@@ -253,14 +253,14 @@ async def test_one_failing_row_does_not_abort_the_pass(store: FeedbackStore, mon
             raise JudgeError("claude exited 1")
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: flaky)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: flaky)
     report = await triage(store)
     assert (report.judged, report.failed, report.pending) == (total - 1, 1, 1)
 
     async def healed(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: healed)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: healed)
     retry = await triage(store)
     assert (retry.judged, retry.failed, retry.pending) == (1, 0, 0)
 
@@ -303,7 +303,7 @@ async def test_audit_skips_already_audited_rows(store: FeedbackStore, monkeypatc
     async def fake(prompt: str) -> Verdict:
         return verdict()
 
-    monkeypatch.setattr("cc_steer.triage.structured_judge", lambda *_, **__: fake)
+    monkeypatch.setattr("cc_steer.triage.cached_judge", lambda *_, **__: fake)
     await triage(store)
     first = await audit(store, accepts=10, rejects=10, seed=1)
     assert first.judged == total  # the corpus is tiny: every judged row is sampled

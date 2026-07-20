@@ -20,7 +20,7 @@ import anyio
 import cc_transcript.discovery
 
 from cc_steer.detectors import detect
-from cc_steer.triage import AUDIT_PROMPT, JUDGE_PROMPT, build_prompt
+from cc_steer.triage import AUDIT_USER, JUDGE_USER, build_prompt
 from tests.builders import (
     SESSION,
     assistant_text,
@@ -88,7 +88,7 @@ async def render(root: Path) -> str:
     write_transcript(root / "proj" / f"{SESSION}.jsonl", entries)
     rows = [*detected_rows(parse(entries)), expired_row()]
     return "\n\n########\n\n".join(
-        [(await build_prompt(template, row))[0] for row in rows for template in (JUDGE_PROMPT, AUDIT_PROMPT)]
+        [(await build_prompt(template, row))[0] for row in rows for template in (JUDGE_USER, AUDIT_USER)]
     )
 
 

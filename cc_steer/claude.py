@@ -17,12 +17,15 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from spawnllm import ClaudeCliBackend, ClaudeConfig, Error, Response, Result, RunSpec, run
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
+
+    from pydantic import BaseModel
+    from spawnllm import TModel
 
 CLAUDE_TIMEOUT = 180
 CLAUDE_BACKEND = ClaudeCliBackend()
@@ -122,3 +125,46 @@ def usage_of(raw: str) -> ClaudeUsage | None:
             return None
         case cost, usage:
             return ClaudeUsage.of(cost, usage)
+
+
+def cached_judge[M: BaseModel](
+    response_model: type[M], *, tier: TModel, system: str, timeout: int = CLAUDE_TIMEOUT
+) -> Callable[[str], Awaitable[M]]:
+    """Returns a prompt-to-verdict callable that hoists the static instruction block
+    into the ``claude`` CLI's cache-controlled ``--system-prompt``.
+
+    A drop-in for :func:`cc_transcript.judge.structured_judge` — one structured
+    completion per prompt, :class:`~cc_transcript.judge.verdicts.JudgeError` on any
+    provider or validation failure — that sends the constant ``system`` block once as
+    the system prompt (cache-read on every subsequent row within the CLI's cache TTL)
+    instead of resending it in each row's user prompt. Only the per-row user prompt
+    varies between calls, so the shared prefix is billed once rather than per row.
+
+    Args:
+        response_model: The Pydantic model the structured output is validated against.
+        tier: The judge's abstract model tier.
+        system: The constant instruction block, sent as the cached system prompt.
+        timeout: Seconds to wait before the backend process is killed.
+    """
+    from cc_transcript.judge import default_backend
+    from cc_transcript.judge.verdicts import JudgeError
+
+    backend = default_backend()
+
+    async def judge(prompt: str) -> M:
+        spec = RunSpec(
+            prompt=prompt,
+            model=backend.models[tier],
+            response_model=response_model,
+            timeout=timeout,
+            provider_configs={"claude": ClaudeConfig(system_prompt=system)},
+        )
+        match await run(spec, backend=backend):
+            case Response(error=Error(msg=msg)):
+                raise JudgeError(msg)
+            case Response(result=Result(parsed=parsed)):
+                return cast(response_model, parsed)
+            case other:
+                raise AssertionError(other)
+
+    return judge
