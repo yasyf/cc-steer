@@ -10,6 +10,10 @@ concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # ~285-340s real render vs gd-build's 300s default; lift below the 15-min job cap.
+  GD_BUILD_TIMEOUT: "780"
+
 jobs:
   build-docs:
     runs-on: ubuntu-latest
