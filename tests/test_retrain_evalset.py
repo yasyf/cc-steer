@@ -26,6 +26,7 @@ from cc_steer.retrain.evalset import (
     PickFrame,
     ProbsStoreError,
     SchemaError,
+    SplitLeakError,
     SteerTypeFrame,
     build_steer_type_eval,
     freeze_eval,
@@ -74,6 +75,62 @@ def write_dataset(root: Path, table: pa.Table) -> Path:
     (root / "watcher").mkdir(parents=True, exist_ok=True)
     pq.write_table(table, root / "watcher" / "test.parquet")
     return root
+
+
+def watcher_table_content(pairs: list[tuple[str, str]], *, split: str = "test") -> pa.Table:
+    message = pa.struct([("role", pa.string()), ("content", pa.string())])
+    return pa.table(
+        {
+            "prompt": pa.array(
+                [[{"role": "user", "content": content}] for _, content in pairs], type=pa.list_(message)
+            ),
+            "completion": pa.array(
+                [[{"role": "assistant", "content": "steer"}] for _ in pairs], type=pa.list_(message)
+            ),
+            "verbatim": ["v" for _ in pairs],
+            "label": [True for _ in pairs],
+            "id": [rid for rid, _ in pairs],
+            "category": ["wrong_approach" for _ in pairs],
+            "source_kind": ["" for _ in pairs],
+            "session_id": [f"s{i}" for i in range(len(pairs))],
+            "split": [split] * len(pairs),
+        }
+    )
+
+
+def write_watcher_split(root: Path, test_pairs: list[tuple[str, str]], train_pairs: list[tuple[str, str]]) -> Path:
+    (root / "watcher").mkdir(parents=True, exist_ok=True)
+    pq.write_table(watcher_table_content(test_pairs), root / "watcher" / "test.parquet")
+    pq.write_table(watcher_table_content(train_pairs, split="train"), root / "watcher" / "train.parquet")
+    return root
+
+
+class TestSplitDisjointness:
+    def test_freeze_refuses_a_train_eval_leak(self, tmp_path: Path, eval_dir: Path) -> None:
+        dataset = write_watcher_split(
+            tmp_path / "dataset",
+            [("t0", "the exact same shared context window"), ("t1", "only in the test split")],
+            [("x0", "the exact same shared context window"), ("x1", "only in the train split")],
+        )
+        with pytest.raises(SplitLeakError) as excinfo:
+            freeze_eval("watcher", dataset_dir=dataset, root=eval_dir)
+        assert excinfo.value.ids == ("t0",)  # the leaked test row is named
+        assert not (eval_dir / WATCHER_EVAL_NAME).exists()  # nothing frozen over a leak
+
+    def test_disjoint_split_freezes_and_records_the_check(self, tmp_path: Path, eval_dir: Path) -> None:
+        dataset = write_watcher_split(
+            tmp_path / "dataset",
+            [("t0", "only in the test split a"), ("t1", "only in the test split b")],
+            [("x0", "only in the train split a"), ("x1", "only in the train split b"), ("x2", "and a third")],
+        )
+        sha = freeze_eval("watcher", dataset_dir=dataset, root=eval_dir)
+        manifest = json.loads((eval_dir / MANIFEST_NAME).read_text())
+        assert manifest[WATCHER_EVAL_NAME] == sha
+        assert manifest[f"{WATCHER_EVAL_NAME}.meta"]["disjoint_train_rows_checked"] == 3
+
+    def test_no_train_sibling_skips_the_check(self, dataset: Path, eval_dir: Path) -> None:
+        sha = freeze_eval(dataset_dir=dataset, root=eval_dir)  # only test.parquet exists
+        assert json.loads((eval_dir / MANIFEST_NAME).read_text()) == {WATCHER_EVAL_NAME: sha}
 
 
 @pytest.fixture
@@ -425,6 +482,15 @@ class TestSteerTypeFrame:
         one = build_steer_type_eval(dataset_dir=dataset).read_bytes()
         two = build_steer_type_eval(dataset_dir=dataset).read_bytes()
         assert one == two
+
+    def test_freeze_records_dedup_counts_in_manifest(self, tmp_path: Path) -> None:
+        dataset = write_traces(tmp_path / "dataset", self.source_rows())
+        eval_dir = tmp_path / "eval"
+        freeze_steer_type(dataset_dir=dataset, root=eval_dir)
+        dedup = json.loads((eval_dir / MANIFEST_NAME).read_text())[f"{STEER_TYPE_EVAL_NAME}.meta"]["dedup"]
+        assert dedup["dedup_n_in"] == 4.0
+        assert dedup["dedup_n_removed"] == 1.0  # r0 and r3 render identical text and collapse to one
+        assert dedup["dedup_n_semantic_removed"] == 0.0  # MinHash only, no embedder passed
 
     def test_role_marker_only_text_is_rejected(self, tmp_path: Path) -> None:
         dataset = tmp_path / "dataset"

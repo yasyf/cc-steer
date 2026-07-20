@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -12,7 +13,9 @@ from cc_steer.retrain.data import (
     balance_no_steer,
     carve_val,
     dataset_digest,
+    exact_text_overlap,
     load_train_rows,
+    near_dup_indices,
     near_dup_representatives,
     oversample_corrective_to,
     train_digest,
@@ -100,6 +103,44 @@ class TestNearDupRepresentatives:
         kept, stats = near_dup_representatives([])
         assert kept == []
         assert stats.n_in == 0
+
+
+class TestSemanticNearDup:
+    # LONG_A/B/C share no char-5-gram, so MinHash keeps all three; the embedder maps A and B to the
+    # same direction, so the semantic pass collapses them and reports the one marginal removal.
+    def embedder(self, texts: list[str]) -> np.ndarray:
+        direction = {LONG_A: [1.0, 0.0], LONG_B: [1.0, 0.001], LONG_C: [0.0, 1.0]}
+        return np.array([direction[text] for text in texts])
+
+    def test_minhash_only_keeps_all_and_reports_no_semantic(self) -> None:
+        kept, stats = near_dup_indices([LONG_A, LONG_B, LONG_C])
+        assert kept == [0, 1, 2]
+        assert (stats.n_semantic_removed, stats.semantic_threshold) == (0, None)
+        assert "dedup_semantic_threshold" not in stats.as_dict()
+
+    def test_semantic_pass_collapses_paraphrases_beyond_minhash(self) -> None:
+        kept, stats = near_dup_indices([LONG_A, LONG_B, LONG_C], embed=self.embedder, semantic_threshold=0.92)
+        assert len(kept) == 2  # A and B collapse; C survives
+        assert 2 in kept
+        assert stats.n_semantic_removed == 1
+        assert stats.as_dict()["dedup_n_semantic_removed"] == 1.0
+        assert stats.as_dict()["dedup_semantic_threshold"] == 0.92
+
+    def test_high_threshold_prunes_nothing_extra(self) -> None:
+        kept, stats = near_dup_indices([LONG_A, LONG_B, LONG_C], embed=self.embedder, semantic_threshold=0.9999999)
+        assert kept == [0, 1, 2]  # cosine(A, B) ~0.9999995 < threshold, so nothing extra is pruned
+        assert stats.n_semantic_removed == 0
+
+
+class TestExactTextOverlap:
+    def test_strip_normalized_overlap(self) -> None:
+        assert exact_text_overlap(["a", "b ", " c"], ["b", "d", "c"]) == ["b", "c"]
+
+    def test_disjoint_is_empty(self) -> None:
+        assert exact_text_overlap(["x", "y"], ["z"]) == []
+
+    def test_blank_texts_never_leak(self) -> None:
+        assert exact_text_overlap(["   ", ""], ["  ", "\t"]) == []
 
 
 class TestBalanceNoSteer:

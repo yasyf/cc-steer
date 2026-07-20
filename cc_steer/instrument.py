@@ -63,7 +63,9 @@ def fast_delong(preds: npt.NDArray[np.float64], m: int) -> tuple[npt.NDArray[np.
     return aucs, np.atleast_2d(cov)
 
 
-def delong_cov(labels: npt.ArrayLike, *scores: npt.ArrayLike) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+def delong_cov(
+    labels: npt.ArrayLike, *scores: npt.ArrayLike
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     y = np.asarray(labels).astype(int)
     order = np.argsort(-y, kind="stable")
     preds = np.vstack([np.asarray(s, dtype=np.float64) for s in scores])[:, order]
@@ -147,15 +149,13 @@ def paired_delong(labels: npt.ArrayLike, probs_a: npt.ArrayLike, probs_b: npt.Ar
         se_b=float(np.sqrt(var_b)),
         cov=cov_ab,
         se_delta=se_delta,
-        rho=cov_ab / float(np.sqrt(var_a * var_b)),
+        rho=(cov_ab / denom) if (denom := float(np.sqrt(var_a * var_b))) > 0 else float("nan"),
         z=(delta / se_delta) if se_delta > 0 else float("nan"),
         ci95=(delta - Z975 * se_delta, delta + Z975 * se_delta),
     )
 
 
-def bootstrap_ci(
-    scores: list[float], labels: list[int], *, iters: int = 2000, seed: int = 1729
-) -> tuple[float, float]:
+def bootstrap_ci(scores: list[float], labels: list[int], *, iters: int = 2000, seed: int = 1729) -> tuple[float, float]:
     """Nonparametric bootstrap 95% CI of the AUC (E27 harness resampling).
 
     Resamples row indices with replacement ``iters`` times, keeps resamples that

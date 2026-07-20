@@ -20,25 +20,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, get_args
 
 import numpy as np
 
+from cc_steer.instrument import PairedDeLong, actionable, mde, paired_delong
 from cc_steer.rendering import ask_block, gate_text_is_substantive, has_substantive_content
-from cc_steer.retrain.data import DIRECTION, WatcherRow, dataset_digest
+from cc_steer.retrain.data import DIRECTION, SEMANTIC_THRESHOLD, WatcherRow, dataset_digest, exact_text_overlap
 from cc_steer.triage import Category
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from typing import Any
+    from typing import Any, Literal
 
     import pyarrow as pa
 
-    from cc_steer.retrain.data import DatasetDigest
+    from cc_steer.retrain.data import DatasetDigest, DedupStats, Embedder
 
 EVAL_DIR: Path = Path.home() / ".cc-steer" / "eval"
 MANIFEST_NAME = "MANIFEST.json"
@@ -53,9 +55,25 @@ EVAL_NAMES: dict[str, str] = {
     "pick": PICK_EVAL_NAME,
 }
 PROBS_DIRNAME = "probs"
+COMPARISONS_DIRNAME = "comparisons"
 QA_SOURCE_KIND = "question_answer"
 RENDER_VERSION = 2
 STEER_TYPE_CATEGORIES: tuple[str, ...] = get_args(Category)
+DEDUP_SIDECAR = "dedup.json"
+META_SUFFIX = ".meta"
+# Views where an exact cross-split text overlap is a hard freeze refusal (the E43 leak locus). Only
+# the watcher's long, unique context windows: short gate/steer_type/pick texts can collide benignly.
+DISJOINT_ENFORCED_VIEWS: tuple[str, ...] = ("watcher",)
+
+# Rebuild-frame label provenance, most authoritative first. A ``medium_judge`` label is guidance
+# only — a tie-breaker/feature — and never the sole label a candidate row is admitted on.
+PROVENANCE_PRECEDENCE: tuple[str, ...] = ("human", "fable", "medium_judge")
+GUIDANCE_PROVENANCE = "medium_judge"
+TARGET_MDE = 0.02
+# Projection defaults: the incumbent watcher's sanity-gate AUC and a paired correlation in the
+# instrument card's measured band (paired MDE ~0.017-0.024), so the projection matches the card.
+PROJECTION_AUC = 0.93
+PROJECTION_RHO = 0.8
 
 VIEW_COLUMNS: dict[str, tuple[str, ...]] = {
     "gate": ("id", "text", "label", "kind", "offset_turns", "source_kind", "category", "session_id", "split"),
@@ -84,6 +102,18 @@ class EmptyEvalContext(ValueError):
         self.view = view
         self.ids = tuple(ids)
         super().__init__(f"{view} eval has {len(self.ids)} rows with empty rendered context: {list(self.ids)}")
+
+
+class SplitLeakError(RuntimeError):
+    """A test-split eval row whose exact text also appears in the train split — the E43 leak."""
+
+    def __init__(self, view: str, ids: Sequence[str]) -> None:
+        self.view = view
+        self.ids = tuple(ids)
+        super().__init__(
+            f"{view} eval leaks {len(self.ids)} row(s) whose exact text also appears in the train split: "
+            f"{list(self.ids)}; freeze refuses a train/eval overlap"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,9 +185,12 @@ def freeze_eval(view: str = "watcher", *, dataset_dir: Path | None = None, root:
     Freezes either the ``gate`` or the ``watcher`` eval into ``<view>_eval.parquet``,
     keeping the sibling view's manifest entry intact. Idempotent for identical bytes;
     raises :class:`FrozenViolationError` before writing anything when the frozen file
-    exists with different content, and :class:`EmptyEvalContext` — naming the offending
-    row ids — when any row's rendered context has no substantive content, so an invalid
-    eval can never be frozen. Returns the frozen file's sha256.
+    exists with different content, :class:`EmptyEvalContext` — naming the offending
+    row ids — when any row's rendered context has no substantive content, and
+    :class:`SplitLeakError` when a sibling ``train.parquet`` shares any row's exact text
+    with the eval (the E43 train/eval leak), so an invalid eval can never be frozen.
+    Any dedup sidecar the eval builder wrote and the disjointness check's counts merge
+    into the manifest under ``<name>.meta``. Returns the frozen file's sha256.
     """
     import pyarrow.parquet as pq
 
@@ -169,6 +202,7 @@ def freeze_eval(view: str = "watcher", *, dataset_dir: Path | None = None, root:
     _validate_columns(view, pq.read_schema(source).names)
     if empty := _empty_context_ids(view, pq.read_table(source)):
         raise EmptyEvalContext(view, empty)
+    meta = _disjointness_meta(view, source)
     payload = source.read_bytes()
     sha = _sha256(payload)
     frozen = eval_root(root)
@@ -184,8 +218,45 @@ def freeze_eval(view: str = "watcher", *, dataset_dir: Path | None = None, root:
     frozen.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
         destination.write_bytes(payload)
-    (frozen / MANIFEST_NAME).write_text(json.dumps(manifest | {EVAL_NAMES[view]: sha}, indent=2, sort_keys=True) + "\n")
+    entries = {EVAL_NAMES[view]: sha} | ({f"{EVAL_NAMES[view]}{META_SUFFIX}": meta} if meta else {})
+    (frozen / MANIFEST_NAME).write_text(json.dumps(manifest | entries, indent=2, sort_keys=True) + "\n")
     return sha
+
+
+def _disjointness_meta(view: str, source: Path) -> dict[str, Any]:
+    """The exact cross-split disjointness check plus any dedup sidecar, for the freeze manifest.
+
+    When a sibling ``train.parquet`` exists, computes the test rows whose exact text also appears in
+    train. For an enforced view (:data:`DISJOINT_ENFORCED_VIEWS` — the watcher frame, the E43 leak
+    locus) any overlap raises :class:`SplitLeakError`; for the others it is recorded as an overlap
+    count so a real leak stays visible without refusing a benign short-text collision. Also folds in
+    any dedup sidecar the builder wrote. Returns the ``.meta`` payload, empty when nothing applies.
+    """
+    import pyarrow.parquet as pq
+
+    meta: dict[str, Any] = {}
+    if (sidecar := source.parent / DEDUP_SIDECAR).exists():
+        meta["dedup"] = json.loads(sidecar.read_text())
+    train_source = source.parent / "train.parquet"
+    if train_source.exists():
+        test_texts = _view_row_texts(view, pq.read_table(source))
+        train_texts = _view_row_texts(view, pq.read_table(train_source))
+        leaked = set(exact_text_overlap(train_texts.values(), test_texts.values()))
+        leaked_ids = sorted(rid for rid, text in test_texts.items() if text.strip() in leaked)
+        if leaked_ids and view in DISJOINT_ENFORCED_VIEWS:
+            raise SplitLeakError(view, leaked_ids)
+        meta["disjoint_train_rows_checked"] = len(train_texts)
+        meta["train_eval_overlap"] = len(leaked_ids)
+    return meta
+
+
+def _view_row_texts(view: str, table: pa.Table) -> dict[str, str]:
+    """Each row's exact-disjointness text keyed by id: the flattened window for watcher, ``text`` else."""
+    match view:
+        case "watcher":
+            return {(row := WatcherRow.from_record(record)).id: row.gate_text for record in table.to_pylist()}
+        case _:
+            return {str(record["id"]): str(record["text"]) for record in table.to_pylist()}
 
 
 def load_frozen(view: str = "watcher", *, root: Path | None = None) -> pa.Table:
@@ -319,14 +390,22 @@ def steer_type_text(record: Mapping[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
-def build_steer_type_eval(*, dataset_dir: Path | None = None, seed: int = 1729) -> Path:
+def build_steer_type_eval(
+    *,
+    dataset_dir: Path | None = None,
+    seed: int = 1729,
+    embed: Embedder | None = None,
+    semantic_threshold: float = SEMANTIC_THRESHOLD,
+) -> Path:
     """Build the frozen steer-type eval source from the exported traces test split.
 
     One row per judged feedback moment: :func:`steer_type_text` as ``text`` and the
     judge's eleven-way ``category`` as the label. Near-duplicate inputs collapse to
     one seeded representative each (:func:`~cc_steer.retrain.data.near_dup_indices`),
-    then the test-split parquet ``freeze_eval("steer_type")`` freezes is written under
-    ``<dataset_dir>/steer_type/test.parquet``. Returns the written path.
+    with the embedding-cosine pass enabled when ``embed`` is supplied; the collapse
+    counts land in a ``dedup.json`` sidecar the freeze folds into the manifest, so the
+    prune is reported rather than silent. The test-split parquet ``freeze_eval`` reads
+    is written under ``<dataset_dir>/steer_type/test.parquet``. Returns the written path.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -348,7 +427,9 @@ def build_steer_type_eval(*, dataset_dir: Path | None = None, seed: int = 1729) 
         }
         for record in pq.read_table(source).to_pylist()
     ]
-    kept, _ = near_dup_indices([str(row["text"]) for row in rows], seed=seed)
+    kept, stats = near_dup_indices(
+        [str(row["text"]) for row in rows], seed=seed, embed=embed, semantic_threshold=semantic_threshold
+    )
     schema = pa.schema(
         [
             ("id", pa.string()),
@@ -363,10 +444,18 @@ def build_steer_type_eval(*, dataset_dir: Path | None = None, seed: int = 1729) 
     out = (dataset_dir or DATASET_DIR) / "steer_type" / "test.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist([rows[i] for i in kept], schema=schema), out)
+    _write_dedup_sidecar(out.parent, stats)
     return out
 
 
-def build_pick_eval(*, decisions_path: Path | None = None, dataset_dir: Path | None = None, seed: int = 1729) -> Path:
+def build_pick_eval(
+    *,
+    decisions_path: Path | None = None,
+    dataset_dir: Path | None = None,
+    seed: int = 1729,
+    embed: Embedder | None = None,
+    semantic_threshold: float = SEMANTIC_THRESHOLD,
+) -> Path:
     """Build the frozen pick-prediction eval source from the mined decisions dataset.
 
     One row per single-select, on-menu ``AskUserQuestion`` round in the test split:
@@ -402,7 +491,9 @@ def build_pick_eval(*, decisions_path: Path | None = None, dataset_dir: Path | N
         and len(row.chosen_index) == 1
         and len(row.options) >= 2
     ]
-    kept, _ = near_dup_indices([str(row["text"]) for row in rows], seed=seed)
+    kept, stats = near_dup_indices(
+        [str(row["text"]) for row in rows], seed=seed, embed=embed, semantic_threshold=semantic_threshold
+    )
     schema = pa.schema(
         [
             ("id", pa.string()),
@@ -418,20 +509,44 @@ def build_pick_eval(*, decisions_path: Path | None = None, dataset_dir: Path | N
     out = (dataset_dir or DATASET_DIR) / "pick" / "test.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist([rows[i] for i in kept], schema=schema), out)
+    _write_dedup_sidecar(out.parent, stats)
     return out
 
 
-def freeze_steer_type(*, dataset_dir: Path | None = None, root: Path | None = None, seed: int = 1729) -> str:
+def _write_dedup_sidecar(view_dir: Path, stats: DedupStats) -> None:
+    (view_dir / DEDUP_SIDECAR).write_text(json.dumps(stats.as_dict(), indent=2, sort_keys=True) + "\n")
+
+
+def freeze_steer_type(
+    *,
+    dataset_dir: Path | None = None,
+    root: Path | None = None,
+    seed: int = 1729,
+    embed: Embedder | None = None,
+    semantic_threshold: float = SEMANTIC_THRESHOLD,
+) -> str:
     """Build then freeze the steer-type eval; returns the frozen file's sha256."""
-    build_steer_type_eval(dataset_dir=dataset_dir, seed=seed)
+    build_steer_type_eval(dataset_dir=dataset_dir, seed=seed, embed=embed, semantic_threshold=semantic_threshold)
     return freeze_eval("steer_type", dataset_dir=dataset_dir, root=root)
 
 
 def freeze_pick(
-    *, decisions_path: Path | None = None, dataset_dir: Path | None = None, root: Path | None = None, seed: int = 1729
+    *,
+    decisions_path: Path | None = None,
+    dataset_dir: Path | None = None,
+    root: Path | None = None,
+    seed: int = 1729,
+    embed: Embedder | None = None,
+    semantic_threshold: float = SEMANTIC_THRESHOLD,
 ) -> str:
     """Build then freeze the pick-prediction eval; returns the frozen file's sha256."""
-    build_pick_eval(decisions_path=decisions_path, dataset_dir=dataset_dir, seed=seed)
+    build_pick_eval(
+        decisions_path=decisions_path,
+        dataset_dir=dataset_dir,
+        seed=seed,
+        embed=embed,
+        semantic_threshold=semantic_threshold,
+    )
     return freeze_eval("pick", dataset_dir=dataset_dir, root=root)
 
 
@@ -501,3 +616,331 @@ class PickFrame:
             n_options=np.array([int(record["n_options"]) for record in records], dtype=np.int64),
             digest=dataset_digest(records),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ArmComparison:
+    """A paired fast-DeLong comparison of two watchers on the frozen frame.
+
+    Both arms are compared on the fire scale (``fire = 1 - P(NO_STEER)``), so a higher score means
+    fire on a true-steer row. ``paired`` carries both AUCs, their delta, the covariance-aware
+    standard error, and — the point of persisting both arms — the pairing correlation ``rho``.
+    ``is_actionable`` applies the instrument card's two-part rule at ``frame_mde = mde(se_delta)``.
+
+    Attributes:
+        incumbent: The incumbent arm's version label.
+        candidate: The candidate arm's version label.
+        paired: The paired fast-DeLong result (``auc_a`` = incumbent, ``auc_b`` = candidate).
+        frame_mde: The frame's minimum detectable effect for this pairing, ``mde(se_delta)``.
+        is_actionable: Whether the delta clears the card's CI-excludes-zero-and-beats-MDE bar.
+    """
+
+    incumbent: str
+    candidate: str
+    paired: PairedDeLong
+    frame_mde: float
+    is_actionable: bool
+
+    def as_metrics(self) -> dict[str, float]:
+        """The comparison as flat journal metrics, keys prefixed ``paired_``."""
+        return {
+            "paired_incumbent_auc": self.paired.auc_a,
+            "paired_candidate_auc": self.paired.auc_b,
+            "paired_delta_auc": self.paired.delta,
+            "paired_se_delta": self.paired.se_delta,
+            "paired_rho": self.paired.rho,
+            "paired_ci_lo": self.paired.ci95[0],
+            "paired_ci_hi": self.paired.ci95[1],
+            "paired_frame_mde": self.frame_mde,
+            "paired_actionable": float(self.is_actionable),
+        }
+
+
+def compare_arms(
+    frame: EvalFrame, incumbent_nosteer: np.ndarray, candidate_nosteer: np.ndarray, *, incumbent: str, candidate: str
+) -> ArmComparison:
+    """Pair two arms' per-row ``P(NO_STEER)`` vectors on ``frame`` with fast-DeLong and the card rule.
+
+    Both vectors align to ``frame.ids``; they are flipped to the fire scale before the paired
+    test so the AUCs read as fire-vs-true-steer. Returns the :class:`ArmComparison` — both AUCs,
+    the delta, the measured ``rho``, and whether the delta is actionable at ``mde(se_delta)``.
+    """
+    paired = paired_delong(
+        frame.labels.astype(int),
+        1.0 - np.asarray(incumbent_nosteer, dtype=np.float64),
+        1.0 - np.asarray(candidate_nosteer, dtype=np.float64),
+    )
+    frame_mde = mde(paired.se_delta)
+    return ArmComparison(incumbent, candidate, paired, frame_mde, actionable(paired.delta, paired.se_delta, frame_mde))
+
+
+def comparison_path(incumbent: str, candidate: str, *, root: Path | None = None) -> Path:
+    """The paired-comparison artifact path: ``comparisons/<incumbent>__<candidate>.json``."""
+    return eval_root(root) / COMPARISONS_DIRNAME / f"{incumbent}__{candidate}.json"
+
+
+def write_comparison(
+    frame: EvalFrame,
+    comparison: ArmComparison,
+    incumbent_nosteer: np.ndarray,
+    candidate_nosteer: np.ndarray,
+    *,
+    root: Path | None = None,
+) -> Path:
+    """Persist both arms' per-row ``P(NO_STEER)`` and the paired stats — the single comparison writer.
+
+    Writes both vectors aligned to ``frame.ids`` so a rejected candidate's paired comparison is
+    reconstructable later, stamped with the frame digest. Returns the written path.
+    """
+    inc = np.asarray(incumbent_nosteer, dtype=np.float64)
+    cand = np.asarray(candidate_nosteer, dtype=np.float64)
+    path = comparison_path(comparison.incumbent, comparison.candidate, root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "dataset_digest": frame.digest,
+                    "incumbent": comparison.incumbent,
+                    "candidate": comparison.candidate,
+                },
+                "paired": comparison.as_metrics(),
+                "probs": {
+                    row_id: {"incumbent": float(inc[i]), "candidate": float(cand[i])}
+                    for i, row_id in enumerate(frame.ids)
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return path
+
+
+@dataclass(frozen=True, slots=True)
+class LabelRecord:
+    """One provenance-tagged label for a mined candidate row.
+
+    Attributes:
+        id: The candidate's stable id.
+        is_steering: The label — a true steer (``True``) or NO_STEER (``False``).
+        category: The steer category (empty for a negative).
+        provenance: The label's source, one of :data:`PROVENANCE_PRECEDENCE`.
+    """
+
+    id: str
+    is_steering: bool
+    category: str
+    provenance: Literal["human", "fable", "medium_judge"]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedLabel:
+    """A candidate's authoritative label after applying provenance precedence.
+
+    ``provenance`` is the winning source and is never ``medium_judge`` — a medium-judge label is
+    guidance only, so a row labelled only by the medium judge has no :class:`ResolvedLabel` and is
+    dropped. ``guidance`` records the medium judge's own call when present, and
+    ``agrees_with_guidance`` whether that call matched the authoritative label.
+    """
+
+    id: str
+    is_steering: bool
+    category: str
+    provenance: Literal["human", "fable"]
+    guidance: bool | None
+    agrees_with_guidance: bool | None
+
+
+def resolve_labels(records: Sequence[LabelRecord]) -> tuple[list[ResolvedLabel], list[str]]:
+    """Resolve per-id labels by provenance precedence; return ``(resolved, medium_only_dropped)``.
+
+    Each id's authoritative label is its highest-precedence non-guidance record (human over fable);
+    the medium judge attaches as guidance but never labels alone, so an id whose only source is the
+    medium judge is returned in ``medium_only_dropped``, never in ``resolved``.
+    """
+    by_id: dict[str, list[LabelRecord]] = defaultdict(list)
+    for record in records:
+        by_id[record.id].append(record)
+    resolved: list[ResolvedLabel] = []
+    medium_only: list[str] = []
+    for rid, recs in by_id.items():
+        authoritative = min(
+            (r for r in recs if r.provenance != GUIDANCE_PROVENANCE),
+            key=lambda r: PROVENANCE_PRECEDENCE.index(r.provenance),
+            default=None,
+        )
+        guidance = next((r for r in recs if r.provenance == GUIDANCE_PROVENANCE), None)
+        if authoritative is None:
+            medium_only.append(rid)
+            continue
+        resolved.append(
+            ResolvedLabel(
+                id=rid,
+                is_steering=authoritative.is_steering,
+                category=authoritative.category,
+                provenance=authoritative.provenance,  # type: ignore[arg-type]
+                guidance=guidance.is_steering if guidance else None,
+                agrees_with_guidance=guidance.is_steering == authoritative.is_steering if guidance else None,
+            )
+        )
+    return sorted(resolved, key=lambda r: r.id), sorted(medium_only)
+
+
+def hanley_mcneil_se(auc: float, n_pos: int, n_neg: int) -> float:
+    """The Hanley & McNeil (1982) analytic standard error of an AUC at ``(n_pos, n_neg)``.
+
+    Projects a frame's DeLong-scale SE before any scoring exists, from an assumed operating ``auc``
+    and the class counts — the sizing knob for a candidate frame.
+    """
+    if n_pos < 1 or n_neg < 1:
+        return float("inf")
+    q1 = auc / (2.0 - auc)
+    q2 = 2.0 * auc**2 / (1.0 + auc)
+    variance = (auc * (1 - auc) + (n_pos - 1) * (q1 - auc**2) + (n_neg - 1) * (q2 - auc**2)) / (n_pos * n_neg)
+    return math.sqrt(max(variance, 0.0))
+
+
+def projected_frame_mde(n_pos: int, n_neg: int, *, auc: float = PROJECTION_AUC, rho: float = PROJECTION_RHO) -> float:
+    """The projected paired minimum detectable effect for a candidate frame of ``(n_pos, n_neg)``.
+
+    Turns the Hanley-McNeil single-arm SE into a paired ``se_delta = se * sqrt(2(1 - rho))`` for two
+    equally-precise arms correlated at ``rho``, then feeds :func:`~cc_steer.instrument.mde`. This is
+    the number a candidate frame must drive under :data:`TARGET_MDE` before it is worth freezing.
+    """
+    return mde(hanley_mcneil_se(auc, n_pos, n_neg) * math.sqrt(2.0 * (1.0 - rho)))
+
+
+def negatives_for_target_mde(
+    n_pos: int,
+    *,
+    target_mde: float = TARGET_MDE,
+    auc: float = PROJECTION_AUC,
+    rho: float = PROJECTION_RHO,
+    cap: int = 200_000,
+) -> int:
+    """The fewest negatives that drive the projected paired MDE at or under ``target_mde``.
+
+    Projected MDE falls monotonically as negatives grow toward a floor set by ``n_pos``; when even
+    ``cap`` negatives cannot reach ``target_mde`` (the floor is above it), ``cap`` is returned.
+    """
+    if n_pos < 1:
+        return 0
+    if projected_frame_mde(n_pos, cap, auc=auc, rho=rho) > target_mde:
+        return cap
+    lo, hi = 1, cap
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if projected_frame_mde(n_pos, mid, auc=auc, rho=rho) <= target_mde:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+@dataclass(frozen=True, slots=True)
+class RebuildPlan:
+    """A projected, negative-rich candidate frame — computed, never frozen.
+
+    Attributes:
+        positive_ids: The authoritative true-steer rows admitted.
+        negative_ids: The chosen NO_STEER rows (authoritative or structural).
+        n_pos: ``len(positive_ids)``.
+        n_neg: ``len(negative_ids)``.
+        projected_mde: The projected paired MDE at this sizing.
+        target_mde: The MDE target the frame is sized against.
+        meets_target: Whether ``projected_mde <= target_mde``.
+        provenance_counts: Admitted-row counts by label source (plus ``structural`` negatives).
+        guidance_agree: Admitted rows where the medium-judge guidance matched the label.
+        guidance_disagree: Admitted rows where it disagreed.
+        medium_only_dropped: Candidates dropped for carrying only a medium-judge label.
+    """
+
+    positive_ids: tuple[str, ...]
+    negative_ids: tuple[str, ...]
+    n_pos: int
+    n_neg: int
+    projected_mde: float
+    target_mde: float
+    meets_target: bool
+    provenance_counts: Mapping[str, int]
+    guidance_agree: int
+    guidance_disagree: int
+    medium_only_dropped: int
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        """Every admitted row id, positives before negatives."""
+        return self.positive_ids + self.negative_ids
+
+
+def plan_rebuild_frame(
+    labels: Sequence[LabelRecord],
+    negative_pool: Sequence[str],
+    *,
+    target_mde: float = TARGET_MDE,
+    projection_auc: float = PROJECTION_AUC,
+    projection_rho: float = PROJECTION_RHO,
+    min_negative_ratio: float = 1.0,
+    seed: int = 1729,
+) -> RebuildPlan:
+    """Size a negative-rich candidate frame from mined labels and a negative pool, reporting its MDE.
+
+    Resolves ``labels`` by provenance precedence (human > fable > medium-judge guidance), admits
+    every authoritative true-steer, then draws negatives — authoritative negatives first, then the
+    structural ``negative_pool`` — until both the ``min_negative_ratio`` floor and the count that
+    drives the projected paired MDE under ``target_mde`` are met, capped by what the pool holds. The
+    returned :class:`RebuildPlan` reports the projected MDE and provenance mix so the frame can be
+    judged before anything is frozen; it never freezes or cuts a frame over.
+    """
+    resolved, medium_only = resolve_labels(labels)
+    positives = [r for r in resolved if r.is_steering]
+    positive_ids = {r.id for r in positives}
+    resolved_negatives = [r for r in resolved if not r.is_steering]
+    negative_provenance = {r.id: r.provenance for r in resolved_negatives}
+    authoritative = [r.id for r in resolved_negatives if r.id not in positive_ids]
+    structural = [
+        nid for nid in dict.fromkeys(negative_pool) if nid not in positive_ids and nid not in set(authoritative)
+    ]
+    n_pos = len(positives)
+    want = max(
+        math.ceil(min_negative_ratio * n_pos),
+        negatives_for_target_mde(n_pos, target_mde=target_mde, auc=projection_auc, rho=projection_rho),
+    )
+    n_neg = min(want, len(authoritative) + len(structural))
+    rng = np.random.default_rng(seed)
+    fill = n_neg - min(n_neg, len(authoritative))
+    chosen = (
+        sorted(
+            [
+                *(
+                    authoritative
+                    if fill
+                    else (authoritative[i] for i in rng.choice(len(authoritative), size=n_neg, replace=False))
+                ),
+                *([structural[i] for i in rng.choice(len(structural), size=fill, replace=False)] if fill else []),
+            ]
+        )
+        if n_neg
+        else []
+    )
+    projected = projected_frame_mde(n_pos, n_neg, auc=projection_auc, rho=projection_rho)
+    provenance_counts = Counter(r.provenance for r in positives)
+    for nid in chosen:
+        provenance_counts[negative_provenance.get(nid, "structural")] += 1
+    frame_ids = positive_ids | set(chosen)
+    guided = [r for r in resolved if r.id in frame_ids and r.agrees_with_guidance is not None]
+    return RebuildPlan(
+        positive_ids=tuple(sorted(positive_ids)),
+        negative_ids=tuple(chosen),
+        n_pos=n_pos,
+        n_neg=n_neg,
+        projected_mde=projected,
+        target_mde=target_mde,
+        meets_target=projected <= target_mde,
+        provenance_counts=dict(provenance_counts),
+        guidance_agree=sum(1 for r in guided if r.agrees_with_guidance),
+        guidance_disagree=sum(1 for r in guided if not r.agrees_with_guidance),
+        medium_only_dropped=len(medium_only),
+    )

@@ -33,7 +33,7 @@ from cc_steer.rendering import DRAFT_CHAR_CAP, Message, tail_messages
 from cc_steer.watcher.cascade import flattened
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     import pyarrow as pa
 
@@ -49,8 +49,11 @@ JACCARD_THRESHOLD = 0.8
 NUM_PERM = 128
 BANDS = 32
 MINHASH_PRIME = 2_147_483_647  # 2**31 - 1, keeps a*H products inside uint64
+SEMANTIC_THRESHOLD = 0.92  # cosine floor for the embedding near-dup pass — conservative to avoid over-pruning
 
 DatasetDigest = NewType("DatasetDigest", str)
+
+type Embedder = Callable[[Sequence[str]], np.ndarray]
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,13 +106,21 @@ class WatcherRow:
 
 @dataclass(frozen=True, slots=True)
 class DedupStats:
-    """Within-train near-dup collapse counts."""
+    """Near-dup collapse counts, with the semantic pass's marginal removals broken out.
+
+    ``n_semantic_removed`` is how many rows the embedding pass collapsed *beyond* what
+    char-5-gram MinHash alone would have removed — the number that must be watched so the
+    semantic pass reports rather than silently over-prunes. It is 0 (and
+    ``semantic_threshold`` is ``None``) whenever no embedder ran.
+    """
 
     n_in: int
     n_kept: int
     n_removed: int
     n_clusters: int
     n_multi_member_clusters: int
+    n_semantic_removed: int = 0
+    semantic_threshold: float | None = None
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -118,6 +129,8 @@ class DedupStats:
             "dedup_n_removed": float(self.n_removed),
             "dedup_n_clusters": float(self.n_clusters),
             "dedup_n_multi_member_clusters": float(self.n_multi_member_clusters),
+            "dedup_n_semantic_removed": float(self.n_semantic_removed),
+            **({"dedup_semantic_threshold": self.semantic_threshold} if self.semantic_threshold is not None else {}),
         }
 
 
@@ -265,7 +278,12 @@ def jaccard(a: set[int], b: set[int]) -> float:
 
 
 def near_dup_representatives(
-    rows: Sequence[WatcherRow], *, threshold: float = JACCARD_THRESHOLD, seed: int = SEED
+    rows: Sequence[WatcherRow],
+    *,
+    threshold: float = JACCARD_THRESHOLD,
+    seed: int = SEED,
+    embed: Embedder | None = None,
+    semantic_threshold: float = SEMANTIC_THRESHOLD,
 ) -> tuple[list[int], DedupStats]:
     """Collapse near-duplicate ``draft_text`` rows to one seeded representative each.
 
@@ -274,12 +292,24 @@ def near_dup_representatives(
     seeded member survives per cluster. Returns the kept indices (sorted) and the
     collapse counts; deterministic in ``seed``. Empty-shingle rows (a context tail
     below the 5-char n-gram floor) never union, so they each survive as singletons.
+    ``embed`` enables the semantic near-dup pass (see :func:`near_dup_indices`).
     """
-    return near_dup_indices([row.draft_text(DRAFT_CHAR_CAP) for row in rows], threshold=threshold, seed=seed)
+    return near_dup_indices(
+        [row.draft_text(DRAFT_CHAR_CAP) for row in rows],
+        threshold=threshold,
+        seed=seed,
+        embed=embed,
+        semantic_threshold=semantic_threshold,
+    )
 
 
 def near_dup_indices(
-    texts: Sequence[str], *, threshold: float = JACCARD_THRESHOLD, seed: int = SEED
+    texts: Sequence[str],
+    *,
+    threshold: float = JACCARD_THRESHOLD,
+    seed: int = SEED,
+    embed: Embedder | None = None,
+    semantic_threshold: float = SEMANTIC_THRESHOLD,
 ) -> tuple[list[int], DedupStats]:
     """Collapse near-duplicate ``texts`` to one seeded representative index each.
 
@@ -287,6 +317,12 @@ def near_dup_indices(
     eval frame builders: any view that can render one string per row (a watcher
     tail, a rendered ask, a classification input) deduplicates through the same
     MinHash/LSH self-join, so every frame inherits one collapse contract.
+
+    When ``embed`` is supplied, an embedding-cosine pass runs *on top of* the MinHash
+    clusters: any pair whose vectors clear ``semantic_threshold`` unions too, catching
+    paraphrases that share no char-5-gram. The returned :class:`DedupStats` breaks out
+    ``n_semantic_removed`` — the rows collapsed beyond MinHash alone — so a run can see
+    exactly what the semantic pass pruned rather than trusting it blindly.
     """
     n = len(texts)
     if n == 0:
@@ -294,16 +330,88 @@ def near_dup_indices(
     sets = [shingles(text) for text in texts]
     sigs = _minhash_signatures(sets, seed=seed)
     candidates = _lsh_candidates(sigs, sigs)
-    pairs = [(i, j) for i in range(n) for j in candidates[i] if j > i and jaccard(sets[i], sets[j]) >= threshold]
+    minhash_pairs = [
+        (i, j) for i in range(n) for j in candidates[i] if j > i and jaccard(sets[i], sets[j]) >= threshold
+    ]
+    if embed is None:
+        kept, clusters = _collapse(n, minhash_pairs, seed=seed)
+        return kept, _dedup_stats(n, kept, clusters, n_semantic_removed=0, semantic_threshold=None)
+    minhash_kept, _ = _collapse(n, minhash_pairs, seed=seed)
+    kept, clusters = _collapse(
+        n, minhash_pairs + semantic_near_dup_pairs(texts, embed, threshold=semantic_threshold), seed=seed
+    )
+    return kept, _dedup_stats(
+        n, kept, clusters, n_semantic_removed=len(minhash_kept) - len(kept), semantic_threshold=semantic_threshold
+    )
+
+
+def semantic_near_dup_pairs(texts: Sequence[str], embed: Embedder, *, threshold: float) -> list[tuple[int, int]]:
+    """The ``(i, j)`` index pairs whose embedding cosine similarity clears ``threshold``.
+
+    Embeds every text once, L2-normalizes, and returns each upper-triangular pair at or
+    above ``threshold``. A zero vector never matches (its normalized cosine is 0).
+    """
+    if len(texts) < 2:
+        return []
+    vectors = np.asarray(embed(list(texts)), dtype=np.float64)
+    unit = vectors / np.where((norms := np.linalg.norm(vectors, axis=1, keepdims=True)) == 0.0, 1.0, norms)
+    sims = unit @ unit.T
+    return [(int(i), int(j)) for i, j in zip(*np.triu_indices(len(texts), k=1)) if sims[i, j] >= threshold]
+
+
+def exact_text_overlap(reference: Sequence[str], query: Sequence[str]) -> list[str]:
+    """The whitespace-stripped texts present in both ``reference`` and ``query`` (sorted, unique).
+
+    The exact cross-split leak check: a ``query`` (eval) text that also appears in
+    ``reference`` (train) is a train/eval overlap, whatever the ids differ to.
+    """
+    seen = {text.strip() for text in reference if text.strip()}
+    return sorted({stripped for text in query if (stripped := text.strip()) in seen})
+
+
+def _collapse(n: int, pairs: Sequence[tuple[int, int]], *, seed: int) -> tuple[list[int], dict[int, list[int]]]:
     roots = _union_find_roots(n, pairs)
     clusters: dict[int, list[int]] = defaultdict(list)
     for i in range(n):
         clusters[roots[i]].append(i)
     rng = np.random.default_rng(seed)
     kept = sorted(clusters[root][int(rng.integers(0, len(clusters[root])))] for root in sorted(clusters))
-    n_multi = sum(1 for members in clusters.values() if len(members) > 1)
-    return kept, DedupStats(
-        n_in=n, n_kept=len(kept), n_removed=n - len(kept), n_clusters=len(clusters), n_multi_member_clusters=n_multi
+    return kept, clusters
+
+
+def _dedup_stats(
+    n: int,
+    kept: Sequence[int],
+    clusters: Mapping[int, list[int]],
+    *,
+    n_semantic_removed: int,
+    semantic_threshold: float | None,
+) -> DedupStats:
+    return DedupStats(
+        n_in=n,
+        n_kept=len(kept),
+        n_removed=n - len(kept),
+        n_clusters=len(clusters),
+        n_multi_member_clusters=sum(1 for members in clusters.values() if len(members) > 1),
+        n_semantic_removed=n_semantic_removed,
+        semantic_threshold=semantic_threshold,
+    )
+
+
+def sentence_transformer_embedder(
+    model_id: str = "sentence-transformers/all-MiniLM-L6-v2", *, device: str | None = None
+) -> Embedder:
+    """An :data:`Embedder` backed by a local ``sentence-transformers`` model (the ``embed`` extra).
+
+    Loads ``model_id`` once and returns a callable that embeds a batch of texts to a
+    ``(n, dim)`` float matrix. ``sentence-transformers`` is imported lazily so importing
+    this module never drags it in.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    model = SentenceTransformer(model_id, device=device)
+    return lambda texts: np.asarray(
+        model.encode(list(texts), normalize_embeddings=False, show_progress_bar=False), dtype=np.float64
     )
 
 

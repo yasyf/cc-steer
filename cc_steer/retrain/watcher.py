@@ -135,7 +135,14 @@ class WatcherRecipe:
     def __post_init__(self) -> None:
         object.__setattr__(self, "checkpoint_fracs", tuple(self.checkpoint_fracs))
         for name in (
-            "rank", "batch_size", "epochs", "max_tokens", "render_version", "val_n", "diagnostic_rows", "seed"
+            "rank",
+            "batch_size",
+            "epochs",
+            "max_tokens",
+            "render_version",
+            "val_n",
+            "diagnostic_rows",
+            "seed",
         ):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} must be an int, got {getattr(self, name)!r}")
@@ -244,9 +251,7 @@ def register_watcher(
     )
 
 
-def seed_incumbent_probs(
-    path: Path, *, version: str, expected_render: int, eval_root: Path | None = None
-) -> Path:
+def seed_incumbent_probs(path: Path, *, version: str, expected_render: int, eval_root: Path | None = None) -> Path:
     """Validate an external incumbent probs cache against the frozen frame, then write it through the store.
 
     The cache is the lab's flat ``{row_id: P(NO_STEER)}`` map. It must cover the current
@@ -415,6 +420,16 @@ def retrain_watcher(
     eval_auc = promotion.sentinel_auc(frame.labels, 1.0 - served_arr)
     diag_suffix = f"; {diag_note}" if diag_note else ""
 
+    # Persist both arms' per-row probs and run the paired fast-DeLong the moment both exist, so a
+    # rejected candidate's comparison survives and the promotion journal carries rho + actionability.
+    comparison_metrics: dict[str, float] = {}
+    if incumbent_gate is not None:
+        comparison = evalset.compare_arms(
+            frame, incumbent_gate.probs, served_arr, incumbent=incumbent_gate.version, candidate="candidate"
+        )
+        evalset.write_comparison(frame, comparison, incumbent_gate.probs, served_arr, root=eval_root)
+        comparison_metrics = comparison.as_metrics()
+
     if incumbent_gate is None:
         if not (np.isfinite(eval_auc) and eval_auc > 0.5):
             raise WatcherRetrainError(
@@ -429,7 +444,7 @@ def retrain_watcher(
             f"rejected ({verdict.reason}){diag_suffix}{eval_drop_suffix}",
             dataset_digest=digest,
             hf_revision=hf_revision,
-            metrics=verdict.stats | diagnostic | eval_drop_metrics,
+            metrics=verdict.stats | diagnostic | eval_drop_metrics | comparison_metrics,
             state_dir=state_dir,
         )
     else:
@@ -471,8 +486,11 @@ def retrain_watcher(
         f"{diag_suffix}{eval_drop_suffix}",
         dataset_digest=digest,
         hf_revision=hf_revision,
-        metrics=gate_stats | diagnostic | {"tinker_val_auc": best_val_auc, "threshold_budget": threshold}
-        | eval_drop_metrics,
+        metrics=gate_stats
+        | diagnostic
+        | {"tinker_val_auc": best_val_auc, "threshold_budget": threshold}
+        | eval_drop_metrics
+        | comparison_metrics,
         version=info.version,
         state_dir=state_dir,
     )
