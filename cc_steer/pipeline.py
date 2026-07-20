@@ -32,8 +32,8 @@ if TYPE_CHECKING:
     from cc_steer.store import FeedbackStore
 
 MIRRORS_DIR = Path.home() / ".cc-steer" / "mirrors"
-TRIAGE_LIMIT = 400
-REFINE_LIMIT = 400
+TRIAGE_LIMIT = 300
+REFINE_LIMIT = 200
 ENRICH_LIMIT = 200
 NEGATIVE_SESSIONS = 200
 AUDIT_BUDGET = 60
