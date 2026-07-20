@@ -1,0 +1,7 @@
+# Local lab dir
+/lab
+
+# Codex ask scratch
+.codex-scratch/
+codex-q-*
+codex-r-*
