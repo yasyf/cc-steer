@@ -275,10 +275,23 @@ def near_dup_representatives(
     collapse counts; deterministic in ``seed``. Empty-shingle rows (a context tail
     below the 5-char n-gram floor) never union, so they each survive as singletons.
     """
-    n = len(rows)
+    return near_dup_indices([row.draft_text(DRAFT_CHAR_CAP) for row in rows], threshold=threshold, seed=seed)
+
+
+def near_dup_indices(
+    texts: Sequence[str], *, threshold: float = JACCARD_THRESHOLD, seed: int = SEED
+) -> tuple[list[int], DedupStats]:
+    """Collapse near-duplicate ``texts`` to one seeded representative index each.
+
+    The text-addressed core shared by :func:`near_dup_representatives` and the frozen
+    eval frame builders: any view that can render one string per row (a watcher
+    tail, a rendered ask, a classification input) deduplicates through the same
+    MinHash/LSH self-join, so every frame inherits one collapse contract.
+    """
+    n = len(texts)
     if n == 0:
         return [], DedupStats(0, 0, 0, 0, 0)
-    sets = [shingles(row.draft_text(DRAFT_CHAR_CAP)) for row in rows]
+    sets = [shingles(text) for text in texts]
     sigs = _minhash_signatures(sets, seed=seed)
     candidates = _lsh_candidates(sigs, sigs)
     pairs = [(i, j) for i in range(n) for j in candidates[i] if j > i and jaccard(sets[i], sets[j]) >= threshold]
@@ -287,9 +300,7 @@ def near_dup_representatives(
     for i in range(n):
         clusters[roots[i]].append(i)
     rng = np.random.default_rng(seed)
-    kept = sorted(
-        clusters[root][int(rng.integers(0, len(clusters[root])))] for root in sorted(clusters)
-    )
+    kept = sorted(clusters[root][int(rng.integers(0, len(clusters[root])))] for root in sorted(clusters))
     n_multi = sum(1 for members in clusters.values() if len(members) > 1)
     return kept, DedupStats(
         n_in=n, n_kept=len(kept), n_removed=n - len(kept), n_clusters=len(clusters), n_multi_member_clusters=n_multi

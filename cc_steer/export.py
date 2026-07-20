@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,13 +23,15 @@ from typing import TYPE_CHECKING, TypedDict
 
 from cc_transcript.context import ContextWindow
 from cc_transcript.corrections import CorrectionLog
-from cc_transcript.ids import EventUuid, SessionId
+from cc_transcript.discovery import TranscriptExpiredError
+from cc_transcript.ids import EventRef, EventUuid, SessionId
+from cc_transcript.models import AssistantEvent
+from cc_transcript.render import Budget, clip
 from datasets import Dataset, DatasetDict, Features, Value
 from huggingface_hub import HfApi
 
-from cc_steer.enrich import SOURCE
+from cc_steer.enrich import SOURCE, load_activity
 from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
-from cc_steer.retrain.data import HF_PUSH_NAME
 from cc_steer.rendering import (
     NO_STEER,
     Message,
@@ -45,11 +48,13 @@ from cc_steer.rendering import (
     watcher_prompt,
 )
 from cc_steer.report import project_label
+from cc_steer.retrain.data import HF_PUSH_NAME
 from cc_steer.triage import AUDIT_VERSION, PROMPT_VERSION, STEERING_CATEGORIES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from cc_transcript.activity import Turn
     from cc_transcript.corrections import Correction
 
     from cc_steer.store import FeedbackStore
@@ -206,11 +211,14 @@ CONFIG_USES = {
     "kto": "TRL unpaired preference over every judged event; the only view that uses the noise negatives.",
     "gate": "Turn-level steer/no-steer classification text for the always-on gate, with rewound positive windows.",
     "watcher": "Context + agent action → steering direction or the `NO_STEER` sentinel, for the generative watcher.",
+    "trajectory": "One row per session turn — prompt, assistant digest, tool summary — flagging the steering turns.",
 }
 
 MINED_CONFIDENCE = 1.0
 LIVE_SOURCE = "live_reaction"
 LIVE_EMPTY_WINDOW_REASON = "live_window_render_empty"
+TRAJECTORY_UNMAPPED_REASON = "trajectory_anchor_unmapped"
+TRAJECTORY_BUDGET = Budget(turn_chars=2000, tool_chars=2000)
 
 # reaction kind -> (label bucket, fire label, confidence); expired carries no label.
 LIVE_LABEL: dict[str, tuple[str, bool, float]] = {
@@ -330,6 +338,20 @@ class KtoRow(TypedDict):
     label: bool
     id: str
     category: str
+
+
+class TrajectoryRow(TypedDict):
+    id: str
+    session_id: str
+    turn_index: int
+    prompt: str
+    assistant_digest: str
+    tool_summary: str
+    n_edits: int
+    steer_label: bool
+    steer_category: str
+    steer_event_uuid: str
+    split: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -700,6 +722,111 @@ def live_gate_row(reaction: Mapping[str, object]) -> GateRow | None:
     }
 
 
+def turn_tool_summary(turn: Turn) -> str:
+    """A compact per-turn tool tally: each tool name with its count when repeated, name-sorted."""
+    counts = Counter(use.call.name for use in turn.tool_uses)
+    return ", ".join(f"{name}×{count}" if count > 1 else name for name, count in sorted(counts.items()))
+
+
+def turn_assistant_digest(turn: Turn, *, budget: Budget) -> str:
+    """The turn's assistant prose joined and clipped to the turn budget."""
+    return clip(
+        "\n".join(event.text for event in turn.events if isinstance(event, AssistantEvent) and event.text),
+        budget.turn_chars,
+    )
+
+
+def turn_is_substantive(turn: Turn) -> bool:
+    return bool(
+        turn.prompt.strip()
+        or turn.tool_uses
+        or any(isinstance(event, AssistantEvent) and event.text.strip() for event in turn.events)
+    )
+
+
+def trajectory_turn_row(
+    turn: Turn, *, session_id: str, split: str, steer_turns: Mapping[int, tuple[str, str]], budget: Budget
+) -> TrajectoryRow:
+    category, event_uuid = steer_turns.get(turn.index, ("", ""))
+    return {
+        "id": f"{session_id}:{turn.index}",
+        "session_id": session_id,
+        "turn_index": turn.index,
+        "prompt": clip(turn.prompt, budget.turn_chars),
+        "assistant_digest": turn_assistant_digest(turn, budget=budget),
+        "tool_summary": turn_tool_summary(turn),
+        "n_edits": len(turn.edits),
+        "steer_label": turn.index in steer_turns,
+        "steer_category": category,
+        "steer_event_uuid": event_uuid,
+        "split": split,
+    }
+
+
+async def session_trajectory(
+    session_id: str, anchors: Sequence[Mapping[str, str]], *, origin_path: str | None, budget: Budget
+) -> tuple[list[TrajectoryRow], int]:
+    """One session's turns as trajectory rows, plus the count of anchors that fell in no turn.
+
+    Loads the session's activity from the transcript the anchors were mined from and
+    maps each steering anchor to its turn via :meth:`~cc_transcript.activity.SessionActivity.turn_of`.
+    An anchor whose event was compacted away or lives in a sidechain resolves to None
+    and is counted — never silently dropped. An expired transcript yields no rows. Fully
+    empty turns — no prompt, assistant prose, or tool call — are skipped as noise.
+    """
+    try:
+        activity = await load_activity(SessionId(session_id), origin_path)
+    except TranscriptExpiredError:
+        return [], 0
+    steer_turns: dict[int, tuple[str, str]] = {}
+    unmapped = 0
+    for anchor in anchors:
+        turn = activity.turn_of(EventRef(SessionId(session_id), EventUuid(anchor["event_uuid"])))
+        if turn is None:
+            unmapped += 1
+            continue
+        steer_turns.setdefault(turn.index, (anchor["category"], anchor["event_uuid"]))
+    split = split_of(session_id)
+    rows = [
+        trajectory_turn_row(turn, session_id=session_id, split=split, steer_turns=steer_turns, budget=budget)
+        for turn in activity.turns
+        if turn_is_substantive(turn)
+    ]
+    return rows, unmapped
+
+
+async def trajectory_rows(
+    traces: Sequence[Trace], *, budget: Budget = TRAJECTORY_BUDGET
+) -> tuple[dict[str, list[TrajectoryRow]], int]:
+    """Every steering session's turns as per-split trajectory rows, plus the unmapped-anchor count.
+
+    Bounds transcript I/O to the sessions carrying at least one steering anchor: each
+    such session's turns become rows, its steering anchors flag the turns they land on,
+    and every anchor that maps to no turn is tallied into the returned count so the
+    export reports the loss loudly.
+    """
+    anchors_by_session: dict[str, list[dict[str, str]]] = {}
+    origin_by_session: dict[str, str | None] = {}
+    for trace in traces:
+        if not trace["is_steering"]:
+            continue
+        session = trace["session_id"]
+        anchors_by_session.setdefault(session, []).append(
+            {"event_uuid": trace["event_uuid"], "category": trace["category"]}
+        )
+        origin_by_session.setdefault(session, json.loads(trace["meta"]).get("origin_path"))
+    by_split: dict[str, list[TrajectoryRow]] = {split: [] for split in SPLITS}
+    unmapped = 0
+    for session, anchors in anchors_by_session.items():
+        rows, session_unmapped = await session_trajectory(
+            session, anchors, origin_path=origin_by_session[session], budget=budget
+        )
+        unmapped += session_unmapped
+        for row in rows:
+            by_split[row["split"]].append(row)
+    return by_split, unmapped
+
+
 def config_rows(
     traces: list[Trace],
     gate_samples: Sequence[Mapping[str, object]] = (),
@@ -803,6 +930,21 @@ def config_features() -> dict[str, Features]:
             }
             | keys
         ),
+        "trajectory": Features(
+            {
+                "id": Value("string"),
+                "session_id": Value("string"),
+                "turn_index": Value("int64"),
+                "prompt": Value("string"),
+                "assistant_digest": Value("string"),
+                "tool_summary": Value("string"),
+                "n_edits": Value("int64"),
+                "steer_label": Value("bool"),
+                "steer_category": Value("string"),
+                "steer_event_uuid": Value("string"),
+                "split": Value("string"),
+            }
+        ),
     }
 
 
@@ -879,7 +1021,10 @@ async def export(
     rows. Delivered-steer reactions add ``live_reaction`` rows to ``watcher`` and
     ``gate``, each carrying a ``label_confidence`` (mined rows carry ``1.0``). Labelled
     reactions without substantive ``window_render`` content are excluded and counted
-    by quarantine reason in the report. Every config is written as per-split parquet
+    by quarantine reason in the report. The ``trajectory`` config rehydrates every
+    steering session's transcript into one row per turn, flagging the turns a steer
+    landed on; anchors that map to no turn (compacted or in a sidechain) are counted
+    under :data:`TRAJECTORY_UNMAPPED_REASON`. Every config is written as per-split parquet
     under ``out/<config>/<split>.parquet`` next to a generated dataset card at
     ``out/README.md``; with ``push_to``, every config is also pushed to that private
     HuggingFace repo and the card uploaded. Splits are a deterministic group split
@@ -906,12 +1051,11 @@ async def export(
         traces,
         gate_samples,
         live_watcher=[
-            row
-            for reaction in live_reactions
-            if (row := live_watcher_row(reaction, reply_texts)) is not None
+            row for reaction in live_reactions if (row := live_watcher_row(reaction, reply_texts)) is not None
         ],
         live_gate=[row for reaction in live_reactions if (row := live_gate_row(reaction)) is not None],
     )
+    by_config["trajectory"], trajectory_unmapped = await trajectory_rows(traces)
     built = {
         config: DatasetDict(
             {
@@ -949,6 +1093,7 @@ async def export(
         counts=counts,
         out=out,
         pushed=push_to is not None,
-        quarantined={LIVE_EMPTY_WINDOW_REASON: len(labelled_reactions) - len(live_reactions)},
+        quarantined={LIVE_EMPTY_WINDOW_REASON: len(labelled_reactions) - len(live_reactions)}
+        | ({TRAJECTORY_UNMAPPED_REASON: trajectory_unmapped} if trajectory_unmapped else {}),
         hf_revision=hf_revision,
     )

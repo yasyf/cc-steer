@@ -13,8 +13,11 @@ from cc_transcript.corrections import Correction, CorrectionLog
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 from cc_transcript.mining import DedupKey
 
+import cc_steer.export as export_mod
 from cc_steer.export import (
     LIVE_EMPTY_WINDOW_REASON,
+    TRAJECTORY_BUDGET,
+    TRAJECTORY_UNMAPPED_REASON,
     EmptyWatcherPrompt,
     ask_message_of,
     dpo_row,
@@ -24,8 +27,10 @@ from cc_steer.export import (
     kto_row,
     live_gate_row,
     live_watcher_row,
+    session_trajectory,
     sft_row,
     split_of,
+    trajectory_rows,
     watcher_negative,
     watcher_positive,
 )
@@ -243,6 +248,7 @@ async def out(store: FeedbackStore, tmp_path: Path) -> Path:
         "kto": {"train": 3, "test": 1},
         "gate": {"train": 0, "test": 0},
         "watcher": {"train": 1, "test": 1},
+        "trajectory": {"train": 0, "test": 0},  # seeded sessions' transcripts are not on disk
     }
     assert report.pushed is False
     assert report.hf_revision is None
@@ -431,10 +437,10 @@ async def test_dataset_card_documents_configs_categories_and_splits(out: Path) -
 
 async def test_export_survives_a_corpus_with_zero_judged_events(store: FeedbackStore, tmp_path: Path) -> None:
     report = await export(store, out=tmp_path / "dataset")
-    configs = ("traces", "sft", "dpo", "kto", "gate", "watcher")
+    configs = ("traces", "sft", "dpo", "kto", "gate", "watcher", "trajectory")
     assert report.counts == {config: {"train": 0, "test": 0} for config in configs}
     assert report.pushed is False
-    for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
+    for config in configs:
         assert rows(report.out, config, "train") == [] and rows(report.out, config, "test") == []
     card = (report.out / "README.md").read_text()
     assert "0 train / 0 test" in card
@@ -468,9 +474,17 @@ async def test_export_push_uploads_every_config_and_the_card(
     await seed(store)
     report = await export(store, out=tmp_path / "dataset", push_to="u/r")
     assert report.pushed is True
-    assert report.hf_revision == "sha-watcher"
-    assert len(pushes) == 6
-    assert {push["config_name"] for push in pushes} == {"traces", "sft", "dpo", "kto", "gate", "watcher"}
+    assert report.hf_revision == "sha-trajectory"
+    assert len(pushes) == 7
+    assert {push["config_name"] for push in pushes} == {
+        "traces",
+        "sft",
+        "dpo",
+        "kto",
+        "gate",
+        "watcher",
+        "trajectory",
+    }
     assert all(push["repo_id"] == "u/r" and push["private"] is True for push in pushes)
     assert uploads == [
         {
@@ -483,7 +497,7 @@ async def test_export_push_uploads_every_config_and_the_card(
     sidecar = json.loads((report.out / HF_PUSH_NAME).read_text())
     ts = datetime.fromisoformat(sidecar.pop("ts"))
     assert ts.tzinfo is not None and ts.utcoffset() == timedelta(0)
-    assert sidecar == {"hf_revision": "sha-watcher", "repo_id": "u/r"}
+    assert sidecar == {"hf_revision": "sha-trajectory", "repo_id": "u/r"}
 
 
 async def test_export_push_failure_propagates_after_local_write(
@@ -499,7 +513,7 @@ async def test_export_push_failure_propagates_after_local_write(
     (dataset_dir / HF_PUSH_NAME).write_text(json.dumps({"hf_revision": "sha-old", "repo_id": "u/r"}))
     with pytest.raises(RuntimeError, match="hub is down"):
         await export(store, out=dataset_dir, push_to="u/r")
-    for config in ("traces", "sft", "dpo", "kto", "gate", "watcher"):
+    for config in ("traces", "sft", "dpo", "kto", "gate", "watcher", "trajectory"):
         assert {path.name for path in (dataset_dir / config).glob("*.parquet")} == {"train.parquet", "test.parquet"}
     assert (dataset_dir / "README.md").is_file()
     assert hf_revision(dataset_dir=dataset_dir) is None
@@ -611,7 +625,7 @@ def trace_for(
                 }
             )
         ),
-      }
+    }
 
 
 def empty_prompt_trace() -> dict[str, object]:
@@ -712,3 +726,112 @@ def test_gate_row_raises_on_a_window_with_no_substantive_content() -> None:
     with pytest.raises(EmptyWatcherPrompt) as raised:
         gate_row(gate_input("s2", before=(turn("assistant", ""),), trigger=turn("user", "no, do it differently")))
     assert (raised.value.view, raised.value.dedup_key, raised.value.session_id) == ("gate", "s2", TRAIN_SESSION)
+
+
+def trajectory_activity() -> object:
+    from cc_transcript.activity import SessionActivity
+
+    from tests import builders
+
+    entries = [
+        builders.user_text("do the thing", uuid="uA"),
+        builders.assistant_tool_use(
+            "t1", "Edit", {"file_path": "/repo/a.py", "old_string": "x", "new_string": "y"}, uuid="aA"
+        ),
+        builders.tool_result("t1", "ok"),
+        builders.user_text("no, revert that", uuid="uB"),
+        builders.assistant_text("reverted the change", uuid="aB"),
+        builders.user_text("looks good", uuid="uC"),
+        builders.assistant_text("thanks", uuid="aC"),
+    ]
+    return SessionActivity.from_events(SessionId("sess-traj"), builders.parse(entries))
+
+
+@pytest.mark.unit
+async def test_session_trajectory_maps_anchors_and_counts_the_compaction_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    activity = trajectory_activity()
+
+    async def fake_load(session_id: object, origin_path: object) -> object:
+        return activity
+
+    monkeypatch.setattr(export_mod, "load_activity", fake_load)
+    anchors = [
+        {"event_uuid": "uB", "category": "wrong_approach"},  # lands on the revert turn
+        {"event_uuid": "ghost-uuid", "category": "direction"},  # compacted away — in no turn
+    ]
+    rows, unmapped = await session_trajectory(
+        "sess-traj", anchors, origin_path="/mirror/s.jsonl", budget=TRAJECTORY_BUDGET
+    )
+
+    assert unmapped == 1  # the ghost anchor is counted, never silently dropped
+    steered = [row for row in rows if row["steer_label"]]
+    assert len(steered) == 1
+    assert steered[0]["steer_category"] == "wrong_approach"
+    assert steered[0]["steer_event_uuid"] == "uB"
+    assert "revert" in steered[0]["prompt"] and "reverted the change" in steered[0]["assistant_digest"]
+    edited = [row for row in rows if row["n_edits"] == 1]
+    assert len(edited) == 1 and edited[0]["tool_summary"] == "Edit"
+    assert {row["split"] for row in rows} == {split_of("sess-traj")}
+
+
+@pytest.mark.unit
+async def test_session_trajectory_yields_nothing_for_an_expired_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cc_transcript.discovery import TranscriptExpiredError
+
+    async def expired(session_id: object, origin_path: object) -> object:
+        raise TranscriptExpiredError(SessionId("sess-traj"))
+
+    monkeypatch.setattr(export_mod, "load_activity", expired)
+    rows, unmapped = await session_trajectory(
+        "sess-traj", [{"event_uuid": "uB", "category": "wrong_approach"}], origin_path=None, budget=TRAJECTORY_BUDGET
+    )
+    assert rows == [] and unmapped == 0
+
+
+@pytest.mark.unit
+async def test_trajectory_rows_bounds_io_to_steering_sessions_and_totals_the_unmapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cc_transcript.discovery import TranscriptExpiredError
+
+    activity = trajectory_activity()
+
+    async def route(session_id: object, origin_path: object) -> object:
+        if str(session_id) == "sess-traj":
+            return activity
+        raise TranscriptExpiredError(SessionId(str(session_id)))
+
+    monkeypatch.setattr(export_mod, "load_activity", route)
+    traces = [
+        {
+            "is_steering": True,
+            "session_id": "sess-traj",
+            "event_uuid": "uB",
+            "category": "wrong_approach",
+            "meta": json.dumps({"origin_path": "/mirror/s.jsonl"}),
+        },
+        {
+            "is_steering": True,
+            "session_id": "sess-traj",
+            "event_uuid": "ghost-uuid",
+            "category": "direction",
+            "meta": json.dumps({"origin_path": "/mirror/s.jsonl"}),
+        },
+        {  # a noise trace never triggers transcript I/O
+            "is_steering": False,
+            "session_id": "sess-noise",
+            "event_uuid": "n1",
+            "category": "status_update",
+            "meta": json.dumps({"origin_path": "/mirror/other.jsonl"}),
+        },
+    ]
+    by_split, unmapped = await trajectory_rows(traces)
+    all_rows = [row for rows in by_split.values() for row in rows]
+    assert unmapped == 1
+    assert {row["session_id"] for row in all_rows} == {"sess-traj"}
+    assert sum(row["steer_label"] for row in all_rows) == 1
+
+
+@pytest.mark.unit
+def test_trajectory_unmapped_reason_is_a_stable_key() -> None:
+    assert TRAJECTORY_UNMAPPED_REASON == "trajectory_anchor_unmapped"

@@ -57,10 +57,19 @@ reference:
       - retrain.watcher.register_watcher_adapter
       - retrain.watcher.seed_incumbent_probs
       - retrain.evalset.freeze_eval
+      - retrain.evalset.freeze_steer_type
+      - retrain.evalset.freeze_pick
       - retrain.evalset.EvalFrame
+      - retrain.evalset.SteerTypeFrame
+      - retrain.evalset.PickFrame
       - retrain.promotion.corrected_gate
       - retrain.promotion.GateResult
       - retrain.promotion.Verdict
+  - title: Many-shot watcher
+    desc: Score the frozen frame through a byte-constant, cache-amortized many-shot exemplar prefix.
+    contents:
+      - retrain.manyshot.build_exemplar_system
+      - retrain.manyshot.score_frame
   - title: Instrument
     desc: Paired fast-DeLong AUC comparison and the instrument-card decision rule.
     contents:

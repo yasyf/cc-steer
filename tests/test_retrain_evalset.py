@@ -11,18 +11,26 @@ import pytest
 from cc_transcript.context import ContextWindow, TurnRef
 from cc_transcript.ids import EventRef, EventUuid, SessionId
 
-from cc_steer.rendering import gate_text
+from cc_steer.decisions import DecisionRow, MineResult, write_decisions
+from cc_steer.rendering import ask_block, gate_text
 from cc_steer.retrain.evalset import (
     GATE_EVAL_NAME,
     MANIFEST_NAME,
     RENDER_VERSION,
+    STEER_TYPE_CATEGORIES,
+    STEER_TYPE_EVAL_NAME,
     WATCHER_EVAL_NAME,
     EmptyEvalContext,
     EvalFrame,
     FrozenViolationError,
+    PickFrame,
     ProbsStoreError,
     SchemaError,
+    SteerTypeFrame,
+    build_steer_type_eval,
     freeze_eval,
+    freeze_pick,
+    freeze_steer_type,
     load_frozen,
     load_probs,
     probs_path,
@@ -325,3 +333,196 @@ class TestProbsStore:
         probs = self.probs(frame) | {frame.ids[0]: bad}
         with pytest.raises(ProbsStoreError, match=r"\[0, 1\]"):
             write_probs(frame, "v001", probs, auc=0.5, root=eval_dir)
+
+
+def write_traces(root: Path, rows: list[dict[str, object]]) -> Path:
+    message = pa.struct([("role", pa.string()), ("content", pa.string())])
+    table = pa.table(
+        {
+            "id": [row["id"] for row in rows],
+            "context": pa.array([row["context"] for row in rows], type=pa.list_(message)),
+            "agent_action": [row["agent_action"] for row in rows],
+            "user_message": [row["user_message"] for row in rows],
+            "category": [row["category"] for row in rows],
+            "is_steering": [row["is_steering"] for row in rows],
+            "source_kind": [row["source_kind"] for row in rows],
+            "session_id": [row["session_id"] for row in rows],
+            "split": [row["split"] for row in rows],
+        }
+    )
+    (root / "traces").mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, root / "traces" / "test.parquet")
+    return root
+
+
+def trace_row(
+    rid: str, *, category: str, is_steering: bool, user: str, action: str = "did a thing"
+) -> dict[str, object]:
+    return {
+        "id": rid,
+        "context": [{"role": "user", "content": f"open the {rid} task and start working on the module"}],
+        "agent_action": action,
+        "user_message": user,
+        "category": category,
+        "is_steering": is_steering,
+        "source_kind": "transcript_message",
+        "session_id": f"session-{rid}",
+        "split": "test",
+    }
+
+
+def decision_row(rid: str, *, question: str, options: tuple[str, ...], chosen: int, split: str = "test") -> DecisionRow:
+    return DecisionRow(
+        id=rid,
+        session_id=f"session-{rid}",
+        occurred_at="2026-01-01T00:00:00",
+        turn_index=1,
+        event_uuid=f"uuid-{rid}",
+        tool_use_id=f"tool-{rid}",
+        question=question,
+        header="Pick",
+        options=options,
+        multi_select=False,
+        answer=options[chosen],
+        chosen_index=(chosen,),
+        is_custom=False,
+        split=split,
+    )
+
+
+class TestSteerTypeFrame:
+    def source_rows(self) -> list[dict[str, object]]:
+        return [
+            trace_row("r0", category="wrong_approach", is_steering=True, user="no, do not vendor the dependency"),
+            trace_row("r1", category="direction", is_steering=True, user="use python 3.14 for the pin"),
+            trace_row("r2", category="operational_directive", is_steering=False, user="now run the tests"),
+            # r3 is a byte-identical near-duplicate of r0's classifier input and collapses in dedup.
+            trace_row("r3", category="wrong_approach", is_steering=True, user="no, do not vendor the dependency"),
+        ]
+
+    def test_build_and_freeze_round_trip_collapses_near_dups(self, tmp_path: Path) -> None:
+        dataset = write_traces(tmp_path / "dataset", self.source_rows())
+        eval_dir = tmp_path / "eval"
+        freeze_steer_type(dataset_dir=dataset, root=eval_dir)
+        frame = SteerTypeFrame.load(root=eval_dir)
+        assert len(frame) == 3  # r0 and r3 render identical text and collapse to one representative
+        assert set(frame.categories) == {"wrong_approach", "direction", "operational_directive"}
+        assert set(frame.categories) <= set(STEER_TYPE_CATEGORIES)
+
+    def test_freeze_is_deterministic_in_bytes_and_digest(self, tmp_path: Path) -> None:
+        rows = self.source_rows()
+        first = write_traces(tmp_path / "a", rows)
+        second = write_traces(tmp_path / "b", rows)
+        sha_a = freeze_steer_type(dataset_dir=first, root=tmp_path / "eval_a")
+        sha_b = freeze_steer_type(dataset_dir=second, root=tmp_path / "eval_b")
+        assert sha_a == sha_b
+        assert (
+            SteerTypeFrame.load(root=tmp_path / "eval_a").digest == SteerTypeFrame.load(root=tmp_path / "eval_b").digest
+        )
+
+    def test_build_rewrites_identical_bytes(self, tmp_path: Path) -> None:
+        dataset = write_traces(tmp_path / "dataset", self.source_rows())
+        one = build_steer_type_eval(dataset_dir=dataset).read_bytes()
+        two = build_steer_type_eval(dataset_dir=dataset).read_bytes()
+        assert one == two
+
+    def test_role_marker_only_text_is_rejected(self, tmp_path: Path) -> None:
+        dataset = tmp_path / "dataset"
+        (dataset / "steer_type").mkdir(parents=True)
+        table = pa.table(
+            {
+                "id": ["good", "blank"],
+                "text": ["<user>\nreal steer here", "<user>\n   "],
+                "category": ["wrong_approach", "direction"],
+                "is_steering": [True, True],
+                "source_kind": ["transcript_message", "transcript_message"],
+                "session_id": ["s0", "s1"],
+                "split": ["test", "test"],
+            }
+        )
+        pq.write_table(table, dataset / "steer_type" / "test.parquet")
+        with pytest.raises(EmptyEvalContext) as excinfo:
+            freeze_eval("steer_type", dataset_dir=dataset, root=tmp_path / "eval")
+        assert excinfo.value.ids == ("blank",)
+        assert not (tmp_path / "eval" / STEER_TYPE_EVAL_NAME).exists()
+
+    def test_duplicate_ids_fail_loud(self, tmp_path: Path) -> None:
+        dataset = tmp_path / "dataset"
+        (dataset / "steer_type").mkdir(parents=True)
+        table = pa.table(
+            {
+                "id": ["dup", "dup"],
+                "text": ["<user>\none", "<user>\ntwo"],
+                "category": ["wrong_approach", "direction"],
+                "is_steering": [True, True],
+                "source_kind": ["transcript_message", "transcript_message"],
+                "session_id": ["s0", "s1"],
+                "split": ["test", "test"],
+            }
+        )
+        pq.write_table(table, dataset / "steer_type" / "test.parquet")
+        eval_dir = tmp_path / "eval"
+        freeze_eval("steer_type", dataset_dir=dataset, root=eval_dir)
+        with pytest.raises(SchemaError, match="duplicate row ids"):
+            SteerTypeFrame.load(root=eval_dir)
+
+
+class TestPickFrame:
+    def source_rows(self) -> list[DecisionRow]:
+        return [
+            decision_row("p0", question="Which pin?", options=("3.13", "3.14", "3.15"), chosen=1),
+            decision_row("p1", question="Vendor it?", options=("yes", "no"), chosen=0),
+            # p2 renders the same ask as p0 and collapses in dedup.
+            decision_row("p2", question="Which pin?", options=("3.13", "3.14", "3.15"), chosen=1),
+            # excluded: wrong split.
+            decision_row("p3", question="Ship it?", options=("now", "later"), chosen=0, split="train"),
+        ]
+
+    def excluded_rows(self) -> list[DecisionRow]:
+        multi = replace(
+            decision_row("m0", question="Pick many", options=("a", "b", "c"), chosen=0),
+            multi_select=True,
+            answer="a, b",
+            chosen_index=(0, 1),
+        )
+        custom = replace(
+            decision_row("c0", question="Off menu", options=("a", "b"), chosen=0),
+            is_custom=True,
+            chosen_index=(),
+            answer="something else",
+        )
+        return [multi, custom]
+
+    def decisions_path(self, tmp_path: Path, rows: list[DecisionRow]) -> Path:
+        out = tmp_path / "decisions.parquet"
+        write_decisions(MineResult(rows=tuple(rows), quarantined=()), out)
+        return out
+
+    def test_build_and_freeze_filters_and_dedups(self, tmp_path: Path) -> None:
+        path = self.decisions_path(tmp_path, [*self.source_rows(), *self.excluded_rows()])
+        eval_dir = tmp_path / "eval"
+        freeze_pick(decisions_path=path, dataset_dir=tmp_path / "dataset", root=eval_dir)
+        frame = PickFrame.load(root=eval_dir)
+        assert len(frame) == 2  # p0/p2 collapse; train, multi-select, and off-menu rounds are dropped
+        assert sorted(frame.chosen.tolist()) == [0, 1]
+        assert sorted(frame.n_options.tolist()) == [2, 3]
+        assert all("[assistant asked" in text for text in frame.texts)
+
+    def test_freeze_is_deterministic_in_bytes_and_digest(self, tmp_path: Path) -> None:
+        rows = self.source_rows()
+        path_a = self.decisions_path(tmp_path / "a", rows)
+        path_b = self.decisions_path(tmp_path / "b", rows)
+        sha_a = freeze_pick(decisions_path=path_a, dataset_dir=tmp_path / "da", root=tmp_path / "ea")
+        sha_b = freeze_pick(decisions_path=path_b, dataset_dir=tmp_path / "db", root=tmp_path / "eb")
+        assert sha_a == sha_b
+        assert PickFrame.load(root=tmp_path / "ea").digest == PickFrame.load(root=tmp_path / "eb").digest
+
+    def test_text_is_the_rendered_ask(self, tmp_path: Path) -> None:
+        path = self.decisions_path(
+            tmp_path, [decision_row("only", question="Vendor it?", options=("yes", "no"), chosen=1)]
+        )
+        eval_dir = tmp_path / "eval"
+        freeze_pick(decisions_path=path, dataset_dir=tmp_path / "dataset", root=eval_dir)
+        frame = PickFrame.load(root=eval_dir)
+        assert frame.texts[0] == ask_block("Vendor it?", header="Pick", options=("yes", "no"))
+        assert int(frame.chosen[0]) == 1

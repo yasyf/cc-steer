@@ -1253,15 +1253,19 @@ def score_watcher_(recipe: Path | None, arm: str, spend_cap_usd: float) -> None:
 
 @main.command(name="freeze-eval")
 def freeze_eval_() -> None:
-    """Freeze the gate and watcher eval views from the current export into ~/.cc-steer/eval/.
+    """Freeze the gate, watcher, steer-type, and pick eval views into ~/.cc-steer/eval/.
 
     Each view's ``test.parquet`` is copied under ``~/.cc-steer/eval/`` beside a sha256
-    manifest and never silently overwritten — a changed frozen file fails loud.
+    manifest and never silently overwritten — a changed frozen file fails loud. The
+    steer-type and pick views are built from the traces test split and the mined
+    decisions dataset first, then frozen through the same manifest.
     """
     from cc_steer.retrain import evalset
 
     for view in ("gate", "watcher"):
         click.echo(f"froze {view} eval ({evalset.freeze_eval(view)[:12]})")
+    click.echo(f"froze steer_type eval ({evalset.freeze_steer_type()[:12]})")
+    click.echo(f"froze pick eval ({evalset.freeze_pick()[:12]})")
 
 
 @main.group(name="golden")

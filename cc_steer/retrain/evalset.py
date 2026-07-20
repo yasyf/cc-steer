@@ -24,15 +24,17 @@ import os
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import numpy as np
 
-from cc_steer.rendering import gate_text_is_substantive, has_substantive_content
+from cc_steer.rendering import ask_block, gate_text_is_substantive, has_substantive_content
 from cc_steer.retrain.data import DIRECTION, WatcherRow, dataset_digest
+from cc_steer.triage import Category
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from typing import Any
 
     import pyarrow as pa
 
@@ -42,14 +44,24 @@ EVAL_DIR: Path = Path.home() / ".cc-steer" / "eval"
 MANIFEST_NAME = "MANIFEST.json"
 WATCHER_EVAL_NAME = "watcher_eval.parquet"
 GATE_EVAL_NAME = "gate_eval.parquet"
-EVAL_NAMES: dict[str, str] = {"gate": GATE_EVAL_NAME, "watcher": WATCHER_EVAL_NAME}
+STEER_TYPE_EVAL_NAME = "steer_type_eval.parquet"
+PICK_EVAL_NAME = "pick_eval.parquet"
+EVAL_NAMES: dict[str, str] = {
+    "gate": GATE_EVAL_NAME,
+    "watcher": WATCHER_EVAL_NAME,
+    "steer_type": STEER_TYPE_EVAL_NAME,
+    "pick": PICK_EVAL_NAME,
+}
 PROBS_DIRNAME = "probs"
 QA_SOURCE_KIND = "question_answer"
 RENDER_VERSION = 2
+STEER_TYPE_CATEGORIES: tuple[str, ...] = get_args(Category)
 
 VIEW_COLUMNS: dict[str, tuple[str, ...]] = {
     "gate": ("id", "text", "label", "kind", "offset_turns", "source_kind", "category", "session_id", "split"),
     "watcher": ("prompt", "completion", "verbatim", "label", "id", "category", "source_kind", "split"),
+    "steer_type": ("id", "text", "category", "is_steering", "source_kind", "session_id", "split"),
+    "pick": ("id", "text", "question", "options", "chosen_index", "n_options", "session_id", "split"),
 }
 
 
@@ -102,9 +114,7 @@ class EvalFrame:
         """Build the frame from the frozen ``watcher_eval.parquet`` under ``root``."""
         table = load_frozen(root=root)
         rows = [WatcherRow.from_record(record) for record in table.to_pylist()]
-        if duplicates := sorted(
-            rid for rid, count in Counter(row.id for row in rows).items() if count > 1
-        ):
+        if duplicates := sorted(rid for rid, count in Counter(row.id for row in rows).items() if count > 1):
             raise SchemaError(f"frozen eval has duplicate row ids {duplicates}; ids must be unique")
         return cls(
             ids=tuple(row.id for row in rows),
@@ -248,10 +258,14 @@ def _empty_context_ids(view: str, table: pa.Table) -> list[str]:
             )
         case "gate":
             return sorted(
-                str(record["id"])
-                for record in table.to_pylist()
-                if not gate_text_is_substantive(str(record["text"]))
+                str(record["id"]) for record in table.to_pylist() if not gate_text_is_substantive(str(record["text"]))
             )
+        case "steer_type":
+            return sorted(
+                str(record["id"]) for record in table.to_pylist() if not gate_text_is_substantive(str(record["text"]))
+            )
+        case "pick":
+            return sorted(str(record["id"]) for record in table.to_pylist() if not str(record["text"]).strip())
     return []
 
 
@@ -269,3 +283,206 @@ def _manifest(frozen: Path) -> dict[str, str]:
     if not path.exists():
         return {}
     return dict(json.loads(path.read_text()))
+
+
+def _refuse_duplicate_ids(records: Sequence[Mapping[str, Any]]) -> None:
+    if duplicates := sorted(rid for rid, count in Counter(str(r["id"]) for r in records).items() if count > 1):
+        raise SchemaError(f"frozen eval has duplicate row ids {duplicates}; ids must be unique")
+
+
+def steer_type_text(record: Mapping[str, Any]) -> str:
+    """The steer-type classifier input: context, the agent action, and the user's steer, role-blocked.
+
+    Unlike the watcher's window — which must never see the steer it predicts — the
+    category classifier is told a steer happened and names its kind, so the user's
+    message is part of the input, not a held-out label.
+    """
+    parts = [f"<{message['role']}>\n{message['content']}" for message in record["context"]]
+    if action := record["agent_action"]:
+        parts.append(f"<assistant>\n{action}")
+    parts.append(f"<user>\n{record['user_message']}")
+    return "\n\n".join(parts)
+
+
+def build_steer_type_eval(*, dataset_dir: Path | None = None, seed: int = 1729) -> Path:
+    """Build the frozen steer-type eval source from the exported traces test split.
+
+    One row per judged feedback moment: :func:`steer_type_text` as ``text`` and the
+    judge's eleven-way ``category`` as the label. Near-duplicate inputs collapse to
+    one seeded representative each (:func:`~cc_steer.retrain.data.near_dup_indices`),
+    then the test-split parquet ``freeze_eval("steer_type")`` freezes is written under
+    ``<dataset_dir>/steer_type/test.parquet``. Returns the written path.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cc_steer.retrain.data import DATASET_DIR, near_dup_indices
+
+    source = (dataset_dir or DATASET_DIR) / "traces" / "test.parquet"
+    if not source.exists():
+        raise FileNotFoundError(f"no traces test parquet at {source}")
+    rows = [
+        {
+            "id": str(record["id"]),
+            "text": steer_type_text(record),
+            "category": str(record["category"]),
+            "is_steering": bool(record["is_steering"]),
+            "source_kind": str(record["source_kind"]),
+            "session_id": str(record["session_id"]),
+            "split": str(record["split"]),
+        }
+        for record in pq.read_table(source).to_pylist()
+    ]
+    kept, _ = near_dup_indices([row["text"] for row in rows], seed=seed)
+    schema = pa.schema(
+        [
+            ("id", pa.string()),
+            ("text", pa.string()),
+            ("category", pa.string()),
+            ("is_steering", pa.bool_()),
+            ("source_kind", pa.string()),
+            ("session_id", pa.string()),
+            ("split", pa.string()),
+        ]
+    )
+    out = (dataset_dir or DATASET_DIR) / "steer_type" / "test.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist([rows[i] for i in kept], schema=schema), out)
+    return out
+
+
+def build_pick_eval(*, decisions_path: Path | None = None, dataset_dir: Path | None = None, seed: int = 1729) -> Path:
+    """Build the frozen pick-prediction eval source from the mined decisions dataset.
+
+    One row per single-select, on-menu ``AskUserQuestion`` round in the test split:
+    the rendered question and options (:func:`~cc_steer.rendering.ask_block`) as
+    ``text`` and the user's chosen option index as ``chosen_index``. Multi-select and
+    off-menu rounds are dropped — the label is a single option index, unrepresentable
+    for them. Near-duplicate asks collapse to one seeded representative each, then the
+    test-split parquet ``freeze_eval("pick")`` freezes is written under
+    ``<dataset_dir>/pick/test.parquet``. Returns the written path.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cc_steer.decisions import DEFAULT_DECISIONS_PATH, read_decisions
+    from cc_steer.retrain.data import DATASET_DIR, near_dup_indices
+
+    rows_in, _digest, _quarantined = read_decisions(decisions_path or DEFAULT_DECISIONS_PATH)
+    rows = [
+        {
+            "id": row.id,
+            "text": ask_block(row.question, header=row.header or "", options=row.options),
+            "question": row.question,
+            "options": list(row.options),
+            "chosen_index": row.chosen_index[0],
+            "n_options": len(row.options),
+            "session_id": row.session_id,
+            "split": row.split,
+        }
+        for row in rows_in
+        if row.split == "test"
+        and not row.multi_select
+        and not row.is_custom
+        and len(row.chosen_index) == 1
+        and len(row.options) >= 2
+    ]
+    kept, _ = near_dup_indices([row["text"] for row in rows], seed=seed)
+    schema = pa.schema(
+        [
+            ("id", pa.string()),
+            ("text", pa.string()),
+            ("question", pa.string()),
+            ("options", pa.list_(pa.string())),
+            ("chosen_index", pa.int64()),
+            ("n_options", pa.int64()),
+            ("session_id", pa.string()),
+            ("split", pa.string()),
+        ]
+    )
+    out = (dataset_dir or DATASET_DIR) / "pick" / "test.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist([rows[i] for i in kept], schema=schema), out)
+    return out
+
+
+def freeze_steer_type(*, dataset_dir: Path | None = None, root: Path | None = None, seed: int = 1729) -> str:
+    """Build then freeze the steer-type eval; returns the frozen file's sha256."""
+    build_steer_type_eval(dataset_dir=dataset_dir, seed=seed)
+    return freeze_eval("steer_type", dataset_dir=dataset_dir, root=root)
+
+
+def freeze_pick(
+    *, decisions_path: Path | None = None, dataset_dir: Path | None = None, root: Path | None = None, seed: int = 1729
+) -> str:
+    """Build then freeze the pick-prediction eval; returns the frozen file's sha256."""
+    build_pick_eval(decisions_path=decisions_path, dataset_dir=dataset_dir, seed=seed)
+    return freeze_eval("pick", dataset_dir=dataset_dir, root=root)
+
+
+@dataclass(frozen=True, slots=True)
+class SteerTypeFrame:
+    """The frozen steer-type eval as the arrays a category classifier is scored on.
+
+    Attributes:
+        ids: The row ids, in file order.
+        texts: The role-blocked classifier input per row.
+        categories: The judge's eleven-way category label per row (one of
+            :data:`STEER_TYPE_CATEGORIES`).
+        digest: The eval's order-invariant content digest.
+    """
+
+    ids: tuple[str, ...]
+    texts: tuple[str, ...]
+    categories: tuple[str, ...]
+    digest: DatasetDigest
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    @classmethod
+    def load(cls, *, root: Path | None = None) -> SteerTypeFrame:
+        """Build the frame from the frozen ``steer_type_eval.parquet`` under ``root``."""
+        records = load_frozen("steer_type", root=root).to_pylist()
+        _refuse_duplicate_ids(records)
+        return cls(
+            ids=tuple(str(record["id"]) for record in records),
+            texts=tuple(str(record["text"]) for record in records),
+            categories=tuple(str(record["category"]) for record in records),
+            digest=dataset_digest(records),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PickFrame:
+    """The frozen pick-prediction eval as the arrays an option classifier is scored on.
+
+    Attributes:
+        ids: The row ids, in file order.
+        texts: The rendered ask — question and options — per row.
+        chosen: The user's chosen option index per row.
+        n_options: The number of options offered per row (the prediction's valid range).
+        digest: The eval's order-invariant content digest.
+    """
+
+    ids: tuple[str, ...]
+    texts: tuple[str, ...]
+    chosen: np.ndarray
+    n_options: np.ndarray
+    digest: DatasetDigest
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    @classmethod
+    def load(cls, *, root: Path | None = None) -> PickFrame:
+        """Build the frame from the frozen ``pick_eval.parquet`` under ``root``."""
+        records = load_frozen("pick", root=root).to_pylist()
+        _refuse_duplicate_ids(records)
+        return cls(
+            ids=tuple(str(record["id"]) for record in records),
+            texts=tuple(str(record["text"]) for record in records),
+            chosen=np.array([int(record["chosen_index"]) for record in records], dtype=np.int64),
+            n_options=np.array([int(record["n_options"]) for record in records], dtype=np.int64),
+            digest=dataset_digest(records),
+        )

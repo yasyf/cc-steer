@@ -213,16 +213,21 @@ def test_seed_incumbent_probs_dispatch(runner: CliRunner, tmp_path: Path, monkey
     assert "seeded incumbent" in result.output
 
 
-def test_freeze_eval_freezes_both_views(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_freeze_eval_freezes_all_views(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     views: list[str] = []
 
     def fake(view: str) -> str:
         views.append(view)
         return "abc123def456ghi"
 
+    def fake_frame(**_: object) -> str:
+        return "abc123def456ghi"
+
     monkeypatch.setattr(evalset, "freeze_eval", fake)
+    monkeypatch.setattr(evalset, "freeze_steer_type", fake_frame)
+    monkeypatch.setattr(evalset, "freeze_pick", fake_frame)
     result = runner.invoke(main, ["freeze-eval"])
     assert result.exit_code == 0, result.output
     assert views == ["gate", "watcher"]
-    assert "froze gate eval (abc123def456)" in result.output
-    assert "froze watcher eval (abc123def456)" in result.output
+    for view in ("gate", "watcher", "steer_type", "pick"):
+        assert f"froze {view} eval (abc123def456)" in result.output
