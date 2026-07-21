@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from spawnllm import BackendCallError, Error, Output, Response, Result, RunSpec
 
-from cc_steer.claude import ClaudeUsage, claude_available, run_claude, usage_of
+from cc_steer.claude import ClaudeUsage, cached_judge, claude_available, run_claude, usage_of
 
 
 def envelope(*, cost: float | None) -> str:
@@ -127,3 +129,30 @@ async def test_run_claude_surfaces_timeout_as_error(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("cc_steer.claude.run", fake_run)
     with pytest.raises(subprocess.SubprocessError, match="timed out"):
         await run_claude("p", system="s", model="m")
+
+
+class Toy(BaseModel):
+    label: str
+
+
+@pytest.mark.anyio
+async def test_cached_judge_builds_spec_with_stripped_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, RunSpec] = {}
+
+    async def fake_run(spec: RunSpec, **_: object) -> Response:
+        captured["spec"] = spec
+        return Response(spec=spec, output=Output(raw=""), result=Result(raw="", parsed=Toy(label="x")))
+
+    monkeypatch.setattr("cc_steer.claude.run", fake_run)
+    monkeypatch.setattr("cc_transcript.judge.default_backend", lambda: SimpleNamespace(models={"medium": "sonnet"}))
+    assert await cached_judge(Toy, tier="medium", system="SYS")("PROMPT") == Toy(label="x")
+    spec = captured["spec"]
+    assert spec.prompt == "PROMPT"
+    assert spec.model == "sonnet"
+    assert spec.response_model is Toy
+    config = spec.provider_configs["claude"]
+    assert config.system_prompt == "SYS"
+    assert config.max_turns is None
+    assert config.tools == ""
+    assert config.disable_slash_commands is True
+    assert config.output_format is None

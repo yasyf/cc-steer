@@ -139,6 +139,8 @@ def cached_judge[M: BaseModel](
     the system prompt (cache-read on every subsequent row within the CLI's cache TTL)
     instead of resending it in each row's user prompt. Only the per-row user prompt
     varies between calls, so the shared prefix is billed once rather than per row.
+    Each turn runs the same stripped harness as :func:`run_claude` — no tools, no
+    slash commands — so the Claude Code tool baseline never enters the context.
 
     Args:
         response_model: The Pydantic model the structured output is validated against.
@@ -157,7 +159,11 @@ def cached_judge[M: BaseModel](
             model=backend.models[tier],
             response_model=response_model,
             timeout=timeout,
-            provider_configs={"claude": ClaudeConfig(system_prompt=system)},
+            provider_configs={
+                # No max_turns: --json-schema's tool_use round makes the turn count
+                # vary, so any cap intermittently dies with error_max_turns.
+                "claude": ClaudeConfig(system_prompt=system, tools="", disable_slash_commands=True)
+            },
         )
         match await run(spec, backend=backend):
             case Response(error=Error(msg=msg)):
