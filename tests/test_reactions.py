@@ -211,6 +211,48 @@ async def test_attribute_reactions_end_to_end(tmp_path: Path, monkeypatch: pytes
     assert by_proposal[2]["kind"] == "expired"
 
 
+async def test_delivered_via_livehook_then_scanned_produces_a_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The full deliver path: the real UserPromptSubmit hook surfaces the steer, the scan labels it.
+
+    The other end-to-end test flips ``state`` to ``delivered`` by hand; this one drives
+    the actual ``livehook.resolve`` transition, so the queued → delivered → attributed
+    chain is exercised exactly as it runs live.
+    """
+    import sqlite3
+    from datetime import UTC, datetime
+
+    from cc_steer.livehook import resolve
+
+    monkeypatch.setattr("cc_steer.watcher.live.is_killed", lambda: False)
+    db = tmp_path / "shadow.db"
+    delivered_at = datetime(2026, 7, 7, 10, 0, tzinfo=UTC)
+    proposal = make_proposal(
+        session_id="s1", anchor_uuid="a1", steer=STEER, project="/work/proj", ts="2026-07-07T09:55:00+00:00"
+    )
+    config = LiveConfig(mode="live_all", holdout_frac=0.0)
+    async with await ShadowDelivery.open(db) as shadow:
+        await shadow.deliver(proposal)
+    async with await MailboxDelivery.open(db, config=config) as mailbox:
+        await mailbox.deliver(proposal)
+
+    conn = sqlite3.connect(str(db), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    context = resolve(conn, config, session_id="s1", cwd="/work/proj", at=delivered_at)
+    conn.close()
+    assert context is not None and STEER in context
+
+    async with await FeedbackStore.open(tmp_path / "feedback.db") as store:
+        await plant_reply(store, session="s1", occurred="2026-07-07T10:05:00+00:00", text=EDIT_REPLY, key="reply-1")
+        report = await attribute_reactions(store, shadow_db=db)
+        async with await MailboxDelivery.open(db, config=LiveConfig.shadow()) as mailbox:
+            [reaction] = await mailbox.reactions()
+    assert report.counts == {"edited": 1}
+    kind, source, key = reaction["kind"], reaction["source"], reaction["feedback_dedup_key"]
+    assert (kind, source, key) == ("edited", "scan_inferred", "reply-1")
+
+
 async def test_shadow_report_ignores_reactions_on_undelivered_proposals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

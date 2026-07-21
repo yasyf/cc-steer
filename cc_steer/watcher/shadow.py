@@ -6,6 +6,14 @@ the join key is time within a session: a steer counts as a HIT when the same
 session shows a real intervention within ``window_minutes`` after the proposal
 fired — the user did step in near the moment the watcher flagged — and as a
 nuisance candidate otherwise.
+
+The coarse time-window join here is superseded for gate ground truth by
+:mod:`cc_steer.watcher.outcomes`, which resolves every scored moment — fire and
+no-fire alike — against a fresh :func:`cc_steer.detectors.detect` pass keyed to
+the scored turn, rather than crediting a fired proposal with any intervention
+that happens to land in the following 30 minutes. This module stays the
+delivered-vs-holdout report surface; the scored-moment outcome table is the input
+:mod:`cc_steer.watcher.wsr` bounds the gate's live precision and recall from.
 """
 
 from __future__ import annotations
