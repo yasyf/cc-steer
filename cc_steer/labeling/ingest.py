@@ -148,7 +148,7 @@ def _single_option(option_ids: object) -> str | None:
 def _options(option_ids: object) -> list[object]:
     match option_ids:
         case list() as options:
-            return options
+            return list(options)
         case other:
             raise LabelingError(f"choice event optionIds must be a list, got {other!r}")
 

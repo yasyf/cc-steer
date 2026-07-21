@@ -33,7 +33,7 @@ from cc_steer.rendering import DRAFT_CHAR_CAP, Message, tail_messages
 from cc_steer.watcher.cascade import flattened
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     import pyarrow as pa
 
@@ -359,7 +359,7 @@ def semantic_near_dup_pairs(texts: Sequence[str], embed: Embedder, *, threshold:
     return [(int(i), int(j)) for i, j in zip(*np.triu_indices(len(texts), k=1)) if sims[i, j] >= threshold]
 
 
-def exact_text_overlap(reference: Sequence[str], query: Sequence[str]) -> list[str]:
+def exact_text_overlap(reference: Iterable[str], query: Iterable[str]) -> list[str]:
     """The whitespace-stripped texts present in both ``reference`` and ``query`` (sorted, unique).
 
     The exact cross-split leak check: a ``query`` (eval) text that also appears in

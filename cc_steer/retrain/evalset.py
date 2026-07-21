@@ -775,16 +775,20 @@ def resolve_labels(records: Sequence[LabelRecord]) -> tuple[list[ResolvedLabel],
         if authoritative is None:
             medium_only.append(rid)
             continue
-        resolved.append(
-            ResolvedLabel(
-                id=rid,
-                is_steering=authoritative.is_steering,
-                category=authoritative.category,
-                provenance=authoritative.provenance,  # type: ignore[arg-type]
-                guidance=guidance.is_steering if guidance else None,
-                agrees_with_guidance=guidance.is_steering == authoritative.is_steering if guidance else None,
-            )
-        )
+        match authoritative.provenance:
+            case "human" | "fable" as provenance:
+                resolved.append(
+                    ResolvedLabel(
+                        id=rid,
+                        is_steering=authoritative.is_steering,
+                        category=authoritative.category,
+                        provenance=provenance,
+                        guidance=guidance.is_steering if guidance else None,
+                        agrees_with_guidance=guidance.is_steering == authoritative.is_steering if guidance else None,
+                    )
+                )
+            case escaped:
+                raise AssertionError(f"guidance provenance {escaped!r} escaped the authoritative filter")
     return sorted(resolved, key=lambda r: r.id), sorted(medium_only)
 
 
@@ -926,7 +930,7 @@ def plan_rebuild_frame(
         else []
     )
     projected = projected_frame_mde(n_pos, n_neg, auc=projection_auc, rho=projection_rho)
-    provenance_counts = Counter(r.provenance for r in positives)
+    provenance_counts: Counter[str] = Counter(r.provenance for r in positives)
     for nid in chosen:
         provenance_counts[negative_provenance.get(nid, "structural")] += 1
     frame_ids = positive_ids | set(chosen)
