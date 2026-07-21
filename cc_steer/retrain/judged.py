@@ -19,8 +19,9 @@ The golden packet lives under ``~/.cc-steer/eval/golden/watcher-fires/``. This i
 bootstrap: until a human fills ``labels.json``, :func:`load_golden` raises
 :class:`~athome.research.golden.GoldenGateViolation` before any judge spend — the gate never
 fabricates a label to unblock itself. The verdict aggregates to ``harmful_favors_incumbent``
-(judged losses outnumber judged wins), which feeds back into the corrected gate so
-``GateResult.promote`` — not the free metrics alone — decides the promotion.
+(judged losses outnumber judged wins), which feeds back into the corrected gate whose
+terms :func:`~cc_steer.retrain.promotion.watcher_promotable` recomposes under the
+instrument card's paired DeLong rule to decide the promotion.
 """
 
 from __future__ import annotations

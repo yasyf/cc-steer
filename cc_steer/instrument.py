@@ -10,11 +10,19 @@ On top of that sits the instrument card: :func:`mde` turns a standard error into
 minimum detectable effect and :func:`actionable` applies the card's two-part rule —
 the paired 95% CI must exclude zero *and* the observed AUC delta must clear the
 frame's MDE — that separates a real steering effect from the instrument's noise floor.
+:class:`InstrumentCard` reads the card sidecar at :data:`INSTRUMENT_CARD`, and
+:func:`paired_verdict` / :func:`unpaired_verdict` render the rule as a
+:class:`Comparison` — the production verdict for any comparative checkpoint AUC:
+paired with measured rho whenever both arms' per-row probs are persisted, the card's
+unpaired frame floor when a counterpart vector is absent, and a sub-threshold delta
+always reported as within the noise floor, never as a win or a loss.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from random import Random
 from statistics import NormalDist
 from typing import TYPE_CHECKING
@@ -22,9 +30,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import numpy.typing as npt
 
 Z975 = 1.959963984540054
+INSTRUMENT_CARD: Path = Path.home() / ".cc-steer" / "experiments" / "instrument-card-v1.json"
 
 
 def compute_midrank(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
@@ -94,7 +105,7 @@ class PairedDeLong:
         se_b: DeLong standard error of ``auc_b``.
         cov: Covariance of the two AUC estimates.
         se_delta: Covariance-aware standard error of ``delta``.
-        rho: Correlation of the two AUC estimates.
+        rho: Correlation of the two AUC estimates (NaN when either variance is zero).
         z: ``delta / se_delta`` (NaN when ``se_delta`` is zero).
         ci95: Two-sided 95% confidence interval on ``delta``.
     """
@@ -109,6 +120,66 @@ class PairedDeLong:
     rho: float
     z: float
     ci95: tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentCard:
+    """The measurement-instrument card: the frame noise floors comparative verdicts consult.
+
+    Read from the sidecar JSON at :data:`INSTRUMENT_CARD`
+    (``~/.cc-steer/experiments/instrument-card-v1.json``) via :meth:`load`. The paired
+    path measures its own MDE from the DeLong standard error, so the card matters
+    exactly where pairing is impossible: ``mde`` is the unpaired floor of the n=628
+    watcher frame — the fallback when a counterpart's per-row probs were never
+    persisted — with the other frames' floors under ``stopping``.
+
+    Attributes:
+        mde: The unpaired minimum detectable effect of the watcher frame.
+        stopping: The per-frame unpaired floors (``mde``, ``mde_gate_frame``, ``mde_golden``).
+        mde_paired: The card's paired-MDE reference table with measured-rho examples.
+    """
+
+    mde: float
+    stopping: Mapping[str, float]
+    mde_paired: Mapping[str, object]
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> InstrumentCard:
+        """Read the card sidecar; ``path`` overrides :data:`INSTRUMENT_CARD`."""
+        payload = json.loads((path or INSTRUMENT_CARD).read_text())
+        return cls(
+            mde=float(payload["mde"]),
+            stopping={key: float(value) for key, value in payload["stopping"].items()},
+            mde_paired=payload["mde_paired"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Comparison:
+    """A card-governed comparative verdict between two checkpoints' AUCs on one frame.
+
+    ``verdict`` speaks the card's language: an actionable gain or regression names the
+    delta, confidence interval, and MDE it cleared; a sub-threshold delta reads
+    ``within noise floor (MDE <value>)`` and is never a win, a loss, or a rejection.
+
+    Attributes:
+        auc_a: AUC of the first arm (the incumbent or baseline).
+        auc_b: AUC of the second arm (the candidate).
+        delta: ``auc_b - auc_a``.
+        mde: The minimum detectable effect the verdict applied — ``2.8016 * se_delta``
+            on the paired path, the card's unpaired frame floor on the fallback.
+        actionable: Whether the 95% CI excludes zero and ``|delta| >= mde``.
+        verdict: The card-rule verdict line.
+        paired: The full paired DeLong record, or ``None`` on the unpaired fallback.
+    """
+
+    auc_a: float
+    auc_b: float
+    delta: float
+    mde: float
+    actionable: bool
+    verdict: str
+    paired: PairedDeLong | None
 
 
 def delong_se(labels: npt.ArrayLike, probs: npt.ArrayLike) -> float:
@@ -216,3 +287,68 @@ def actionable(delta: float, se_delta: float, frame_mde: float) -> bool:
     """
     lo, hi = delta - Z975 * se_delta, delta + Z975 * se_delta
     return bool((lo > 0 or hi < 0) and abs(delta) >= frame_mde)
+
+
+def paired_verdict(paired: PairedDeLong) -> Comparison:
+    """The card rule over a paired DeLong record — the production comparative verdict.
+
+    The MDE is measured, not assumed: ``2.8016`` times the record's covariance-aware
+    ``se_delta``, which already carries the observed pairing correlation. The verdict
+    line names the delta, CI, rho, and MDE when actionable, and reports a
+    sub-threshold delta as within the noise floor — never a win or a loss.
+
+    Args:
+        paired: The paired comparison from :func:`paired_delong` over both arms'
+            persisted per-row probs on the identical frame.
+
+    Returns:
+        The :class:`Comparison` carrying the applied MDE and the verdict line.
+    """
+    floor = mde(paired.se_delta)
+    lo, hi = paired.ci95
+    return Comparison(
+        auc_a=paired.auc_a,
+        auc_b=paired.auc_b,
+        delta=paired.delta,
+        mde=floor,
+        actionable=(is_actionable := actionable(paired.delta, paired.se_delta, floor)),
+        verdict=(
+            f"actionable {'gain' if paired.delta > 0 else 'regression'} (delta {paired.delta:+.4f}, "
+            f"95% CI [{lo:+.4f}, {hi:+.4f}], rho {paired.rho:.4f}, paired MDE {floor:.4f})"
+            if is_actionable
+            else f"within noise floor (MDE {floor:.4f})"
+        ),
+        paired=paired,
+    )
+
+
+def unpaired_verdict(auc_a: float, auc_b: float, *, frame_mde: float) -> Comparison:
+    """The card rule when a counterpart's per-row probs were never persisted.
+
+    With no pairing there is no measured rho, so the card's unpaired frame floor is
+    the MDE. ``|delta| >= frame_mde`` already implies the unpaired 95% CI excludes
+    zero (the MDE sits at ``2.8016`` standard errors, the CI bound at ``1.96``), so
+    the card's two-part rule reduces to the MDE test.
+
+    Args:
+        auc_a: Point AUC of the first arm (the incumbent or baseline).
+        auc_b: Point AUC of the second arm (the candidate).
+        frame_mde: The frame's unpaired MDE from :class:`InstrumentCard`.
+
+    Returns:
+        The :class:`Comparison` with ``paired=None``.
+    """
+    delta = auc_b - auc_a
+    return Comparison(
+        auc_a=auc_a,
+        auc_b=auc_b,
+        delta=delta,
+        mde=frame_mde,
+        actionable=(is_actionable := abs(delta) >= frame_mde),
+        verdict=(
+            f"actionable {'gain' if delta > 0 else 'regression'} (delta {delta:+.4f}, unpaired MDE {frame_mde:.4f})"
+            if is_actionable
+            else f"within noise floor (MDE {frame_mde:.4f})"
+        ),
+        paired=None,
+    )

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from cc_steer import registry
+from cc_steer.instrument import Comparison, unpaired_verdict
 from cc_steer.retrain.promotion import (
     PR_AUC_KEY,
     RECALL_KEY,
@@ -49,59 +50,113 @@ def version_info(digest: str = "d1") -> registry.VersionInfo:
     )
 
 
+def comparison(auc_a: float = 0.70, auc_b: float = 0.80, *, frame_mde: float = 0.05) -> Comparison:
+    return unpaired_verdict(auc_a, auc_b, frame_mde=frame_mde)
+
+
 class TestWatcherBar:
     @pytest.mark.parametrize(
-        ("overrides", "expected"),
+        ("overrides", "comp", "expected"),
         [
             pytest.param(
                 {},
-                Verdict(True, "candidate AUC 0.8000 > incumbent 0.7000, budget held, coverage 5 >= 0"),
-                id="promote",
+                comparison(),
+                Verdict(
+                    True,
+                    "AUC 0.8000 vs incumbent 0.7000: actionable gain (delta +0.1000, unpaired MDE 0.0500); "
+                    "budget held, coverage 5 >= 0",
+                ),
+                id="actionable-gain-promotes",
             ),
             pytest.param(
-                {"cell_auc": 0.70},
-                Verdict(False, "candidate AUC 0.7000 <= incumbent 0.7000"),
-                id="auc-not-beaten",
+                {"cell_auc": 0.71},
+                comparison(0.70, 0.71),
+                Verdict(
+                    True,
+                    "AUC 0.7100 vs incumbent 0.7000: within noise floor (MDE 0.0500); "
+                    "budget held, coverage 5 >= 0",
+                ),
+                id="within-noise-is-never-a-rejection",
+            ),
+            pytest.param(
+                {"cell_auc": 0.69},
+                comparison(0.70, 0.69),
+                Verdict(
+                    True,
+                    "AUC 0.6900 vs incumbent 0.7000: within noise floor (MDE 0.0500); "
+                    "budget held, coverage 5 >= 0",
+                ),
+                id="sub-mde-point-regression-is-noise-not-a-loss",
+            ),
+            pytest.param(
+                {"cell_auc": 0.60},
+                comparison(0.70, 0.60),
+                Verdict(False, "AUC 0.6000 vs incumbent 0.7000: actionable regression (delta -0.1000, unpaired MDE 0.0500)"),
+                id="actionable-regression-rejects",
             ),
             pytest.param(
                 {"budget_held": False},
+                comparison(),
                 Verdict(False, "fire budget exceeded at matched fires"),
                 id="budget-exceeded",
             ),
             pytest.param(
                 {"coverage_wins": 1, "coverage_losses": 3},
+                comparison(),
                 Verdict(False, "coverage losses 3 > wins 1"),
                 id="coverage-losses-exceed-wins",
             ),
         ],
     )
-    def test_bar(self, overrides: dict[str, object], expected: Verdict) -> None:
-        assert watcher_promotable(gate_result(**overrides)) == expected
+    def test_bar(self, overrides: dict[str, object], comp: Comparison, expected: Verdict) -> None:
+        assert watcher_promotable(gate_result(**overrides), comp) == expected
 
 
 class TestJudgedVerdictDecides:
     def test_harmful_refuses_despite_free_pass(self) -> None:
         # Free metrics pass (the gate_result default), but the judged term vetoes: promote is False.
-        verdict = watcher_promotable(gate_result(harmful_favors_incumbent=True, promote=False))
+        verdict = watcher_promotable(gate_result(harmful_favors_incumbent=True, promote=False), comparison())
         assert verdict.promote is False
         assert "refuses" in verdict.reason and "harmful_favors_incumbent=True" in verdict.reason
 
     def test_clean_judged_verdict_promotes(self) -> None:
-        verdict = watcher_promotable(gate_result(harmful_favors_incumbent=False, promote=True))
+        verdict = watcher_promotable(gate_result(harmful_favors_incumbent=False, promote=True), comparison())
         assert verdict.promote is True
         assert "promotes" in verdict.reason and "harmful_favors_incumbent=False" in verdict.reason
+
+    def test_card_rule_supersedes_the_point_auc_fold(self) -> None:
+        # athome's promote=False came only from its point auc_not_regressed term; a within-noise delta
+        # is instrument noise under the card, so the recomposed judged fold promotes.
+        verdict = watcher_promotable(
+            gate_result(
+                harmful_favors_incumbent=False, promote=False, cell_auc=0.699, auc_not_regressed=False
+            ),
+            comparison(0.70, 0.699),
+        )
+        assert verdict.promote is True
+        assert "within noise floor (MDE 0.0500)" in verdict.reason
+
+    def test_judged_actionable_regression_refuses(self) -> None:
+        verdict = watcher_promotable(
+            gate_result(harmful_favors_incumbent=False, promote=True, cell_auc=0.60, auc_not_regressed=False),
+            comparison(0.70, 0.60),
+        )
+        assert verdict.promote is False
+        assert "actionable regression" in verdict.reason
 
     def test_free_pass_failure_refuses_even_when_not_harmful(self) -> None:
         # promote is folded from free_pass AND the judged term; a failed free metric refuses too.
         verdict = watcher_promotable(
-            gate_result(harmful_favors_incumbent=False, promote=False, coverage_sig=False)
+            gate_result(harmful_favors_incumbent=False, promote=False, coverage_sig=False), comparison()
         )
         assert verdict.promote is False
 
     def test_pending_judgment_falls_back_to_free_metric_bar(self) -> None:
-        # promote is None while judging is pending -> the free-metric bar decides, unchanged.
-        assert watcher_promotable(gate_result()) == Verdict(
-            True, "candidate AUC 0.8000 > incumbent 0.7000, budget held, coverage 5 >= 0"
+        # promote is None while judging is pending -> the free-metric bar decides.
+        assert watcher_promotable(gate_result(), comparison()) == Verdict(
+            True,
+            "AUC 0.8000 vs incumbent 0.7000: actionable gain (delta +0.1000, unpaired MDE 0.0500); "
+            "budget held, coverage 5 >= 0",
         )
 
 
@@ -128,7 +183,16 @@ class TestGateBar:
 class TestBarsFailClosedOnNaN:
     @pytest.mark.parametrize("field", ["cell_auc", "incumbent_auc", "coverage_wins", "coverage_losses"])
     def test_watcher_bar_rejects_non_finite_metric(self, field: str) -> None:
-        verdict = watcher_promotable(gate_result(**{field: float("nan")}))
+        verdict = watcher_promotable(gate_result(**{field: float("nan")}), comparison())
+        assert verdict.promote is False
+        assert "non-finite" in verdict.reason
+
+    def test_watcher_bar_rejects_non_finite_metric_on_the_judged_path(self) -> None:
+        # The recomposed judged fold must not promote a NaN AUC: a degenerate score is never a beat.
+        verdict = watcher_promotable(
+            gate_result(cell_auc=float("nan"), harmful_favors_incumbent=False, promote=False),
+            comparison(0.70, float("nan")),
+        )
         assert verdict.promote is False
         assert "non-finite" in verdict.reason
 

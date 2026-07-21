@@ -1252,6 +1252,23 @@ def score_watcher_(recipe: Path | None, arm: str, spend_cap_usd: float) -> None:
     click.echo(f"watcher score: sentinel AUC {metric:.4f}")
 
 
+@main.command(name="compare-arms")
+@click.argument("report_a", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("report_b", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def compare_arms_(report_a: Path, report_b: Path) -> None:
+    """Verdict two sweep score reports under the instrument card's paired-DeLong rule.
+
+    Pairs the reports' per-row probs on the frozen watcher frame and prints the card
+    verdict — an actionable gain or regression with its CI and measured rho, or
+    ``within noise floor (MDE <value>)``. A report predating per-row persistence falls
+    back to the card's unpaired frame MDE.
+    """
+    from cc_steer.retrain import sweep
+
+    comparison = sweep.compare_score_reports(report_a, report_b)
+    click.echo(f"AUC {comparison.auc_a:.4f} -> {comparison.auc_b:.4f}: {comparison.verdict}")
+
+
 @main.command(name="freeze-eval")
 def freeze_eval_() -> None:
     """Freeze the gate, watcher, steer-type, and pick eval views into ~/.cc-steer/eval/.

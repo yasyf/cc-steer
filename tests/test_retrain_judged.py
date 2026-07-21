@@ -17,6 +17,7 @@ from athome.research.golden import (
 )
 from athome.research.judge import Pairwise, Vote
 
+from cc_steer.instrument import paired_delong, paired_verdict
 from cc_steer.retrain import judged
 from cc_steer.retrain.promotion import corrected_gate, watcher_promotable
 
@@ -274,4 +275,5 @@ class TestJudgedGate:
             harmful_favors_incumbent=harmful,
         )
         assert result.promote is expected_promote
-        assert watcher_promotable(result).promote is expected_promote
+        comparison = paired_verdict(paired_delong(labels, incumbent, candidate))
+        assert watcher_promotable(result, comparison).promote is expected_promote

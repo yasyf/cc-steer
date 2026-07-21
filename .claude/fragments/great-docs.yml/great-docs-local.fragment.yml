@@ -86,6 +86,12 @@ reference:
       - instrument.bootstrap_ci
       - instrument.mde
       - instrument.actionable
+      - instrument.InstrumentCard
+      - instrument.Comparison
+      - instrument.paired_verdict
+      - instrument.unpaired_verdict
+      - retrain.sweep.ArmScore
+      - retrain.sweep.compare_score_reports
   - title: Decisions
     desc: Mine AskUserQuestion decision rounds from transcript trees into a parquet dataset.
     contents:

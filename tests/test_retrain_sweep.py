@@ -19,6 +19,7 @@ from athome.research.spec import Budget, ExperimentSpec
 from athome.train import BASE_MODELS, METRIC_FILE, METRIC_KEY, SpendGuard
 from athome.train.spec import EvalRow, Hyperparams, Rows, TinkerSettings, TrainSpec
 
+from cc_steer import instrument
 from cc_steer.retrain import sweep
 from cc_steer.retrain.watcher import WatcherRecipe
 
@@ -103,9 +104,16 @@ class TestScoreWatcherRefusals:
             WatcherRecipe.default(),
             arm="qwen3-8b",
             spend_cap_usd=15.0,
-            train_and_score=lambda recipe, *, arm, spend_cap_usd, dataset_dir, eval_root: 0.71,
+            train_and_score=stub_scorer(sweep.ArmScore(metric=0.71, probs={"r0": 0.5}, frame_digest="d")),
         )
         assert result == 0.71
+
+
+ARM_SCORE = sweep.ArmScore(metric=0.873, probs={"r0": 0.1, "r1": 0.9}, frame_digest="digest-a")
+
+
+def stub_scorer(score: sweep.ArmScore = ARM_SCORE) -> sweep.TrainAndScore:
+    return lambda recipe, *, arm, spend_cap_usd, dataset_dir, eval_root: score
 
 
 class TestScoreReport:
@@ -113,9 +121,11 @@ class TestScoreReport:
         monkeypatch.chdir(tmp_path)
         seen: dict[str, object] = {}
 
-        def fake(recipe: WatcherRecipe, *, arm: object, spend_cap_usd: float, dataset_dir: object, eval_root: object) -> float:
+        def fake(
+            recipe: WatcherRecipe, *, arm: object, spend_cap_usd: float, dataset_dir: object, eval_root: object
+        ) -> sweep.ArmScore:
             seen.update(recipe=recipe, arm=arm, spend_cap_usd=spend_cap_usd, dataset_dir=dataset_dir, eval_root=eval_root)
-            return 0.873
+            return ARM_SCORE
 
         recipe = WatcherRecipe.default()
         result = sweep.score_watcher(
@@ -136,6 +146,8 @@ class TestScoreReport:
             "tinker_model": BASE_MODELS["qwen3-8b"].tinker,
             "mlx_id": BASE_MODELS["qwen3-8b"].mlx,
             "serves_locally": True,
+            "dataset_digest": "digest-a",
+            "probs": {"r0": 0.1, "r1": 0.9},
         }
 
     def test_report_carries_non_local_arm_posture(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,7 +158,7 @@ class TestScoreReport:
             rebased("qwen3.5-9b"),
             arm="qwen3.5-9b",
             spend_cap_usd=30.0,
-            train_and_score=lambda recipe, *, arm, spend_cap_usd, dataset_dir, eval_root: 0.5,
+            train_and_score=stub_scorer(),
         )
         report = json.loads((tmp_path / sweep.SCORE_REPORT_FILE).read_text())
         assert report["arm"] == "qwen3.5-9b"
@@ -160,7 +172,7 @@ class TestScoreReport:
             WatcherRecipe.default(),
             arm="qwen3-8b",
             spend_cap_usd=18.0,
-            train_and_score=lambda recipe, *, arm, spend_cap_usd, dataset_dir, eval_root: 0.5,
+            train_and_score=stub_scorer(),
         )
         assert {path.name for path in work.iterdir()} == {METRIC_FILE, sweep.SCORE_REPORT_FILE}
 
@@ -207,6 +219,7 @@ def stub_frame() -> SimpleNamespace:
         tails=["t0", "t1", "t2", "t3"],
         labels=np.array([True, False, True, False]),
         ids=["r0", "r1", "r2", "r3"],
+        digest="stub-digest",
     )
 
 
@@ -240,7 +253,7 @@ def stub_plan() -> SimpleNamespace:
 
 
 class TestFitScoreComposition:
-    def _run(self, backend: FakeBackend, plan: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, spend_cap_usd: float = 20.0) -> float:
+    def _run(self, backend: FakeBackend, plan: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, spend_cap_usd: float = 20.0) -> sweep.ArmScore:
         monkeypatch.setattr(sweep, "ADAPTER_STAGE_DIR", tmp_path / "staging")
         monkeypatch.setattr(sweep.sentinel, "sentinel_eval_row", lambda system, user, mlx_id: EvalRow(tokens=(0,), weights=(1.0,)))
         return sweep.observe_fit_score(
@@ -251,8 +264,11 @@ class TestFitScoreComposition:
         # Runs the non-locally-servable qwen3.5-9b arm: fit+score succeeds where train/retrain/materialize refuse.
         plan, checkpoints = stub_plan()
         backend = FakeBackend(checkpoints, perfect_scores(), train_cost_usd=13.0)
-        metric = self._run(backend, plan, tmp_path, monkeypatch)
-        assert metric == 1.0
+        score = self._run(backend, plan, tmp_path, monkeypatch)
+        assert score.metric == 1.0
+        # The per-row P(NO_STEER) rides the score keyed by frame row id, ready for a paired comparison.
+        assert score.probs == pytest.approx({"r0": 0.1, "r1": 0.9, "r2": 0.2, "r3": 0.8})
+        assert score.frame_digest == "stub-digest"
         assert [call.path for call in backend.score_calls] == ["tinker://ckpt-b"]
         assert backend.score_calls[0].base is BASE_MODELS["qwen3.5-9b"]
         assert backend.materialized == []
@@ -346,9 +362,10 @@ STUB_SCORER = (
     "from cc_steer.retrain import sweep\n"
     "from cc_steer.retrain.watcher import WatcherRecipe\n"
     "knob = json.loads(Path('watcher_recipe.json').read_text())['knob']\n"
+    "score = sweep.ArmScore(metric=float(knob), probs={'r0': 0.5}, frame_digest='stub')\n"
     "sweep.score_watcher(\n"
     "    WatcherRecipe.default(), arm='qwen3-8b', spend_cap_usd=18.0,\n"
-    "    train_and_score=lambda recipe, *, arm, spend_cap_usd, dataset_dir, eval_root: float(knob),\n"
+    "    train_and_score=lambda recipe, *, arm, spend_cap_usd, dataset_dir, eval_root: score,\n"
     ")\n"
 )
 
@@ -441,3 +458,86 @@ def test_cli_score_watcher_invokes_sweep(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.exit_code == 0, result.output
     assert "0.9123" in result.output
     assert seen == {"arm": "qwen3-8b", "spend_cap_usd": 18.0}
+
+
+COMPARE_FRAME = SimpleNamespace(
+    ids=[f"r{i}" for i in range(8)],
+    labels=np.array([True, True, True, False, False, False, True, False]),
+    digest="frame-d",
+)
+
+
+def write_report(path: Path, *, metric: float, probs: dict[str, float] | None, digest: str = "frame-d") -> Path:
+    payload: dict[str, object] = {"metric": metric, "arm": "qwen3-8b", "serves_locally": True}
+    if probs is not None:
+        payload |= {"dataset_digest": digest, "probs": probs}
+    path.write_text(json.dumps(payload))
+    return path
+
+
+class TestCompareScoreReports:
+    def test_paired_verdict_over_both_persisted_probs_vectors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sweep.evalset.EvalFrame, "load", lambda *, root=None: COMPARE_FRAME)
+        probs_a = {rid: p for rid, p in zip(COMPARE_FRAME.ids, (0.1, 0.2, 0.7, 0.3, 0.8, 0.6, 0.4, 0.9))}
+        probs_b = {rid: p for rid, p in zip(COMPARE_FRAME.ids, (0.2, 0.1, 0.6, 0.4, 0.7, 0.5, 0.5, 0.8))}
+        report_a = write_report(tmp_path / "a.json", metric=0.9, probs=probs_a)
+        report_b = write_report(tmp_path / "b.json", metric=0.8, probs=probs_b)
+        comparison = sweep.compare_score_reports(report_a, report_b)
+        fire_a = 1.0 - np.array([probs_a[rid] for rid in COMPARE_FRAME.ids])
+        fire_b = 1.0 - np.array([probs_b[rid] for rid in COMPARE_FRAME.ids])
+        assert comparison == instrument.paired_verdict(
+            instrument.paired_delong(COMPARE_FRAME.labels, fire_a, fire_b)
+        )
+        assert comparison.paired is not None  # measured rho, not an assumed one
+
+    def test_frame_drift_fails_loud(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sweep.evalset.EvalFrame, "load", lambda *, root=None: COMPARE_FRAME)
+        probs = dict.fromkeys(COMPARE_FRAME.ids, 0.5)
+        report_a = write_report(tmp_path / "a.json", metric=0.9, probs=probs)
+        report_b = write_report(tmp_path / "b.json", metric=0.8, probs=probs, digest="stale-d")
+        with pytest.raises(sweep.FrameMismatch, match="stale-d"):
+            sweep.compare_score_reports(report_a, report_b)
+
+    @pytest.mark.parametrize(
+        ("metric_b", "expected_actionable", "expected_verdict"),
+        [
+            (0.86, False, "within noise floor (MDE 0.0453)"),
+            (0.96, True, "actionable gain (delta +0.0600, unpaired MDE 0.0453)"),
+        ],
+        ids=["sub-mde-delta-is-noise", "large-delta-actionable"],
+    )
+    def test_missing_counterpart_probs_falls_back_to_unpaired_card_floor(
+        self, tmp_path: Path, metric_b: float, expected_actionable: bool, expected_verdict: str
+    ) -> None:
+        card = tmp_path / "card.json"
+        card.write_text(json.dumps({"mde": 0.0453, "stopping": {"mde": 0.0453}, "mde_paired": {}}))
+        report_a = write_report(tmp_path / "a.json", metric=0.90, probs=None)
+        report_b = write_report(
+            tmp_path / "b.json", metric=metric_b, probs=dict.fromkeys(COMPARE_FRAME.ids, 0.5)
+        )
+        comparison = sweep.compare_score_reports(report_a, report_b, card_path=card)
+        assert comparison.paired is None
+        assert comparison.actionable is expected_actionable
+        assert comparison.verdict == expected_verdict
+
+
+def test_cli_compare_arms_prints_the_card_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from click.testing import CliRunner
+
+    from cc_steer import cli
+
+    report_a = write_report(tmp_path / "a.json", metric=0.90, probs=None)
+    report_b = write_report(tmp_path / "b.json", metric=0.88, probs=None)
+    seen: dict[str, object] = {}
+
+    def fake(a: Path, b: Path, **kwargs: object) -> instrument.Comparison:
+        seen.update(a=a, b=b)
+        return instrument.unpaired_verdict(0.90, 0.88, frame_mde=0.0453)
+
+    monkeypatch.setattr(sweep, "compare_score_reports", fake)
+    result = CliRunner().invoke(cli.main, ["compare-arms", str(report_a), str(report_b)])
+    assert result.exit_code == 0, result.output
+    assert result.output == "AUC 0.9000 -> 0.8800: within noise floor (MDE 0.0453)\n"
+    assert seen == {"a": report_a, "b": report_b}

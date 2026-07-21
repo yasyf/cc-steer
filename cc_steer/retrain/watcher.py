@@ -59,13 +59,13 @@ from athome.train import retrain as athome_retrain
 from athome.train.gate import GateVerdict
 from athome.train.tinker import eval_datum, fits
 
-from cc_steer import launchd, registry
+from cc_steer import instrument, launchd, registry
 from cc_steer.retrain import data, evalset, judged, promotion, sentinel
 from cc_steer.watcher import drafter_mlx
 from cc_steer.watcher.cascade import DRAFT_SYSTEM
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from athome.train import EvalRow
 
@@ -75,6 +75,7 @@ WATCHER_COMPONENT = drafter_mlx.COMPONENT
 KEEP_VERSIONS = 3
 ADAPTER_STAGE_DIR: Path = Path.home() / ".cc-steer" / "adapters" / "staging"
 DIAGNOSTIC_NAME = "serving_diagnostic.json"
+COMPARISON_NAME = "paired_comparison.json"
 RUN_JOURNAL_NAME = "progress.jsonl"
 TINKER_ENV: Path = Path.home() / ".cc-steer" / "tinker.env"
 
@@ -296,7 +297,9 @@ def retrain_watcher(
     new version's served probs before kicking the live watch agent. Every branch — skip,
     spend-cap reject, gate reject, promote — journals exactly once, and a serving-drift diagnostic
     persists beside the artifacts for every candidate that materializes, behind a boundary that
-    keeps its own failure off the gate outcome.
+    keeps its own failure off the gate outcome. Every incumbent-relative comparison also persists
+    both arms' per-row probs and the paired-DeLong record (delta, 95% CI, measured rho, and the
+    instrument-card verdict) beside the artifacts, so a reject leaves the comparison auditable.
 
     ``fresh_epoch`` is the one-shot clean-slate cutover: the incumbent-relative gate
     (:func:`~cc_steer.retrain.promotion.corrected_gate`) is skipped entirely — the candidate
@@ -348,9 +351,10 @@ def retrain_watcher(
         # judged_gate; athome only records this placeholder, which the fresh-epoch floor never consults.
         return GateVerdict(promote=True, reason="deferred to judged gate", stats={})
 
-    async def judged_gate(gate_state: IncumbentGate, served: dict[str, float]) -> GateVerdict:
-        served_arr = np.array([served[row_id] for row_id in frame.ids], dtype=np.float64)
-        candidate_fire, incumbent_fire = 1.0 - served_arr, 1.0 - gate_state.probs
+    async def judged_gate(
+        gate_state: IncumbentGate, served: dict[str, float], paired: instrument.PairedDeLong
+    ) -> GateVerdict:
+        candidate_fire, incumbent_fire = 1.0 - _served_array(frame, served), 1.0 - gate_state.probs
         incumbent_fire_threshold = 1.0 - gate_state.threshold
         harmful = await judged.judged_harmful_favors_incumbent(
             candidate_fire_scores=candidate_fire,
@@ -370,8 +374,13 @@ def retrain_watcher(
             warranted=warranted,
             harmful_favors_incumbent=harmful,
         )
-        verdict = promotion.watcher_promotable(result)
-        return GateVerdict(promote=bool(verdict.promote), reason=verdict.reason, stats=_gate_stats(result))
+        comparison = instrument.paired_verdict(paired)
+        verdict = promotion.watcher_promotable(result, comparison)
+        return GateVerdict(
+            promote=bool(verdict.promote),
+            reason=verdict.reason,
+            stats=_gate_stats(result) | _comparison_stats(paired, comparison),
+        )
 
     load_key()
     backend = TinkerBackend.from_settings()
@@ -400,7 +409,22 @@ def retrain_watcher(
         )
         # The incumbent-relative gate — free metrics plus the judged harmful-fire term that buys opus
         # votes — runs here in the async path; fresh-epoch has no incumbent and rides the served AUC floor.
-        verdict = await judged_gate(incumbent_gate, outcome.served) if incumbent_gate is not None else outcome.verdict
+        if incumbent_gate is not None:
+            paired = instrument.paired_delong(
+                frame.labels, 1.0 - incumbent_gate.probs, 1.0 - _served_array(frame, outcome.served)
+            )
+            # Written before judging, so both arms' per-row evidence survives a reject or a judging failure.
+            _write_comparison(
+                work_dir / COMPARISON_NAME,
+                paired,
+                frame=frame,
+                incumbent=incumbent_gate.version,
+                incumbent_probs=incumbent_gate.probs,
+                served=outcome.served,
+            )
+            verdict = await judged_gate(incumbent_gate, outcome.served, paired)
+        else:
+            verdict = outcome.verdict
         return outcome, verdict, diagnostic, diag_note
 
     try:
@@ -416,7 +440,7 @@ def retrain_watcher(
         )
 
     served_probs = outcome.served
-    served_arr = np.array([served_probs[row_id] for row_id in frame.ids], dtype=np.float64)
+    served_arr = _served_array(frame, served_probs)
     eval_auc = promotion.sentinel_auc(frame.labels, 1.0 - served_arr)
     diag_suffix = f"; {diag_note}" if diag_note else ""
 
@@ -746,3 +770,60 @@ def _gate_stats(result: GateResult) -> dict[str, float]:
         "incumbent_auc": float(result.incumbent_auc),
         "auc_not_regressed": float(result.auc_not_regressed),
     }
+
+
+def _served_array(frame: evalset.EvalFrame, served: Mapping[str, float]) -> np.ndarray:
+    return np.array([served[row_id] for row_id in frame.ids], dtype=np.float64)
+
+
+def _comparison_stats(paired: instrument.PairedDeLong, comparison: instrument.Comparison) -> dict[str, float]:
+    return {
+        "auc_delta": float(paired.delta),
+        "auc_delta_se_paired": float(paired.se_delta),
+        "auc_delta_rho": float(paired.rho),
+        "auc_delta_ci95_lo": float(paired.ci95[0]),
+        "auc_delta_ci95_hi": float(paired.ci95[1]),
+        "auc_delta_mde_paired": float(comparison.mde),
+        "auc_delta_actionable": float(comparison.actionable),
+    }
+
+
+def _write_comparison(
+    path: Path,
+    paired: instrument.PairedDeLong,
+    *,
+    frame: evalset.EvalFrame,
+    incumbent: str,
+    incumbent_probs: np.ndarray,
+    served: Mapping[str, float],
+) -> None:
+    comparison = instrument.paired_verdict(paired)
+    path.write_text(
+        json.dumps(
+            {
+                "frame_digest": frame.digest,
+                "n_rows": len(frame),
+                "incumbent": incumbent,
+                "candidate": "candidate",
+                "auc_incumbent": paired.auc_a,
+                "auc_candidate": paired.auc_b,
+                "delta": paired.delta,
+                "se_delta_paired": paired.se_delta,
+                "rho": paired.rho,
+                "z": paired.z,
+                "ci95_paired": list(paired.ci95),
+                "mde_paired": comparison.mde,
+                "actionable": comparison.actionable,
+                "verdict": comparison.verdict,
+                "probs": {
+                    "incumbent": {
+                        row_id: float(prob) for row_id, prob in zip(frame.ids, incumbent_probs, strict=True)
+                    },
+                    "candidate": {row_id: float(served[row_id]) for row_id in frame.ids},
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )

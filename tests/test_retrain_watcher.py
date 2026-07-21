@@ -623,6 +623,63 @@ class TestRetrainWatcher:
         assert lane.calls["retrain"] == 0  # validate the incumbent gate before any Tinker spend
 
 
+def comparison_path(lane: Lane) -> Path:
+    matches = sorted((lane.state_dir / "adapters").glob(f"watcher-*/{w.COMPARISON_NAME}"))
+    assert len(matches) == 1, f"expected exactly one paired comparison, got {matches}"
+    return matches[0]
+
+
+class TestPairedComparisonArtifact:
+    def test_promote_persists_both_arms_probs_and_delong_stats(self, lane: Lane) -> None:
+        verdict = lane.run()
+        assert verdict.startswith("watcher: promoted")
+        payload = json.loads(comparison_path(lane).read_text())
+        assert payload["frame_digest"] == lane.frame.digest
+        assert payload["n_rows"] == N
+        assert payload["incumbent"] == lane.incumbent.version
+        assert payload["probs"]["incumbent"] == pytest.approx(
+            {rid: float(INCUMBENT[i]) for i, rid in enumerate(lane.frame.ids)}
+        )
+        assert payload["probs"]["candidate"] == pytest.approx(
+            {rid: float(CANDIDATE_WIN[i]) for i, rid in enumerate(lane.frame.ids)}
+        )
+        assert payload["delta"] == pytest.approx(payload["auc_candidate"] - payload["auc_incumbent"])
+        assert payload["ci95_paired"] == pytest.approx(
+            [payload["delta"] - 1.959963984540054 * payload["se_delta_paired"],
+             payload["delta"] + 1.959963984540054 * payload["se_delta_paired"]]
+        )
+        entry = json.loads((lane.state_dir / "retrain" / "journal.jsonl").read_text().splitlines()[-1])
+        assert entry["metrics"]["auc_delta"] == pytest.approx(payload["delta"])
+        # CANDIDATE_WIN separates the tiny lane frame perfectly, so its DeLong variance (and rho) degenerate.
+        assert entry["metrics"]["auc_delta_rho"] == pytest.approx(payload["rho"], nan_ok=True)
+        assert entry["metrics"]["auc_delta_mde_paired"] == pytest.approx(payload["mde_paired"])
+        current = registry.current(w.WATCHER_COMPONENT, root=lane.registry_root)
+        assert current is not None and current.metadata["auc_delta_se_paired"] == pytest.approx(
+            payload["se_delta_paired"]
+        )
+
+    def test_reject_still_persists_the_comparison_and_reports_noise_not_loss(self, lane: Lane) -> None:
+        # An identical candidate is a zero delta: the artifact survives the reject and the verdict
+        # speaks the card's language — within the noise floor, never an AUC loss.
+        lane.candidate = INCUMBENT.copy()
+        verdict = lane.run()
+        assert verdict.startswith("watcher: rejected")
+        assert "within noise floor (MDE 0.0000)" in verdict
+        payload = json.loads(comparison_path(lane).read_text())
+        assert payload["delta"] == pytest.approx(0.0)
+        assert payload["actionable"] is False
+        assert payload["verdict"] == "within noise floor (MDE 0.0000)"
+        assert payload["probs"]["candidate"] == payload["probs"]["incumbent"]
+        entry = json.loads((lane.state_dir / "retrain" / "journal.jsonl").read_text().splitlines()[-1])
+        assert entry["metrics"]["auc_delta"] == pytest.approx(0.0)
+        assert entry["metrics"]["auc_delta_actionable"] == 0.0
+
+    def test_fresh_epoch_has_no_comparison(self, lane: Lane) -> None:
+        evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()
+        assert lane.run(fresh_epoch=True).startswith("watcher: fresh-epoch promoted")
+        assert list((lane.state_dir / "adapters").glob(f"watcher-*/{w.COMPARISON_NAME}")) == []
+
+
 class TestFreshEpoch:
     def test_promotes_on_absolute_bar_without_incumbent_probs(self, lane: Lane) -> None:
         evalset.probs_path(lane.incumbent.version, root=lane.eval_dir).unlink()  # no incumbent probs for this frame

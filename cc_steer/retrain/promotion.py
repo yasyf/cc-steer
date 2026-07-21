@@ -2,9 +2,10 @@
 
 A candidate is promoted only when it beats the incumbent on metrics that cost nothing
 to compute — no frontier judging. The watcher bar (:func:`watcher_promotable`) reads
-the corrected paired gate (:func:`corrected_gate`): a strict sentinel-AUC beat, the
-fire budget held at matched fires, and coverage wins at least matching losses on the
-warranted prose-corrective rows. The gate bar (:func:`gate_promotable`) is the
+the corrected paired gate (:func:`corrected_gate`) under the instrument card's paired
+DeLong rule (:func:`cc_steer.instrument.paired_verdict`): no actionable sentinel-AUC
+regression, the fire budget held at matched fires, and coverage wins at least matching
+losses on the warranted prose-corrective rows. The gate bar (:func:`gate_promotable`) is the
 lexical gate's rule: beat the incumbent's PR-AUC without regressing recall at the
 alert budget. :func:`should_retrain` decides whether a pass trains at all — forced,
 no incumbent, or the training data moved.
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from cc_steer import registry
+    from cc_steer.instrument import Comparison
 
 STATE_DIR: Path = Path.home() / ".cc-steer"
 JOURNAL_NAME = "journal.jsonl"
@@ -75,25 +77,21 @@ class Verdict:
     reason: str
 
 
-def watcher_promotable(result: GateResult) -> Verdict:
-    """The watcher bar: the judged verdict when it exists, else the free-metric bar.
+def watcher_promotable(result: GateResult, comparison: Comparison) -> Verdict:
+    """The watcher bar: the judged fold when it exists, else the free-metric bar, AUC term card-governed.
 
-    Once the harmful-fire judging has run, :attr:`GateResult.promote` folds the free metrics
-    together with the judged term, so it is authoritative — a ``harmful_favors_incumbent`` verdict
-    refuses promotion even when the free metrics pass. While judging is pending
-    (``result.promote is None``) this falls back to the free-metric bar: a strict AUC beat, the fire
-    budget held, and coverage wins at least matching losses. Fails closed on a non-finite AUC: a NaN
-    on either side is a degenerate score, never a beat.
+    ``comparison`` is the instrument-card verdict (:func:`cc_steer.instrument.paired_verdict`) over
+    the same two fire-score vectors the gate compared. Its two-part rule replaces the point AUC beat
+    everywhere: only an actionable regression refuses on AUC, and a sub-threshold delta is instrument
+    noise — reported as within the noise floor, never a win, a loss, or a rejection. Once the
+    harmful-fire judging has run (``result.harmful_favors_incumbent`` is not ``None``) the verdict
+    folds significant coverage, the fire budget at matched fires, and no actionable AUC regression
+    with the judged term — recomposed here from the gate's components because
+    :attr:`GateResult.promote` bakes in the point AUC comparison this rule supersedes. While judging
+    is pending it falls back to the free-metric bar: no actionable AUC regression, the fire budget
+    held, and coverage wins at least matching losses. Fails closed on a non-finite AUC: a NaN on
+    either side is a degenerate score, never a beat.
     """
-    if result.promote is not None:
-        return Verdict(
-            result.promote,
-            f"judged gate {'promotes' if result.promote else 'refuses'}: "
-            f"harmful_favors_incumbent={result.harmful_favors_incumbent}, coverage "
-            f"{result.coverage_wins}/{result.coverage_losses} (sig {result.coverage_sig}), "
-            f"budget {'held' if result.budget_held else 'exceeded'}, "
-            f"AUC {result.cell_auc:.4f} vs {result.incumbent_auc:.4f}",
-        )
     if not all(
         np.isfinite(value)
         for value in (result.cell_auc, result.incumbent_auc, result.coverage_wins, result.coverage_losses)
@@ -103,16 +101,27 @@ def watcher_promotable(result: GateResult) -> Verdict:
             f"non-finite metric: candidate AUC {result.cell_auc}, incumbent AUC {result.incumbent_auc}, "
             f"coverage {result.coverage_wins}/{result.coverage_losses}",
         )
-    if result.cell_auc <= result.incumbent_auc:
-        return Verdict(False, f"candidate AUC {result.cell_auc:.4f} <= incumbent {result.incumbent_auc:.4f}")
+    regressed = comparison.actionable and comparison.delta < 0
+    auc_line = f"AUC {comparison.auc_b:.4f} vs incumbent {comparison.auc_a:.4f}: {comparison.verdict}"
+    if result.harmful_favors_incumbent is not None:
+        promote = (
+            result.coverage_sig and result.budget_held and not regressed and not result.harmful_favors_incumbent
+        )
+        return Verdict(
+            promote,
+            f"judged gate {'promotes' if promote else 'refuses'}: "
+            f"harmful_favors_incumbent={result.harmful_favors_incumbent}, coverage "
+            f"{result.coverage_wins}/{result.coverage_losses} (sig {result.coverage_sig}), "
+            f"budget {'held' if result.budget_held else 'exceeded'}, {auc_line}",
+        )
+    if regressed:
+        return Verdict(False, auc_line)
     if not result.budget_held:
         return Verdict(False, "fire budget exceeded at matched fires")
     if result.coverage_wins < result.coverage_losses:
         return Verdict(False, f"coverage losses {result.coverage_losses} > wins {result.coverage_wins}")
     return Verdict(
-        True,
-        f"candidate AUC {result.cell_auc:.4f} > incumbent {result.incumbent_auc:.4f}, budget held, "
-        f"coverage {result.coverage_wins} >= {result.coverage_losses}",
+        True, f"{auc_line}; budget held, coverage {result.coverage_wins} >= {result.coverage_losses}"
     )
 
 
