@@ -29,6 +29,7 @@ dependencies = [
     "huggingface-hub>=0.27",
     "numpy>=2",
     "pydantic>=2",
+    "rapidfuzz>=3.9",
     "spawnllm>=0.6.1,<0.7",
     "uvicorn>=0.30",
 ]

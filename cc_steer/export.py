@@ -5,7 +5,9 @@ pairs, and code evidence in the shared ``corrections`` ledger. This stage reads
 both stores (never writing to either) and materializes one canonical ``traces``
 config — one row per judged event — plus three TRL-ready projections: ``sft``
 (context + agent action → the user's verbatim steering), ``dpo`` (correcting
-edit preferred over faulted edit), and ``kto`` (context + action → would the
+edit preferred over faulted edit; pairs whose sides are identical or within
+``DPO_DEGENERACY_FLOOR`` normalized word-level edit distance carry no
+preference signal and are dropped), and ``kto`` (context + action → would the
 user steer). Every config lands as per-split parquet under the output
 directory next to a generated dataset card, and optionally pushes to a private
 HuggingFace repo.
@@ -29,6 +31,7 @@ from cc_transcript.models import AssistantEvent
 from cc_transcript.render import Budget, clip
 from datasets import Dataset, DatasetDict, Features, Value
 from huggingface_hub import HfApi
+from rapidfuzz.distance import Levenshtein
 
 from cc_steer.enrich import SOURCE, load_activity
 from cc_steer.refine import PROMPT_VERSION as REFINE_VERSION
@@ -68,6 +71,10 @@ REVIEW_META_KEYS = ("file", "line_start", "line_end", "format")
 # is the label and must never join model input.
 ASK_META_KEYS = ("question", "header", "recommended_pick")
 DPO_SIDES = ("faulted_old", "faulted_new", "correcting_old", "correcting_new")
+# E26 probe (ledger 310454b94): degenerate pairs sit at word-level d == 0.0,
+# the next-nearest at d ~ 0.008 — the floor bisects the gap.
+DPO_DEGENERACY_FLOOR = 0.005
+WORD_RE = re.compile(r"\w+|[^\w\s]")
 
 TRACES_QUERY = """
 WITH judge AS (
@@ -517,15 +524,25 @@ def dpo_row(trace: Trace, entry: Evidence) -> DpoRow:
     }
 
 
+def dpo_degenerate(row: DpoRow) -> bool:
+    chosen, rejected = row["chosen"][0]["content"], row["rejected"][0]["content"]
+    a, b = WORD_RE.findall(chosen), WORD_RE.findall(rejected)
+    return chosen == rejected or (
+        0.0 if (m := max(len(a), len(b))) == 0 else Levenshtein.distance(a, b) / m
+    ) < DPO_DEGENERACY_FLOOR
+
+
 def dpo_split(traces: Sequence[Trace]) -> list[DpoRow]:
-    return list(
-        {
+    return [
+        row
+        for row in {
             (trace["session_id"], trace["event_uuid"], entry["digest"]): dpo_row(trace, entry)
             for trace in sorted(traces, key=lambda trace: trace["is_steering"])
             for entry in trace["evidence"]
             if all(entry[side] is not None for side in DPO_SIDES)
         }.values()
-    )
+        if not dpo_degenerate(row)
+    ]
 
 
 def gate_row(row: Mapping[str, object]) -> GateRow | None:

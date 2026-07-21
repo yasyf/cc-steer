@@ -21,6 +21,7 @@ from cc_steer.export import (
     EmptyWatcherPrompt,
     ask_message_of,
     dpo_row,
+    dpo_split,
     evidence_entry,
     export,
     gate_row,
@@ -83,7 +84,14 @@ def verdict(category: str, *, what: str) -> Verdict:
     return Verdict.model_validate({"category": category, "what_claude_did": what, "confidence": 0.9, "rationale": "r"})
 
 
-def correction(uuid: str, *, ts_ms: int, source: str = "cc-steer", grounded: bool = True) -> Correction:
+def correction(
+    uuid: str,
+    *,
+    ts_ms: int,
+    source: str = "cc-steer",
+    grounded: bool = True,
+    correcting: tuple[str, str] = ("worse", "good"),
+) -> Correction:
     return Correction(
         ts_ms=ts_ms,
         session_id=SessionId(TRAIN_SESSION),
@@ -95,8 +103,8 @@ def correction(uuid: str, *, ts_ms: int, source: str = "cc-steer", grounded: boo
         incorrect_new="worse",
         correction_origin="git" if grounded else None,
         correction_file="/repo/a.py" if grounded else None,
-        correction_old="worse" if grounded else None,
-        correction_new="good" if grounded else None,
+        correction_old=correcting[0] if grounded else None,
+        correction_new=correcting[1] if grounded else None,
         correction_commit="abc123" if grounded else None,
         overlap=0.9 if grounded else 0.0,
     )
@@ -652,6 +660,32 @@ class TestViewPrompts:
         with pytest.raises(EmptyWatcherPrompt) as raised:
             dpo_row(empty_prompt_trace(), evidence_entry(correction("u9", ts_ms=9)))
         assert (raised.value.view, raised.value.dedup_key) == ("dpo", "k-qa")
+
+
+@pytest.mark.unit
+def test_dpo_split_drops_degenerate_pairs_that_sft_and_kto_keep() -> None:
+    healthy, identical, whitespace = (
+        trace_for(source_kind="transcript_message", meta={}, context=[{"role": "user", "content": "please fix it"}])
+        | {"id": id_, "event_uuid": uuid, "evidence": [evidence_entry(correction(uuid, ts_ms=ts, correcting=sides))]}
+        for id_, uuid, ts, sides in (
+            ("k-healthy", "u6", 6, ("worse", "good")),
+            ("k-identical", "u7", 7, ("bad", "worse")),
+            ("k-whitespace", "u8", 8, ("bad", "worse ")),
+        )
+    )
+    kept = dpo_split([healthy, identical, whitespace])
+    assert [row["id"] for row in kept] == ["k-healthy"]
+    assert kept[0]["chosen"] != kept[0]["rejected"]
+    assert [sft_row(trace)["id"] for trace in (healthy, identical, whitespace)] == [
+        "k-healthy",
+        "k-identical",
+        "k-whitespace",
+    ]
+    assert [kto_row(trace)["id"] for trace in (healthy, identical, whitespace)] == [
+        "k-healthy",
+        "k-identical",
+        "k-whitespace",
+    ]
 
 
 class TestWatcherV2:
