@@ -27,6 +27,7 @@ from cc_steer.export import (
     kto_row,
     live_gate_row,
     live_watcher_row,
+    resolve_origin_path,
     session_trajectory,
     sft_row,
     split_of,
@@ -835,3 +836,53 @@ async def test_trajectory_rows_bounds_io_to_steering_sessions_and_totals_the_unm
 @pytest.mark.unit
 def test_trajectory_unmapped_reason_is_a_stable_key() -> None:
     assert TRAJECTORY_UNMAPPED_REASON == "trajectory_anchor_unmapped"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("origin_path", "expected"),
+    [
+        pytest.param(
+            "/Users/yasyf/.cc-pushback/mirrors/yasyf/-Users-yasyf-Code-cc-notes/s.jsonl",
+            "/Users/yasyf/.cc-steer/mirrors/yasyf/-Users-yasyf-Code-cc-notes/s.jsonl",
+            id="legacy-mirror-rewritten",
+        ),
+        pytest.param(
+            "/Users/yasyf/.cc-steer/mirrors/yasyf/-Users-yasyf/s.jsonl",
+            "/Users/yasyf/.cc-steer/mirrors/yasyf/-Users-yasyf/s.jsonl",
+            id="current-mirror-untouched",
+        ),
+        pytest.param(
+            "/Users/yasyf/.claude/projects/-Users-yasyf-Code-yclaw/s.jsonl",
+            "/Users/yasyf/.claude/projects/-Users-yasyf-Code-yclaw/s.jsonl",
+            id="default-projects-untouched",
+        ),
+        pytest.param(None, None, id="none-passes-through"),
+    ],
+)
+def test_resolve_origin_path_rewrites_only_the_legacy_mirror(origin_path: str | None, expected: str | None) -> None:
+    assert resolve_origin_path(origin_path) == expected
+
+
+@pytest.mark.unit
+async def test_trajectory_rows_resolves_legacy_origin_before_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    activity = trajectory_activity()
+    seen: list[object] = []
+
+    async def capture(session_id: object, origin_path: object) -> object:
+        seen.append(origin_path)
+        return activity
+
+    monkeypatch.setattr(export_mod, "load_activity", capture)
+    await trajectory_rows(
+        [
+            {
+                "is_steering": True,
+                "session_id": "sess-traj",
+                "event_uuid": "uB",
+                "category": "wrong_approach",
+                "meta": json.dumps({"origin_path": "/Users/yasyf/.cc-pushback/mirrors/yasyf/-Users-yasyf/s.jsonl"}),
+            }
+        ]
+    )
+    assert seen == ["/Users/yasyf/.cc-steer/mirrors/yasyf/-Users-yasyf/s.jsonl"]

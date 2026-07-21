@@ -219,6 +219,9 @@ LIVE_SOURCE = "live_reaction"
 LIVE_EMPTY_WINDOW_REASON = "live_window_render_empty"
 TRAJECTORY_UNMAPPED_REASON = "trajectory_anchor_unmapped"
 TRAJECTORY_BUDGET = Budget(turn_chars=2000, tool_chars=2000)
+# Pre-rename origin paths under the retired ~/.cc-pushback mirror; transcripts now live under ~/.cc-steer.
+LEGACY_MIRROR_SEGMENT = "/.cc-pushback/"
+MIRROR_SEGMENT = "/.cc-steer/"
 
 # reaction kind -> (label bucket, fire label, confidence); expired carries no label.
 LIVE_LABEL: dict[str, tuple[str, bool, float]] = {
@@ -763,6 +766,14 @@ def trajectory_turn_row(
     }
 
 
+def resolve_origin_path(origin_path: str | None) -> str | None:
+    match origin_path:
+        case str() as path if LEGACY_MIRROR_SEGMENT in path:
+            return path.replace(LEGACY_MIRROR_SEGMENT, MIRROR_SEGMENT)
+        case _:
+            return origin_path
+
+
 async def session_trajectory(
     session_id: str, anchors: Sequence[Mapping[str, str]], *, origin_path: str | None, budget: Budget
 ) -> tuple[list[TrajectoryRow], int]:
@@ -814,7 +825,7 @@ async def trajectory_rows(
         anchors_by_session.setdefault(session, []).append(
             {"event_uuid": trace["event_uuid"], "category": trace["category"]}
         )
-        origin_by_session.setdefault(session, json.loads(trace["meta"]).get("origin_path"))
+        origin_by_session.setdefault(session, resolve_origin_path(json.loads(trace["meta"]).get("origin_path")))
     by_split: dict[str, list[TrajectoryRow]] = {split: [] for split in SPLITS}
     unmapped = 0
     for session, anchors in anchors_by_session.items():
