@@ -34,7 +34,7 @@ from cc_transcript.mining.store import now
 from cc_transcript.parser import parse
 
 from cc_steer.detectors import detect
-from cc_steer.watcher.delivery import ShadowDelivery
+from cc_steer.watcher.delivery import ShadowDelivery, open_shadow_sqlite
 from cc_steer.watcher.wsr import FireOutcome
 
 if TYPE_CHECKING:
@@ -45,22 +45,6 @@ if TYPE_CHECKING:
     from cc_transcript.models import TranscriptEvent
 
 DEFAULT_RADIUS = 1
-
-OUTCOMES_DDL = """
-CREATE TABLE IF NOT EXISTS scored_outcomes (
-  session_id TEXT NOT NULL,
-  turn_index INTEGER NOT NULL,
-  ts TEXT NOT NULL,
-  fired INTEGER NOT NULL,
-  steered INTEGER NOT NULL,
-  steer_turn INTEGER,
-  steer_dedup_key TEXT,
-  distance INTEGER,
-  radius INTEGER NOT NULL,
-  resolved_at TEXT NOT NULL,
-  UNIQUE(session_id, turn_index)
-);
-"""
 
 INSERT_OUTCOME = """
 INSERT INTO scored_outcomes (
@@ -205,13 +189,7 @@ class OutcomeStore:
     async def open(cls, path: Path | None = None) -> Self:
         """Opens (creating if needed) the outcomes table in the shared ledger at ``path``."""
         target = path or ShadowDelivery.default_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        conn = await aiosqlite.connect(str(target), isolation_level=None)
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA busy_timeout=2000")
-        await conn.executescript(OUTCOMES_DDL)
-        return cls(conn)
+        return cls(await open_shadow_sqlite(target))
 
     async def close(self) -> None:
         await self.conn.close()

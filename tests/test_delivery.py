@@ -2,37 +2,28 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sqlite3
 from typing import TYPE_CHECKING
 
 import aiosqlite
 import anyio
 import pytest
 
-from cc_steer.watcher.delivery import ShadowDelivery
+from cc_steer.watcher.delivery import (
+    EXPECTED_SHADOW_DDL_FINGERPRINT,
+    EXPECTED_SHADOW_OBJECT_FINGERPRINT,
+    SHADOW_SCHEMA_COMPONENT,
+    SHADOW_SCHEMA_VERSION,
+    ShadowDelivery,
+    shadow_ddl_fingerprint,
+    shadow_object_fingerprint,
+)
 from cc_steer.watcher.types import ScoredMoment, SteerProposal
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.anyio
-
-LEGACY_DDL = """
-CREATE TABLE proposals (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  anchor_uuid TEXT NOT NULL,
-  turn_index INTEGER NOT NULL,
-  ts TEXT NOT NULL,
-  gate_score REAL,
-  sentinel_prob REAL,
-  draft TEXT,
-  steer TEXT,
-  exemplar_keys TEXT NOT NULL,
-  stage_versions TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  UNIQUE(session_id, anchor_uuid)
-);
-"""
 
 
 def make_proposal(**overrides: object) -> SteerProposal:
@@ -132,7 +123,9 @@ async def test_scored_moments_round_trip_gate_and_stage2_fields(tmp_path: Path) 
 async def test_scored_moments_refresh_on_session_and_turn_conflict(tmp_path: Path) -> None:
     async with await ShadowDelivery.open(tmp_path / "shadow.db") as delivery:
         await delivery.record_scored(make_scored(gate_score=0.42))
-        await delivery.record_scored(make_scored(gate_score=0.99, gate_passed=True, stage2_prob=0.1, stage2_threshold=0.6))
+        await delivery.record_scored(
+            make_scored(gate_score=0.99, gate_passed=True, stage2_prob=0.1, stage2_threshold=0.6)
+        )
         await delivery.record_scored(make_scored(turn_index=9, gate_score=0.77))
         rows = await delivery.scored_moments()
     assert [
@@ -184,18 +177,104 @@ async def test_scored_moments_bounds_by_since_and_counts_all(tmp_path: Path) -> 
     assert [row["turn_index"] for row in everything] == [0, 1, 2]
 
 
-async def test_open_migrates_a_legacy_ledger_missing_window_render(tmp_path: Path) -> None:
+def shadow_snapshot(path: Path) -> tuple[int, tuple[tuple[object, ...], ...], tuple[object, ...]]:
+    with sqlite3.connect(path) as conn:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        objects = tuple(conn.execute("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"))
+        try:
+            marker = conn.execute(
+                "SELECT id, component, schema_version, ddl_fingerprint, object_fingerprint "
+                "FROM cc_steer_shadow_schema_v1"
+            ).fetchone()
+        except sqlite3.OperationalError as error:
+            marker = (str(error),)
+    return version, objects, marker or ()
+
+
+def mutate_shadow(path: Path, statement: str) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(statement)
+
+
+async def create_exact_shadow(path: Path) -> None:
+    await (await ShadowDelivery.open(path)).close()
+
+
+async def test_shadow_schema_creates_and_reopens_exact_v1(tmp_path: Path) -> None:
     path = tmp_path / "shadow.db"
-    conn = await aiosqlite.connect(str(path), isolation_level=None)
-    await conn.executescript(LEGACY_DDL)
-    await conn.execute(
-        "INSERT INTO proposals "
-        "(session_id, anchor_uuid, turn_index, ts, exemplar_keys, stage_versions, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("legacy", "a0", 1, "2026-07-01T00:00:00+00:00", "[]", "{}", "2026-07-01T00:00:00+00:00"),
-    )
-    await conn.close()
     async with await ShadowDelivery.open(path) as delivery:
-        await delivery.deliver(make_proposal(anchor_uuid="a1", window_render="fresh render"))
-        rows = await delivery.proposals()
-    assert [(row["anchor_uuid"], row["window_render"]) for row in rows] == [("a0", None), ("a1", "fresh render")]
+        marker = await delivery.conn.execute_fetchall(
+            "SELECT component, schema_version, ddl_fingerprint, object_fingerprint "
+            "FROM cc_steer_shadow_schema_v1 WHERE id=1"
+        )
+        assert int((await (await delivery.conn.execute("PRAGMA user_version")).fetchone())[0]) == SHADOW_SCHEMA_VERSION
+        assert tuple(marker[0]) == (
+            SHADOW_SCHEMA_COMPONENT,
+            SHADOW_SCHEMA_VERSION,
+            EXPECTED_SHADOW_DDL_FINGERPRINT,
+            EXPECTED_SHADOW_OBJECT_FINGERPRINT,
+        )
+        assert await shadow_object_fingerprint(delivery.conn) == EXPECTED_SHADOW_OBJECT_FINGERPRINT
+    await (await ShadowDelivery.open(path)).close()
+    assert shadow_ddl_fingerprint() == EXPECTED_SHADOW_DDL_FINGERPRINT
+
+
+async def test_existing_empty_shadow_database_is_the_only_initializable_shape(tmp_path: Path) -> None:
+    path = tmp_path / "shadow.db"
+    path.touch(mode=0o600)
+    await (await ShadowDelivery.open(path)).close()
+    assert shadow_snapshot(path)[0] == SHADOW_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("initial", "mutation", "error"),
+    [
+        ("raw", "CREATE TABLE proposals(id INTEGER PRIMARY KEY)", "schema version"),
+        ("raw", "CREATE TABLE cc_steer_shadow_schema_v1(id INTEGER PRIMARY KEY)", "schema version"),
+        ("raw", "PRAGMA user_version = 77", "schema version"),
+        ("exact", "DROP TABLE scored_moments", "object fingerprint"),
+        ("exact", "CREATE TABLE foreign_state(id TEXT PRIMARY KEY)", "object fingerprint"),
+        (
+            "exact",
+            "UPDATE cc_steer_shadow_schema_v1 SET ddl_fingerprint=printf('%064d', 0) WHERE id=1",
+            "DDL fingerprint",
+        ),
+        ("exact", "PRAGMA user_version = 2", "schema version"),
+    ],
+    ids=("old", "partial", "nonzero-empty", "missing", "extra", "foreign-fingerprint", "foreign-version"),
+)
+async def test_nonexact_shadow_shapes_are_rejected_without_mutation(
+    tmp_path: Path, initial: str, mutation: str, error: str
+) -> None:
+    path = tmp_path / "shadow.db"
+    if initial == "exact":
+        await create_exact_shadow(path)
+    mutate_shadow(path, mutation)
+    before = shadow_snapshot(path)
+    with pytest.raises(RuntimeError, match=error):
+        await ShadowDelivery.open(path)
+    assert shadow_snapshot(path) == before
+
+
+async def test_open_shadow_connection_cannot_mutate_schema_or_attestation(tmp_path: Path) -> None:
+    path = tmp_path / "shadow.db"
+    async with await ShadowDelivery.open(path) as delivery:
+        before = shadow_snapshot(path)
+        statements = (
+            "CREATE TABLE probe(id INTEGER)",
+            "DROP TABLE scored_moments",
+            "ALTER TABLE proposals ADD COLUMN probe TEXT",
+            "UPDATE cc_steer_shadow_schema_v1 SET ddl_fingerprint = printf('%064d', 0) WHERE id = 1",
+            "DELETE FROM cc_steer_shadow_schema_v1 WHERE id = 1",
+            "PRAGMA user_version = 2",
+            "PRAGMA writable_schema = ON",
+            "UPDATE sqlite_schema SET sql = sql WHERE name = 'proposals'",
+            f"ATTACH DATABASE '{path}' AS samefile",
+        )
+        for statement in statements:
+            with pytest.raises(sqlite3.DatabaseError):
+                await delivery.conn.execute(statement)
+        await delivery.conn.execute("CREATE TEMP TABLE allowed(id INTEGER)")
+        await delivery.conn.execute("INSERT INTO allowed(id) VALUES (1)")
+        assert int((await (await delivery.conn.execute("SELECT id FROM allowed")).fetchone())[0]) == 1
+    assert shadow_snapshot(path) == before

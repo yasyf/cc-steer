@@ -9,7 +9,9 @@ rate — proving the cascade is worth interrupting a session for.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self
 
@@ -21,8 +23,19 @@ if TYPE_CHECKING:
 
     from cc_steer.watcher.types import ScoredMoment, SteerProposal
 
-SHADOW_DDL = """
-CREATE TABLE IF NOT EXISTS proposals (
+SHADOW_SCHEMA_COMPONENT = "cc-steer-shadow-v1"
+SHADOW_SCHEMA_VERSION = 1
+EXPECTED_SHADOW_DDL_FINGERPRINT = "cdc1f1fc38a8a0bbe17a72a14ed7eb07bf38b78f5c612d28bee1b0f1c9e2d274"
+EXPECTED_SHADOW_OBJECT_FINGERPRINT = "282ca47626f69efb53d6cd50bbf4040b7c29dc9f64a3159c100026824a4a39ae"
+
+SHADOW_SCHEMA_DDL = """CREATE TABLE cc_steer_shadow_schema_v1 (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  component TEXT NOT NULL CHECK (component = 'cc-steer-shadow-v1'),
+  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+  ddl_fingerprint TEXT NOT NULL CHECK (length(ddl_fingerprint) = 64),
+  object_fingerprint TEXT NOT NULL CHECK (length(object_fingerprint) = 64)
+);
+CREATE TABLE proposals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
   anchor_uuid TEXT NOT NULL,
@@ -39,10 +52,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   created_at TEXT NOT NULL,
   UNIQUE(session_id, anchor_uuid)
 );
-"""
-
-SCORED_MOMENTS_DDL = """
-CREATE TABLE IF NOT EXISTS scored_moments (
+CREATE TABLE scored_moments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
   turn_index INTEGER NOT NULL,
@@ -56,7 +66,63 @@ CREATE TABLE IF NOT EXISTS scored_moments (
   created_at TEXT NOT NULL,
   UNIQUE(session_id, turn_index)
 );
+CREATE TABLE deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id INTEGER NOT NULL,
+  session_id TEXT NOT NULL,
+  project TEXT,
+  ts TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  ttl TEXT NOT NULL,
+  holdout INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE(proposal_id)
+);
+CREATE TABLE reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id INTEGER NOT NULL,
+  delivery_id INTEGER,
+  kind TEXT NOT NULL,
+  source TEXT NOT NULL,
+  feedback_dedup_key TEXT,
+  similarity REAL,
+  ts TEXT NOT NULL,
+  UNIQUE(proposal_id)
+);
+CREATE TABLE scored_outcomes (
+  session_id TEXT NOT NULL,
+  turn_index INTEGER NOT NULL,
+  ts TEXT NOT NULL,
+  fired INTEGER NOT NULL,
+  steered INTEGER NOT NULL,
+  steer_turn INTEGER,
+  steer_dedup_key TEXT,
+  distance INTEGER,
+  radius INTEGER NOT NULL,
+  resolved_at TEXT NOT NULL,
+  UNIQUE(session_id, turn_index)
+);
 """
+
+_SCHEMA_DDL_ACTIONS = frozenset(
+    {
+        sqlite3.SQLITE_ALTER_TABLE,
+        sqlite3.SQLITE_CREATE_INDEX,
+        sqlite3.SQLITE_CREATE_TABLE,
+        sqlite3.SQLITE_CREATE_TRIGGER,
+        sqlite3.SQLITE_CREATE_VIEW,
+        sqlite3.SQLITE_CREATE_VTABLE,
+        sqlite3.SQLITE_DROP_INDEX,
+        sqlite3.SQLITE_DROP_TABLE,
+        sqlite3.SQLITE_DROP_TRIGGER,
+        sqlite3.SQLITE_DROP_VIEW,
+        sqlite3.SQLITE_DROP_VTABLE,
+    }
+)
+_SCHEMA_DML_ACTIONS = frozenset({sqlite3.SQLITE_DELETE, sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE})
+_PROTECTED_SCHEMA_TABLES = frozenset({"cc_steer_shadow_schema_v1", "sqlite_master", "sqlite_schema"})
+_PROTECTED_PRAGMAS = frozenset({"user_version", "writable_schema"})
 
 INSERT_PROPOSAL = """
 INSERT OR IGNORE INTO proposals (
@@ -81,12 +147,125 @@ ON CONFLICT(session_id, turn_index) DO UPDATE SET
 """
 
 
-async def ensure_columns(conn: aiosqlite.Connection) -> None:
-    cur = await conn.execute("PRAGMA table_info(proposals)")
-    columns = {row["name"] async for row in cur}
-    for column in ("window_render", "project"):
-        if column not in columns:
-            await conn.execute(f"ALTER TABLE proposals ADD COLUMN {column} TEXT")
+def shadow_ddl_fingerprint() -> str:
+    return hashlib.sha256(b"cc-steer-shadow-ddl-v1\0" + SHADOW_SCHEMA_DDL.encode()).hexdigest()
+
+
+async def shadow_object_fingerprint(conn: aiosqlite.Connection) -> str:
+    digest = hashlib.sha256(b"cc-steer-shadow-objects-v1\0")
+    rows = await conn.execute_fetchall("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+    for object_type, name, table, statement in rows:
+        for field in (object_type, name, table, statement or ""):
+            digest.update(str(field).encode())
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+async def _required_row(conn: aiosqlite.Connection, statement: str) -> sqlite3.Row:
+    row = await (await conn.execute(statement)).fetchone()
+    if row is None:
+        raise RuntimeError(f"shadow schema query returned no row: {statement}")
+    return row
+
+
+async def verify_shadow_schema(conn: aiosqlite.Connection) -> None:
+    version = int((await _required_row(conn, "PRAGMA user_version"))[0])
+    if version != SHADOW_SCHEMA_VERSION:
+        raise RuntimeError(f"shadow schema version {version}, want exactly {SHADOW_SCHEMA_VERSION}")
+    row = await (
+        await conn.execute(
+            "SELECT component, schema_version, ddl_fingerprint, object_fingerprint "
+            "FROM cc_steer_shadow_schema_v1 WHERE id=1"
+        )
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("shadow schema identity row is missing")
+    component, marker_version, stored_ddl, stored_objects = row
+    if component != SHADOW_SCHEMA_COMPONENT:
+        raise RuntimeError(f"shadow schema component {component!r}, want exactly {SHADOW_SCHEMA_COMPONENT!r}")
+    if marker_version != SHADOW_SCHEMA_VERSION:
+        raise RuntimeError(f"shadow marker version {marker_version}, want exactly {SHADOW_SCHEMA_VERSION}")
+    if stored_ddl != EXPECTED_SHADOW_DDL_FINGERPRINT:
+        raise RuntimeError(f"shadow DDL fingerprint {stored_ddl!r}, want exactly {EXPECTED_SHADOW_DDL_FINGERPRINT!r}")
+    if stored_objects != EXPECTED_SHADOW_OBJECT_FINGERPRINT:
+        raise RuntimeError(
+            f"shadow stored object fingerprint {stored_objects!r}, want exactly {EXPECTED_SHADOW_OBJECT_FINGERPRINT!r}"
+        )
+    if (actual := await shadow_object_fingerprint(conn)) != EXPECTED_SHADOW_OBJECT_FINGERPRINT:
+        raise RuntimeError(f"shadow object fingerprint {actual!r}, want exactly {EXPECTED_SHADOW_OBJECT_FINGERPRINT!r}")
+
+
+async def create_shadow_schema(conn: aiosqlite.Connection) -> None:
+    for statement in SHADOW_SCHEMA_DDL.split(";"):
+        if statement := statement.strip():
+            await conn.execute(statement)
+    await conn.execute(f"PRAGMA user_version = {SHADOW_SCHEMA_VERSION}")
+    if (actual := await shadow_object_fingerprint(conn)) != EXPECTED_SHADOW_OBJECT_FINGERPRINT:
+        raise RuntimeError(f"shadow object fingerprint {actual!r}, want exactly {EXPECTED_SHADOW_OBJECT_FINGERPRINT!r}")
+    await conn.execute(
+        "INSERT INTO cc_steer_shadow_schema_v1"
+        "(id, component, schema_version, ddl_fingerprint, object_fingerprint) VALUES(1, ?, 1, ?, ?)",
+        (SHADOW_SCHEMA_COMPONENT, EXPECTED_SHADOW_DDL_FINGERPRINT, EXPECTED_SHADOW_OBJECT_FINGERPRINT),
+    )
+
+
+def _authorize_exact_shadow_schema(
+    action: int,
+    argument1: str | None,
+    argument2: str | None,
+    database: str | None,
+    _source: str | None,
+) -> int:
+    if action == sqlite3.SQLITE_ATTACH:
+        return sqlite3.SQLITE_DENY
+    if database == "main":
+        if action in _SCHEMA_DDL_ACTIONS:
+            return sqlite3.SQLITE_DENY
+        if action in _SCHEMA_DML_ACTIONS and (argument1 or "").casefold() in _PROTECTED_SCHEMA_TABLES:
+            return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_PRAGMA and argument2 is not None and (argument1 or "").casefold() in _PROTECTED_PRAGMAS:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+async def open_shadow_sqlite(path: Path) -> aiosqlite.Connection:
+    if shadow_ddl_fingerprint() != EXPECTED_SHADOW_DDL_FINGERPRINT:
+        raise RuntimeError(
+            f"shadow compiled DDL fingerprint {shadow_ddl_fingerprint()!r}, "
+            f"want exactly {EXPECTED_SHADOW_DDL_FINGERPRINT!r}"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = await aiosqlite.connect(str(path), isolation_level=None)
+    conn.row_factory = aiosqlite.Row
+    await conn.execute("PRAGMA busy_timeout=2000")
+    committed = False
+    created = False
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+        version = int((await _required_row(conn, "PRAGMA user_version"))[0])
+        row = await _required_row(
+            conn,
+            "SELECT count(*) FROM sqlite_schema "
+            "WHERE type IN ('table', 'index', 'trigger', 'view') "
+            "AND lower(substr(name, 1, 7)) <> 'sqlite_'",
+        )
+        created = version == 0 and int(row[0]) == 0
+        await (create_shadow_schema(conn) if created else verify_shadow_schema(conn))
+        await conn.execute("COMMIT")
+        committed = True
+    finally:
+        if not committed:
+            if conn.in_transaction:
+                await conn.execute("ROLLBACK")
+            await conn.close()
+    if created:
+        path.chmod(0o600)
+    mode = str((await _required_row(conn, "PRAGMA journal_mode=WAL"))[0])
+    if mode != "wal":
+        await conn.close()
+        raise RuntimeError(f"enable shadow WAL: mode {mode!r}")
+    await conn.set_authorizer(_authorize_exact_shadow_schema)
+    return conn
 
 
 class SteerDelivery(Protocol):
@@ -124,14 +303,7 @@ class ShadowDelivery:
     async def open(cls, path: Path | None = None) -> Self:
         """Opens (creating if needed) the shadow ledger at ``path``."""
         target = path or cls.default_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        conn = await aiosqlite.connect(str(target), isolation_level=None)
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA busy_timeout=2000")
-        await conn.executescript(SHADOW_DDL + SCORED_MOMENTS_DDL)
-        await ensure_columns(conn)
-        return cls(conn)
+        return cls(await open_shadow_sqlite(target))
 
     async def close(self) -> None:
         """Closes the underlying connection."""

@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 import aiosqlite
 from cc_transcript.parser import parse
 
-from cc_steer.watcher.delivery import SCORED_MOMENTS_DDL, SHADOW_DDL
+from cc_steer.watcher.delivery import open_shadow_sqlite
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -62,22 +62,6 @@ DEFAULT_TTL_MINUTES = 60
 
 State = Literal["queued", "delivered", "holdout", "mirror", "expired", "suppressed_budget", "suppressed_invalid"]
 
-DELIVERIES_DDL = """
-CREATE TABLE IF NOT EXISTS deliveries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  proposal_id INTEGER NOT NULL,
-  session_id TEXT NOT NULL,
-  project TEXT,
-  ts TEXT NOT NULL,
-  mode TEXT NOT NULL,
-  ttl TEXT NOT NULL,
-  holdout INTEGER NOT NULL,
-  state TEXT NOT NULL,
-  decided_at TEXT,
-  UNIQUE(proposal_id)
-);
-"""
-
 INSERT_DELIVERY = """
 INSERT OR IGNORE INTO deliveries (proposal_id, session_id, project, ts, mode, ttl, holdout, state)
 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')
@@ -87,20 +71,6 @@ ReactionKind = Literal["accepted", "edited", "diverged", "dismissed", "ignored",
 ReactionSource = Literal["cli_verb", "scan_inferred"]
 
 POSITIVE_REACTIONS: frozenset[str] = frozenset({"accepted", "edited", "diverged"})
-
-REACTIONS_DDL = """
-CREATE TABLE IF NOT EXISTS reactions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  proposal_id INTEGER NOT NULL,
-  delivery_id INTEGER,
-  kind TEXT NOT NULL,
-  source TEXT NOT NULL,
-  feedback_dedup_key TEXT,
-  similarity REAL,
-  ts TEXT NOT NULL,
-  UNIQUE(proposal_id)
-);
-"""
 
 UPSERT_REACTION = """
 INSERT INTO reactions (proposal_id, delivery_id, kind, source, feedback_dedup_key, similarity, ts)
@@ -357,13 +327,7 @@ class MailboxDelivery:
     async def open(cls, path: Path | None = None, *, config: LiveConfig) -> Self:
         """Opens (creating if needed) the shared ledger and ensures both tables exist."""
         target = path or shadow_db_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        conn = await aiosqlite.connect(str(target), isolation_level=None)
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA busy_timeout=2000")
-        await conn.executescript(SHADOW_DDL + SCORED_MOMENTS_DDL + DELIVERIES_DDL + REACTIONS_DDL)
-        return cls(conn, config)
+        return cls(await open_shadow_sqlite(target), config)
 
     async def close(self) -> None:
         await self.conn.close()
