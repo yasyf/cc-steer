@@ -5,11 +5,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from cc_transcript.activity import SessionActivity
-from cc_steer.capture import capture_window
-from cc_transcript.ids import SessionId
-from cc_transcript.mining.sampling import fold_trigger, turn_anchor
+from cc_transcript.filterspec import event_meta
+from cc_transcript.ids import EventRef, SessionId
+from cc_transcript.mining.sampling import fold_trigger
 from cc_transcript.watch import WatchEvent
 
+from cc_steer.capture import capture_window
 from cc_steer.watcher.daemon import Watcher, session_cwd
 from tests.builders import assistant_text, mode_entry, parse, user_text
 from tests.test_delivery import make_proposal
@@ -86,8 +87,8 @@ async def test_live_window_is_byte_compatible_with_training_capture() -> None:
     watcher.ingest(watch_events(entries(8)), now=0.0)
     await watcher.evaluate_session(SESSION)
     activity = SessionActivity.from_events(SessionId(SESSION), parse(entries(8)))
-    anchor = turn_anchor(activity.turns[6])
-    assert anchor is not None
+    meta = next(meta for event in activity.turns[6].events if (meta := event_meta(event)) is not None)
+    anchor = EventRef(SessionId(SESSION), meta.uuid)
     expected = fold_trigger(capture_window(activity, anchor, before=6, after=0, preview_chars=200), keep=6)
     assert cascade.calls[0][3].to_json() == expected.to_json()
 

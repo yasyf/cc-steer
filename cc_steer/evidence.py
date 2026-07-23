@@ -38,14 +38,6 @@ BM25_LIMIT = 50
 BUSY_TIMEOUT_MS = 2_000
 WORD = re.compile(r"\w+")
 
-EVIDENCE_DDL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
-  verbatim, direction, evidence,
-  category UNINDEXED, repo UNINDEXED, source UNINDEXED
-);
-CREATE TABLE IF NOT EXISTS evidence_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-"""
-
 STALENESS_QUERY = (
     "SELECT (SELECT COUNT(*) FROM refined_pairs) AS n, (SELECT COALESCE(MAX(id), 0) FROM feedback_events) AS m"
 )
@@ -206,7 +198,6 @@ async def search(
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     try:
-        conn.executescript(EVIDENCE_DDL)
         log = await open_corrections()
         try:
             key = await staleness_key(conn, log)

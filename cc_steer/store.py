@@ -39,10 +39,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ACCRUED_EMPTY_REASON",
-    "GATE_DDL",
-    "REFINE_DDL",
     "ContextRebuildChanges",
     "FeedbackStore",
+    "STEER_SCHEMA",
+    "STEER_SCHEMA_DDL",
     "Stats",
     "TriageStats",
     "event_row",
@@ -80,8 +80,46 @@ UPDATE feedback_events SET quarantined_reason = ?
 WHERE dedup_key = ? AND {QUARANTINE_ELIGIBLE}
 """
 
-TRIAGE_VIEWS_DDL = """DROP VIEW IF EXISTS training_pairs;
-DROP VIEW IF EXISTS latest_judge;
+STEER_SCHEMA_DDL = """CREATE TABLE files (
+  path TEXT PRIMARY KEY,
+  mtime REAL NOT NULL
+);
+CREATE TABLE feedback_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key TEXT NOT NULL UNIQUE,
+  source_kind TEXT NOT NULL,
+  session_id TEXT,
+  event_uuid TEXT,
+  occurred_at TEXT NOT NULL,
+  text TEXT NOT NULL,
+  payload_json TEXT,
+  context_json TEXT NOT NULL,
+  cc_version TEXT,
+  ingested_at TEXT NOT NULL,
+  origin_path TEXT,
+  quarantined_reason TEXT,
+  import_source TEXT,
+  import_batch TEXT
+);
+CREATE INDEX idx_feedback_source ON feedback_events(source_kind);
+CREATE INDEX idx_feedback_session ON feedback_events(session_id);
+CREATE TABLE triage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
+  role TEXT NOT NULL,
+  prompt_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  category TEXT NOT NULL,
+  is_steering INTEGER NOT NULL,
+  what_claude_did TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  rationale TEXT NOT NULL,
+  canonical_key TEXT,
+  fidelity TEXT NOT NULL CHECK(fidelity IN ('full','summary')),
+  judged_at TEXT NOT NULL,
+  UNIQUE(dedup_key, role, prompt_version)
+);
+CREATE INDEX idx_triage_dedup ON triage(dedup_key);
 CREATE VIEW latest_judge AS
 SELECT * FROM (
   SELECT t.*, ROW_NUMBER() OVER (
@@ -90,7 +128,6 @@ SELECT * FROM (
   FROM triage t
   WHERE t.role = 'judge'
 ) WHERE rn = 1;
-DROP VIEW IF EXISTS latest_auditor;
 CREATE VIEW latest_auditor AS
 SELECT * FROM (
   SELECT t.*, ROW_NUMBER() OVER (
@@ -99,7 +136,6 @@ SELECT * FROM (
   FROM triage t
   WHERE t.role = 'auditor'
 ) WHERE rn = 1;
-DROP VIEW IF EXISTS accepted_steering;
 CREATE VIEW accepted_steering AS
 SELECT
   e.id AS event_id,
@@ -114,10 +150,7 @@ SELECT
 FROM feedback_events e
 JOIN latest_judge t ON t.dedup_key = e.dedup_key
 WHERE t.is_steering = 1 AND e.quarantined_reason IS NULL;
-"""
-
-REFINE_DDL = """
-CREATE TABLE IF NOT EXISTS refinement (
+CREATE TABLE refinement (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
   prompt_version INTEGER NOT NULL,
@@ -129,8 +162,7 @@ CREATE TABLE IF NOT EXISTS refinement (
   refined_at TEXT NOT NULL,
   UNIQUE(dedup_key, prompt_version, model, pair_index)
 );
-CREATE INDEX IF NOT EXISTS idx_refinement_dedup ON refinement(dedup_key);
-DROP VIEW IF EXISTS latest_refinement;
+CREATE INDEX idx_refinement_dedup ON refinement(dedup_key);
 CREATE VIEW latest_refinement AS
 WITH gens AS (
   SELECT dedup_key, prompt_version, model, refined_at,
@@ -143,7 +175,6 @@ SELECT r.*
 FROM refinement r
 JOIN gens ON gens.dedup_key = r.dedup_key AND gens.prompt_version = r.prompt_version
          AND gens.model = r.model AND gens.refined_at = r.refined_at AND gens.g = 1;
-DROP VIEW IF EXISTS refined_pairs;
 CREATE VIEW refined_pairs AS
 SELECT
   e.id AS event_id,
@@ -165,16 +196,7 @@ FROM latest_refinement r
 JOIN feedback_events e ON e.dedup_key = r.dedup_key
 JOIN accepted_steering ap ON ap.dedup_key = r.dedup_key
 ORDER BY e.id, r.pair_index;
-"""
-
-INSERT_REFINEMENT = """
-INSERT OR IGNORE INTO refinement (
-  dedup_key, prompt_version, model, pair_index, action, direction_verbatim, direction, refined_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-"""
-
-GATE_DDL = """
-CREATE TABLE IF NOT EXISTS gate_sample (
+CREATE TABLE gate_sample (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sample_key TEXT NOT NULL UNIQUE,
   kind TEXT NOT NULL,
@@ -187,13 +209,13 @@ CREATE TABLE IF NOT EXISTS gate_sample (
   seed INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_gate_sample_kind ON gate_sample(kind);
-CREATE INDEX IF NOT EXISTS idx_gate_sample_session ON gate_sample(session_id);
-CREATE TABLE IF NOT EXISTS sampled_session (
+CREATE INDEX idx_gate_sample_kind ON gate_sample(kind);
+CREATE INDEX idx_gate_sample_session ON gate_sample(session_id);
+CREATE TABLE sampled_session (
   session_id TEXT PRIMARY KEY,
   sampled_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS exemplar_embedding (
+CREATE TABLE exemplar_embedding (
   dedup_key TEXT NOT NULL REFERENCES feedback_events(dedup_key),
   model TEXT NOT NULL,
   text_digest TEXT NOT NULL,
@@ -202,6 +224,17 @@ CREATE TABLE IF NOT EXISTS exemplar_embedding (
   created_at TEXT NOT NULL,
   UNIQUE(dedup_key, model)
 );
+CREATE VIRTUAL TABLE evidence_fts USING fts5(
+  verbatim, direction, evidence,
+  category UNINDEXED, repo UNINDEXED, source UNINDEXED
+);
+CREATE TABLE evidence_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+INSERT_REFINEMENT = """
+INSERT OR IGNORE INTO refinement (
+  dedup_key, prompt_version, model, pair_index, action, direction_verbatim, direction, refined_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 INSERT_GATE_SAMPLE = """
@@ -281,8 +314,9 @@ FROM refined_pairs
 ORDER BY event_id, pair_index"""
 
 STEER_SCHEMA = StoreSchema(
-    extra_ddl=(TRIAGE_VIEWS_DDL, REFINE_DDL, GATE_DDL),
-    event_columns=("origin_path TEXT", "quarantined_reason TEXT"),
+    identity="cc-steer-feedback",
+    ddl=STEER_SCHEMA_DDL,
+    event_columns=("origin_path", "quarantined_reason"),
     verdict_table="triage",
     accepted_column="is_steering",
     summary_column="what_claude_did",
@@ -358,12 +392,27 @@ class FeedbackStore:
     @classmethod
     async def open(cls, path: Path) -> Self:
         """Opens (creating if needed) the feedback database at ``path``."""
-        return cls(await BaseFeedbackStore.open(path, STEER_SCHEMA, busy_timeout_ms=BUSY_TIMEOUT_MS))
+        return cls(
+            await BaseFeedbackStore.open(
+                path,
+                schema=STEER_SCHEMA,
+                extensions=(),
+                busy_timeout_ms=BUSY_TIMEOUT_MS,
+            )
+        )
 
     @classmethod
     async def open_readonly(cls, path: Path) -> Self:
         """Opens an existing feedback database without schema or data writes."""
-        return cls(await BaseFeedbackStore.open(path, STEER_SCHEMA, readonly=True, busy_timeout_ms=BUSY_TIMEOUT_MS))
+        return cls(
+            await BaseFeedbackStore.open(
+                path,
+                schema=STEER_SCHEMA,
+                extensions=(),
+                readonly=True,
+                busy_timeout_ms=BUSY_TIMEOUT_MS,
+            )
+        )
 
     async def close(self) -> None:
         """Closes the underlying connection; a second close is a no-op."""

@@ -8,14 +8,13 @@ import pytest
 from cc_transcript.context import ContextWindow, TurnRef
 from cc_transcript.corrections import Correction, CorrectionLog
 from cc_transcript.ids import EventRef, EventUuid, SessionId
-from cc_transcript.mining import FEEDBACK_DDL as BASE_FEEDBACK_DDL
 from cc_transcript.mining import DedupKey
 
 from cc_steer.detectors import detect
 from cc_steer.negatives import GateSample
 from cc_steer.refine import RefinedPair, Refinement
 from cc_steer.rendering import has_substantive_content, messages
-from cc_steer.store import ACCRUED_EMPTY_REASON, FeedbackStore
+from cc_steer.store import ACCRUED_EMPTY_REASON, STEER_SCHEMA, STEER_SCHEMA_DDL, FeedbackStore
 from cc_steer.triage import JUDGE, Verdict
 from tests.builders import assistant_tool_use, denial_result, interrupt_result, parse, user_text
 
@@ -28,6 +27,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.anyio
 
 FILE = "/repo/projects/session.jsonl"
+
 
 async def test_composed_triage_schema_pins_the_steer_verdict_columns(store: FeedbackStore) -> None:
     # Pins the engine's verdict tier under cc-steer's column names, off the live schema.
@@ -53,19 +53,52 @@ async def test_composed_triage_schema_pins_the_steer_verdict_columns(store: Feed
 
 async def test_feedback_events_carries_the_steer_columns(store: FeedbackStore) -> None:
     columns = {str(row["name"]) for row in await store.sql("PRAGMA table_info(feedback_events)")}
-    assert {"origin_path", "quarantined_reason"} <= columns
+    assert {"origin_path", "quarantined_reason", "import_source", "import_batch"} <= columns
 
 
-async def test_open_extends_an_existing_database_and_sets_busy_timeout(tmp_path: Path) -> None:
+async def test_open_rejects_an_existing_foreign_schema_without_altering_objects(tmp_path: Path) -> None:
     database = tmp_path / "legacy.db"
     legacy = sqlite3.connect(database)
-    legacy.executescript(BASE_FEEDBACK_DDL)
+    legacy.execute("CREATE TABLE legacy_feedback(id INTEGER PRIMARY KEY)")
+    before = legacy.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name, tbl_name"
+    ).fetchall()
     legacy.close()
-    async with await FeedbackStore.open(database) as upgraded:
-        columns = {str(row["name"]) for row in await upgraded.sql("PRAGMA table_info(feedback_events)")}
-        [timeout] = await upgraded.sql("PRAGMA busy_timeout")
-    assert {"origin_path", "quarantined_reason"} <= columns
+
+    with pytest.raises(sqlite3.DatabaseError, match="schema"):
+        await FeedbackStore.open(database)
+
+    verify = sqlite3.connect(database)
+    after = verify.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name, tbl_name"
+    ).fetchall()
+    verify.close()
+    assert after == before
+
+
+async def test_open_sets_busy_timeout_on_a_fresh_exact_store(tmp_path: Path) -> None:
+    async with await FeedbackStore.open(tmp_path / "feedback.db") as store:
+        [timeout] = await store.sql("PRAGMA busy_timeout")
     assert timeout["timeout"] == 2_000
+
+
+def test_schema_is_one_complete_exact_v1_definition() -> None:
+    assert STEER_SCHEMA.identity == "cc-steer-feedback"
+    assert STEER_SCHEMA.ddl == STEER_SCHEMA_DDL
+    assert STEER_SCHEMA.event_columns == ("origin_path", "quarantined_reason")
+    normalized = STEER_SCHEMA_DDL.upper()
+    assert "IF NOT EXISTS" not in normalized
+    assert "ALTER TABLE" not in normalized
+    assert "DROP TABLE" not in normalized
+    assert "DROP VIEW" not in normalized
+
+
+async def test_runtime_schema_mutation_is_rejected(store: FeedbackStore) -> None:
+    with pytest.raises(sqlite3.DatabaseError):
+        await store.execute("CREATE TABLE forbidden_runtime_state(id INTEGER PRIMARY KEY)")
+    assert not await store.sql(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'forbidden_runtime_state'"
+    )
 
 
 async def test_open_readonly_performs_no_schema_or_data_writes(tmp_path: Path) -> None:
@@ -151,9 +184,7 @@ async def test_record_file_scan_quarantines_empty_context_at_accrual(store: Feed
 @pytest.mark.integration
 async def test_record_file_scan_does_not_quarantine_an_existing_healthy_duplicate(store: FeedbackStore) -> None:
     substantive = next(
-        candidate
-        for candidate in sample_candidates()
-        if has_substantive_content(messages(candidate.window.before))
+        candidate for candidate in sample_candidates() if has_substantive_content(messages(candidate.window.before))
     )
     await store.record_file_scan(FILE, 1.0, [substantive])
     [existing] = await store.sql(
@@ -173,9 +204,7 @@ async def test_record_file_scan_does_not_quarantine_an_existing_healthy_duplicat
 @pytest.mark.integration
 async def test_record_file_scan_does_not_heal_an_existing_empty_duplicate(store: FeedbackStore) -> None:
     substantive = next(
-        candidate
-        for candidate in sample_candidates()
-        if has_substantive_content(messages(candidate.window.before))
+        candidate for candidate in sample_candidates() if has_substantive_content(messages(candidate.window.before))
     )
     empty = replace(substantive, window=replace(substantive.window, before=()))
     await store.record_file_scan(FILE, 1.0, [empty])

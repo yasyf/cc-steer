@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from random import Random
 from typing import TYPE_CHECKING
 
 import pytest
 from cc_transcript.context import SUMMARY_LABEL
 from cc_transcript.judge import JudgeError, sample_audit
-from cc_transcript.judge.verdicts import stratified
 
 from cc_steer.detectors import detect
 from cc_steer.triage import (
@@ -284,7 +282,16 @@ def test_stratified_honors_kind_quotas_and_oversample_split() -> None:
         + [judged_row(f"p{i}", "plan_review", confidence=i / 20) for i in range(15)]
         + [judged_row(f"t{i}", confidence=i / 100) for i in range(50)]
     )
-    core, oversample = stratified(rows, 40, Random(1), KIND_QUOTAS, REMAINDER_KIND, 0.3)
+    sample = sample_audit(
+        rows,
+        accepts=40,
+        rejects=0,
+        seed=1,
+        quotas=KIND_QUOTAS,
+        remainder_kind=REMAINDER_KIND,
+        oversample_share=0.3,
+    )
+    core, oversample = sample.core, sample.oversample
     by_kind_core = {kind: sum(r["source_kind"] == kind for r in core) for kind in {str(r["source_kind"]) for r in rows}}
     assert by_kind_core["interrupt_rejection"] == 5  # exhaustive
     assert by_kind_core["review_comment"] == 7  # quota 10, 30% oversampled

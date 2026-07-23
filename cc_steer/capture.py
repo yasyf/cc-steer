@@ -28,13 +28,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from cc_transcript.activity import Turn, ToolUse, event_stamps, position_in, result_index
+from cc_transcript.activity import ToolUse, Turn, event_stamps, position_in, result_index
 from cc_transcript.context import ContextWindow, TurnRef
 from cc_transcript.filterspec import event_meta
 from cc_transcript.ids import EventRef
 from cc_transcript.models import AssistantEvent, ToolUseBlock, UserEvent
 from cc_transcript.render import Budget, render_turn
-from cc_transcript.tools import parse_tool_call
+from cc_transcript.tools import edits_of, parse_tool_call
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -81,9 +81,10 @@ def lift_turn(
         tool_uses=tuple(
             ToolUse(
                 ref=EventRef(session_id, event.meta.uuid, block.id),
-                call=parse_tool_call(block.name, block.input, on_error="other"),
+                call=(call := parse_tool_call(block.name, block.input, on_error="other")),
                 result=pair[0] if (pair := results.get(block.id)) is not None else None,
                 result_ts=pair[1] if pair is not None else None,
+                edits=edits_of(call),
                 turn_index=index,
                 ts=event.meta.timestamp,
             )

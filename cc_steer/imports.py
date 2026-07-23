@@ -38,9 +38,6 @@ SESSION_PREFIX = "cc-steer-import-"
 IMPORT_PREVIEW_CHARS = 8_000
 IN_CHUNK = 500
 
-ADD_IMPORT_SOURCE = "ALTER TABLE feedback_events ADD COLUMN import_source TEXT"
-ADD_IMPORT_BATCH = "ALTER TABLE feedback_events ADD COLUMN import_batch TEXT"
-
 INSERT_IMPORT_EVENT = """
 INSERT OR IGNORE INTO feedback_events (
   dedup_key, source_kind, session_id, event_uuid,
@@ -226,14 +223,6 @@ async def existing_keys(db: FeedbackStore, keys: Sequence[DedupKey]) -> set[str]
     return found
 
 
-async def ensure_import_columns(db: FeedbackStore) -> None:
-    columns = {str(row["name"]) for row in await db.sql("PRAGMA table_info(feedback_events)")}
-    if "import_source" not in columns:
-        await db.execute(ADD_IMPORT_SOURCE)
-    if "import_batch" not in columns:
-        await db.execute(ADD_IMPORT_BATCH)
-
-
 async def import_batch(batch: ImportBatch | Path, *, db: FeedbackStore, dry_run: bool = False) -> ImportResult:
     """Ingests a cc-factory decision batch as judged-pair candidates.
 
@@ -269,7 +258,6 @@ async def import_batch(batch: ImportBatch | Path, *, db: FeedbackStore, dry_run:
     )
     if dry_run:
         return result
-    await ensure_import_columns(db)
     ingested_at = now()
     async with db.db.transaction() as conn:
         await conn.executemany(

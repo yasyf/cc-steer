@@ -190,7 +190,7 @@ def live_window(turns: Sequence[Turn]) -> ContextWindow | None:
     The last ``WINDOW_TURNS`` turns fold into ``before`` with no trigger and no
     ``after`` — byte-compatible with ``fold_trigger`` over a training
     ``capture_window`` — and the window anchors on the last turn's first
-    meta-bearing event, exactly like ``turn_anchor``.
+    meta-bearing event, matching the native negative-sampling anchor rule.
 
     Returns:
         The window, or None when the last turn carries no resolvable event.

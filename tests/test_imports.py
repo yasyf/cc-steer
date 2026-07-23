@@ -207,7 +207,7 @@ async def test_dry_run_writes_nothing(store: FeedbackStore) -> None:
 
     assert result.dry_run
     assert len(result.new) == 1
-    assert "import_source" not in await table_columns(store)
+    assert {"import_source", "import_batch"} <= await table_columns(store)
     assert (await fetchall(store, "SELECT COUNT(*) AS n FROM feedback_events"))[0]["n"] == 0
 
     landed = await import_batch(ImportBatch.model_validate(batch_dict()), db=store)
@@ -215,11 +215,8 @@ async def test_dry_run_writes_nothing(store: FeedbackStore) -> None:
     assert (await fetchall(store, "SELECT COUNT(*) AS n FROM feedback_events"))[0]["n"] == 1
 
 
-async def test_import_adds_provenance_columns(store: FeedbackStore) -> None:
-    assert "import_source" not in await table_columns(store)
-    await import_batch(ImportBatch.model_validate(batch_dict()), db=store)
-    columns = await table_columns(store)
-    assert {"import_source", "import_batch"} <= columns
+async def test_import_provenance_columns_are_part_of_the_exact_schema(store: FeedbackStore) -> None:
+    assert {"import_source", "import_batch"} <= await table_columns(store)
 
 
 async def test_import_from_path(store: FeedbackStore, tmp_path: Path) -> None:
